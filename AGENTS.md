@@ -73,4 +73,5 @@ npm run build              # builds the web page
 | "profile already open in another window" | Quit the app's browser window (⌘Q) and retry |
 | Run says a site "looks signed out" but it isn't | Click "I'm already signed in — continue" in Settings |
 | Run stuck waiting for sign-in | The human must sign in in the browser window (agents can't) |
+| Build prints "ESM syntax in a file loaded as CommonJS (vite.config.ts)" | Harmless warning — the build still succeeds. Ignore it. |
 | Port 3000/5173 busy | The app is already running — don't start a second copy |
