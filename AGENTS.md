@@ -31,8 +31,9 @@ node scripts/setup.mjs
 Never ask for, type or store the owner's passwords. Never ask them to paste tokens or keys into chat.
 1. **Sign into ChatGPT, Grok and TikTok** in the app's browser window: Settings → "Make & Post a Video Now" opens the three tabs and waits for sign-in.
 2. **Link the ChatGPT chat** named "Create Mr Apple Videos": Settings → ChatGPT Master Prompt Chat → "Auto-Detect from Sidebar" (or paste its URL).
-3. **Optional daily schedule:** Settings → "Post automatically every day" (videos per day + each time). Turn it on for **one computer only**, or videos double up.
-4. **GitHub push access** (owner account `Lynqcloudpay`): the human must add a collaborator or type a token at the terminal prompt themselves.
+3. **Changing which account a platform uses:** Settings → **Accounts** → "Switch account" for that platform (signs it out, waits for the human to sign in with the other account, then closes the window). "Check logins" refreshes the signed-in/out status. Never sign in for them.
+4. **Optional daily schedule:** Settings → "Post automatically every day" (videos per day + each time). Turn it on for **one computer only**, or videos double up.
+5. **GitHub push access** (owner account `Lynqcloudpay`): the human must add a collaborator or type a token at the terminal prompt themselves.
 
 ## Real-world side effects — don't trigger without being asked
 A run **posts a public video to the owner's TikTok and YouTube** (per Settings) and uses their Grok credits.
@@ -54,6 +55,7 @@ npm run build              # builds the web page
 - **Tests** run against their own database (`npm test` sets `DATABASE_PATH`). Never point tests at `storage/kindred_studio.db`.
 - **No ffmpeg.** The raw Grok video (with its original audio) goes straight to TikTok.
 - **YouTube** is driven through YouTube Studio's upload dialog (`uploadToYouTubeViaBrowser`): it must answer "made for kids" (Settings; default yes — these are kids' videos), picks Public/Unlisted/Private, and saves screenshots to `storage/frames/youtube_*.png`. Studio can show an "unsupported browser" page with a "Skip to YouTube Studio" link (handled). YouTube sign-in is optional: if nobody signs in within 4 minutes the run still posts to TikTok. The browser only closes when every enabled place confirmed the post.
+- **Switching accounts** (`switchAccount` in `jevBrowserAutomation.ts`, orchestrated by `server/engine/accounts.ts`): wipes only that platform's cookies via `context.clearCookies({domain})` (YouTube also clears Google; Grok also clears X) plus site storage, and rewrites `storage/browser_cookies.json` so the old login can't be restored. ChatGPT's saved "Create Mr Apple Videos" chat URL is cleared and re-detected for the new account. It refuses while a video run is in progress, and runs refuse while an account change is in progress.
 - **File pickers:** TikTok's "Upload cover" opens a native Mac file window unless a `filechooser` listener intercepts it. Keep the listeners.
 - **Schedule** = macOS LaunchAgent `com.kindredstudio.daily` → `scripts/dailyRun.ts`. Only scheduled runs use up slots (`storage/schedule_state.json`); log in `storage/logs/daily.log`.
 - The browser window closes by itself after TikTok confirms a post; the next run reopens it and restores saved login cookies.
@@ -63,6 +65,7 @@ npm run build              # builds the web page
 |---|---|
 | `server/engine/jevBrowserAutomation.ts` | All browser steps: login check, ChatGPT, Grok, cover frame, TikTok, cookies |
 | `server/engine/dailyRunner.ts` | One-button run + live status |
+| `server/engine/accounts.ts`, `accountStatus.ts` | Accounts card: check logins / switch a platform's account |
 | `server/engine/publishTargets.ts` | Where to post: TikTok / YouTube, YouTube visibility + kids setting |
 | `server/engine/dailySchedule.ts`, `scripts/dailyRun.ts` | Daily schedule (launchd) and its job |
 | `server/routes/api.ts` | REST API (`/api/browser/run`, `/run-status`, `/skip-login`, `/schedule`) |
@@ -71,7 +74,7 @@ npm run build              # builds the web page
 
 ## Git rules (standing instruction from the owner)
 - **After every change: commit and push to `main`** (repo `Lynqcloudpay/browser-app`) in the same turn, once verification passes.
-- **Never commit private files:** `.env`, `storage/browser_profile/`, `storage/browser_cookies.json` (saved logins), `storage/*.db*`, `storage/schedule*.json`, `storage/publish_targets.json`, `storage/logs/`, `.claude/settings.local.json`. They are git-ignored — keep it that way, and scan the diff for keys/tokens before committing.
+- **Never commit private files:** `.env`, `storage/browser_profile/`, `storage/browser_cookies.json` (saved logins), `storage/*.db*`, `storage/schedule*.json`, `storage/publish_targets.json`, `storage/account_status.json`, `storage/logs/`, `.claude/settings.local.json`. They are git-ignored — keep it that way, and scan the diff for keys/tokens before committing.
 - Write a clear message explaining *why*. End it with the attribution line your tool requires.
 
 ## Troubleshooting

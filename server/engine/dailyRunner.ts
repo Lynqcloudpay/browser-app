@@ -1,5 +1,6 @@
 import db from '../db/database';
 import JevBrowserAgent from './jevBrowserAutomation';
+import { isAccountOpBusy } from './accounts';
 
 /**
  * One entry point for "make and post a video", used by the Run button, the /api, and the daily scheduled job.
@@ -92,6 +93,10 @@ export function startRun(
 ): { started: boolean; reason?: string } {
   if (status.state === 'running' || status.state === 'waiting_login') {
     return { started: false, reason: 'A video is already being produced. Wait for it to finish.' };
+  }
+
+  if (isAccountOpBusy()) {
+    return { started: false, reason: 'An account change is in progress. Finish it first (Settings → Accounts).' };
   }
 
   const settings = db.prepare('SELECT * FROM settings WHERE id = 1').get() as any;

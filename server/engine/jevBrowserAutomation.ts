@@ -13,6 +13,7 @@ import GrokVideoGenerator from './xaiVideoGenerator';
 import KidsSafetyQAInspector from './qaInspector';
 import BufferTikTokPublisher from './bufferPublisher';
 import { getPublishTargets, PublishTargets } from './publishTargets';
+import { ACCOUNT_KEYS, AccountKey, recordAccountStatus } from './accountStatus';
 
 export interface BrowserJobResult {
   success: boolean;
@@ -1570,10 +1571,10 @@ export class JevBrowserAgent {
    * We save every cookie after a successful login check / run and put the missing ones back on the next launch,
    * so unattended daily runs stay signed in. The file is private to this user (chmod 600) and git-ignored.
    */
-  public static async saveCookies(context: BrowserContext): Promise<void> {
+  public static async saveCookies(context: BrowserContext, allowEmpty = false): Promise<void> {
     try {
       const cookies = await context.cookies();
-      if (cookies.length === 0) return;
+      if (cookies.length === 0 && !allowEmpty) return;
       fs.writeFileSync(this.cookiesFile, JSON.stringify(cookies), { mode: 0o600 });
       fs.chmodSync(this.cookiesFile, 0o600);
     } catch (err: any) {
@@ -1725,6 +1726,7 @@ export class JevBrowserAgent {
         st = await this.siteLoginState(page, site.key);
       }
       console.log(`[JevBrowserAgent] ${site.name} login check: ${st.state} (${st.why})`);
+      recordAccountStatus(site.key, st.state);
       if (st.state !== 'out') continue;
 
       await page.screenshot({ path: path.join(framesDir, `login_wait_${site.key}.png`) }).catch(() => {});
@@ -1763,11 +1765,156 @@ export class JevBrowserAgent {
       }
       if (!ok) throw new Error(`${site.name} is not signed in. Run again and sign into ${site.name} in the browser window.`);
       say(`${site.name} signed in.`);
+      recordAccountStatus(site.key, 'in');
       await page.waitForTimeout(1500);
       await this.saveCookies(context);
     }
     await this.saveCookies(context);
     return { skipped };
+  }
+
+  // ───────────────────────── Accounts: check / switch ─────────────────────────
+
+  /** Each platform: where to look, and which cookie domains hold its login (these are wiped when switching). */
+  public static readonly ACCOUNT_SITES: Record<AccountKey, { name: string; url: string; host: string; cookieDomains: RegExp }> = {
+    chatgpt: {
+      name: 'ChatGPT',
+      url: 'https://chatgpt.com/',
+      host: 'chatgpt.com',
+      cookieDomains: /(^|\.)(chatgpt\.com|openai\.com)$/i,
+    },
+    grok: {
+      name: 'Grok',
+      url: 'https://grok.com/imagine',
+      host: 'grok.com',
+      cookieDomains: /(^|\.)(grok\.com|x\.ai|grokusercontent\.com|x\.com|twitter\.com)$/i,
+    },
+    tiktok: {
+      name: 'TikTok',
+      url: 'https://www.tiktok.com/tiktokstudio/upload',
+      host: 'tiktok.com',
+      cookieDomains: /(^|\.)(tiktok\.com|tiktokw\.us|tiktokv\.com|tiktokcdn\.com|byteoversea\.com)$/i,
+    },
+    // YouTube signs in with a Google account, so switching it signs the browser out of Google.
+    youtube: {
+      name: 'YouTube',
+      url: 'https://studio.youtube.com/',
+      host: 'youtube.com',
+      cookieDomains: /(^|\.)(youtube\.com|google\.com|googleusercontent\.com|ggpht\.com)$/i,
+    },
+  };
+
+  public static isPipelineRunning(): boolean {
+    return this.pipelineRunning;
+  }
+
+  private static accountCancel = false;
+
+  /** "Cancel" while waiting for a new sign-in. */
+  public static cancelAccountWait(): void {
+    this.accountCancel = true;
+  }
+
+  private static async pageForSite(context: BrowserContext, key: AccountKey): Promise<Page> {
+    const host = this.ACCOUNT_SITES[key].host;
+    return (
+      context.pages().find((p) => !p.isClosed() && p.url().includes(host)) ||
+      context.pages().find((p) => !p.isClosed() && (p.url() === 'about:blank' || p.url().startsWith('chrome://'))) ||
+      (await context.newPage())
+    );
+  }
+
+  /** Read-only: open each platform, record whether it is signed in, then close the browser window. */
+  public static async checkAccounts(say: (step: string) => void): Promise<void> {
+    if (this.pipelineRunning) throw new Error('A video is being made right now. Wait for it to finish first.');
+    const context = await this.launchContext(false);
+    for (const key of ACCOUNT_KEYS) {
+      const cfg = this.ACCOUNT_SITES[key];
+      say(`Checking ${cfg.name}…`);
+      const page = await this.pageForSite(context, key);
+      await page.goto(cfg.url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await page.waitForTimeout(4500);
+      let st = await this.siteLoginState(page, key);
+      if (st.state === 'unknown') {
+        await page.waitForTimeout(5000);
+        st = await this.siteLoginState(page, key);
+      }
+      console.log(`[JevBrowserAgent] ${cfg.name} account check: ${st.state} (${st.why})`);
+      recordAccountStatus(key, st.state);
+    }
+    await this.shutdown();
+  }
+
+  /**
+   * Sign ONE platform out and wait for the operator to sign in with a different account.
+   * 1. wipe that platform's cookies + site storage (and the saved copy, so the old login cannot come back)
+   * 2. show its sign-in page and wait until the new account is signed in
+   * 3. save the new login and close the browser window
+   */
+  public static async switchAccount(key: AccountKey, say: (step: string, kind?: 'running' | 'waiting_login') => void): Promise<string> {
+    if (this.pipelineRunning) throw new Error('A video is being made right now. Wait for it to finish, then switch accounts.');
+    const cfg = this.ACCOUNT_SITES[key];
+    this.accountCancel = false;
+    const context = await this.launchContext(false);
+    const page = await this.pageForSite(context, key);
+    await page.bringToFront().catch(() => {});
+
+    // 1. Sign out.
+    say(`Signing out of ${cfg.name}…`);
+    await page.goto(cfg.url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await page
+      .evaluate(`(async () => {
+        try { localStorage.clear(); sessionStorage.clear(); } catch (e) {}
+        try { const dbs = (await indexedDB.databases?.()) || []; for (const d of dbs) if (d.name) indexedDB.deleteDatabase(d.name); } catch (e) {}
+      })()`)
+      .catch(() => {});
+    await context.clearCookies({ domain: cfg.cookieDomains });
+    await this.saveCookies(context, true);
+    recordAccountStatus(key, 'out');
+    if (key === 'chatgpt') {
+      // The "Create Mr Apple Videos" chat belongs to the OLD account; it is re-detected for the new one below.
+      db.prepare("UPDATE settings SET chatgpt_chat_url = '', updated_at = CURRENT_TIMESTAMP WHERE id = 1").run();
+    }
+
+    // 2. Wait for the new sign-in.
+    await page.goto(cfg.url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(3000);
+    await page.bringToFront().catch(() => {});
+    say(`Sign into the account you want to use for ${cfg.name} in the browser window. It closes by itself when you're done.`, 'waiting_login');
+    console.log(`[JevBrowserAgent] Waiting for a new ${cfg.name} sign-in...`);
+
+    const deadline = Date.now() + 10 * 60 * 1000;
+    let signedIn = false;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 3000));
+      if (this.accountCancel) throw new Error(`Cancelled. ${cfg.name} is signed out — sign in again before the next run.`);
+      if (page.isClosed()) throw new Error(`The browser window was closed before ${cfg.name} was signed in.`);
+      if ((await this.siteLoginState(page, key)).state === 'in') {
+        signedIn = true;
+        break;
+      }
+    }
+    if (!signedIn) throw new Error(`Timed out waiting for the ${cfg.name} sign-in. ${cfg.name} is signed out — try again.`);
+
+    // 3. Save the new login.
+    await page.waitForTimeout(2500);
+    await this.saveCookies(context);
+    recordAccountStatus(key, 'in');
+
+    let note = '';
+    if (key === 'chatgpt') {
+      say('Looking for your "Create Mr Apple Videos" chat in this account…');
+      await page.waitForTimeout(3000);
+      const found = await this.locateMrAppleConversation(page).catch(() => null);
+      if (found?.url) {
+        this.saveChatGptUrl(found.url);
+        note = ` Linked your chat "${found.title}".`;
+      } else {
+        note = ' I could not find a pinned "Create Mr Apple Videos" chat in this account — create it (or pin it), then use Settings → Auto-Detect from Sidebar.';
+      }
+    }
+    await this.shutdown();
+    return `${cfg.name} now uses the new account.${note}`;
   }
 
   // ───────────────────────── Cover image: a different frame for every video ─────────────────────────

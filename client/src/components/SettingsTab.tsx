@@ -52,6 +52,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const [savingSettings, setSavingSettings] = useState(false);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
   const [runStatus, setRunStatus] = useState<any>({ state: 'idle', step: '' });
+  const [accounts, setAccounts] = useState<any>(null);
+  const accountBusy = accounts?.op?.state === 'working' || accounts?.op?.state === 'waiting_login';
   const [targets, setTargets] = useState<any>(null);
   const [targetsMsg, setTargetsMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [schedule, setSchedule] = useState<any>(null);
@@ -87,6 +89,35 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       })
       .catch(() => {});
   }, []);
+
+  // Account list + live progress of "Switch account" / "Check logins".
+  useEffect(() => {
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const a = await safeFetchJson('/api/accounts');
+        if (!stopped) setAccounts(a);
+      } catch {
+        /* server restarting */
+      }
+    };
+    tick();
+    const id = setInterval(tick, 2500);
+    return () => {
+      stopped = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  const startAccountOp = async (url: string) => {
+    try {
+      const a = await safeFetchJson(url, { method: 'POST', body: JSON.stringify({}) });
+      if (a.sites) setAccounts(a);
+      else setAccounts((prev: any) => ({ ...(prev || {}), op: { state: 'error', step: a.error || 'Could not start.' } }));
+    } catch (e: any) {
+      setAccounts((prev: any) => ({ ...(prev || {}), op: { state: 'error', step: e.message } }));
+    }
+  };
 
   useEffect(() => {
     safeFetchJson('/api/publish-targets')
@@ -334,6 +365,101 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                   className="ml-auto shrink-0 px-3 py-1.5 bg-sky-500 hover:bg-sky-400 text-slate-950 text-[11px] font-bold rounded-lg cursor-pointer"
                 >
                   I'm already signed in — continue
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Accounts */}
+        <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 text-xs space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <Key className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <h5 className="font-bold text-slate-200">Accounts</h5>
+                <p className="text-slate-400 leading-relaxed text-[11px]">
+                  Change which account each platform uses. <strong>Switch account</strong> opens the browser on just that platform,
+                  signs it out, and waits while you sign in with the other account — then it closes the window and remembers it.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={accountBusy || runBusy}
+              onClick={() => startAccountOp('/api/accounts/check')}
+              className="shrink-0 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-[11px] font-bold text-slate-300 rounded-lg border border-slate-700 transition cursor-pointer disabled:cursor-not-allowed"
+            >
+              Check logins
+            </button>
+          </div>
+
+          <div className="pt-2 border-t border-slate-800/80 space-y-2">
+            {(accounts?.sites || []).map((site: any) => (
+              <div key={site.key} className="flex flex-wrap items-center justify-between gap-2 bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-2">
+                <div className="flex items-center gap-3">
+                  <span className="font-semibold text-slate-200 w-20">{site.name}</span>
+                  <span
+                    className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
+                      site.state === 'in'
+                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                        : site.state === 'out'
+                        ? 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                        : 'bg-slate-700/40 text-slate-400 border-slate-600/50'
+                    }`}
+                  >
+                    {site.state === 'in' ? 'Signed in' : site.state === 'out' ? 'Signed out' : 'Not checked'}
+                  </span>
+                  {site.checkedAt && (
+                    <span className="text-[10px] text-slate-500">{new Date(site.checkedAt).toLocaleString()}</span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  disabled={accountBusy || runBusy}
+                  onClick={() => {
+                    const extra =
+                      site.key === 'youtube'
+                        ? ' This also signs the browser out of Google.'
+                        : site.key === 'chatgpt'
+                        ? ' Your "Create Mr Apple Videos" chat is re-detected for the new account.'
+                        : '';
+                    if (window.confirm(`Switch the ${site.name} account? It will be signed out, then you sign in with the other account.${extra}`)) {
+                      startAccountOp(`/api/accounts/${site.key}/switch`);
+                    }
+                  }}
+                  className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-[11px] font-bold rounded-lg transition cursor-pointer disabled:cursor-not-allowed"
+                >
+                  Switch account
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {accounts?.op && accounts.op.state !== 'idle' && (
+            <div
+              className={`p-3 rounded-xl text-xs flex items-start gap-2 ${
+                accounts.op.state === 'done'
+                  ? 'bg-emerald-950/40 border border-emerald-800/80 text-emerald-300'
+                  : accounts.op.state === 'error'
+                  ? 'bg-rose-950/40 border border-rose-800/80 text-rose-300'
+                  : accounts.op.state === 'waiting_login'
+                  ? 'bg-sky-950/40 border border-sky-700/80 text-sky-200'
+                  : 'bg-amber-950/40 border border-amber-800/80 text-amber-300'
+              }`}
+            >
+              <span>
+                {accounts.op.state === 'waiting_login' && <strong>Sign-in needed — </strong>}
+                {accounts.op.state === 'error' && <strong>Stopped — </strong>}
+                {accounts.op.step}
+              </span>
+              {accounts.op.state === 'waiting_login' && (
+                <button
+                  type="button"
+                  onClick={() => safeFetchJson('/api/accounts/cancel', { method: 'POST' }).catch(() => {})}
+                  className="ml-auto shrink-0 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-bold rounded-lg border border-slate-600 cursor-pointer"
+                >
+                  Cancel
                 </button>
               )}
             </div>

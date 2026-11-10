@@ -7,6 +7,8 @@ import db, { resetContentCatalog } from '../db/database';
 import { startRun, getRunStatus } from '../engine/dailyRunner';
 import { getSchedule, setSchedule } from '../engine/dailySchedule';
 import { getPublishTargets, setPublishTargets } from '../engine/publishTargets';
+import { getAccountsOverview, startCheck, startSwitch, cancelAccountOp } from '../engine/accounts';
+import { AccountKey } from '../engine/accountStatus';
 import ProductionWorker from '../engine/worker';
 import MonetizationEngine from '../engine/monetizationEngine';
 import Scheduler from '../engine/scheduler';
@@ -430,6 +432,28 @@ apiRouter.post('/browser/skip-login', (req, res) => {
 
 apiRouter.get('/browser/run-status', (req, res) => {
   res.json(getRunStatus());
+});
+
+// Accounts: see which platforms are signed in, and switch each one to a different account.
+apiRouter.get('/accounts', (req, res) => {
+  res.json(getAccountsOverview());
+});
+
+apiRouter.post('/accounts/check', (req, res) => {
+  const r = startCheck();
+  if (!r.started) return res.status(409).json({ error: r.reason, ...getAccountsOverview() });
+  res.status(202).json(getAccountsOverview());
+});
+
+apiRouter.post('/accounts/cancel', (req, res) => {
+  cancelAccountOp();
+  res.json({ success: true });
+});
+
+apiRouter.post('/accounts/:site/switch', (req, res) => {
+  const r = startSwitch(req.params.site as AccountKey);
+  if (!r.started) return res.status(409).json({ error: r.reason, ...getAccountsOverview() });
+  res.status(202).json(getAccountsOverview());
 });
 
 // Where videos are posted (TikTok / YouTube) and YouTube's audience + visibility choices
