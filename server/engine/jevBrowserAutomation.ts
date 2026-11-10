@@ -273,43 +273,61 @@ export class ChannelBrowserAgent {
   }
 
   /**
-   * Get the active or configured ChatGPT conversation URL.
+   * Get the active or configured ChatGPT conversation URL for this channel.
    */
   public getConfiguredChatGptUrl(): string {
     try {
-      const row = db.prepare('SELECT chatgpt_chat_url FROM settings WHERE id = 1').get() as any;
-      let url = row?.chatgpt_chat_url?.trim() || process.env.CHATGPT_MR_APPLE_URL?.trim() || '';
-      // If it's pointing to the old account's hardcoded conversation ID, discard it
-      if (url.includes('6af2935e-bb8c-83ea-817b-3f4c6bfe7999')) {
-        url = '';
+      const ch = getChannel(this.channelId);
+      if (ch?.chatgpt_chat_url?.trim()) {
+        const u = ch.chatgpt_chat_url.trim();
+        if (this.channelId === 1 && u.includes('6af2935e-bb8c-83ea-817b-3f4c6bfe7999')) {
+          return '';
+        }
+        return u;
       }
-      return url;
+      if (this.channelId === 1) {
+        const row = db.prepare('SELECT chatgpt_chat_url FROM settings WHERE id = 1').get() as any;
+        const legacy = row?.chatgpt_chat_url?.trim() || process.env.CHATGPT_MR_APPLE_URL?.trim() || '';
+        if (legacy && !legacy.includes('6af2935e-bb8c-83ea-817b-3f4c6bfe7999')) {
+          return legacy;
+        }
+      }
+      return '';
     } catch {
       return '';
     }
   }
 
   /**
-   * Save a newly resolved ChatGPT conversation URL to persistent settings.
+   * Save a newly resolved ChatGPT conversation URL to persistent channel settings.
    */
   public saveChatGptUrl(url: string): void {
     if (!url || !url.startsWith('http')) return;
     try {
-      db.prepare('UPDATE settings SET chatgpt_chat_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1').run(url);
-      console.log(`[JevBrowserAgent] Persisted new ChatGPT Mr Apple URL to database: ${url}`);
+      updateChannel(this.channelId, { chatgpt_chat_url: url.trim() });
+      if (this.channelId === 1) {
+        db.prepare('UPDATE settings SET chatgpt_chat_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1').run(url.trim());
+      }
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Persisted new ChatGPT URL for channel ${this.channelId}: ${url.trim()}`);
     } catch (err: any) {
-      console.warn('[JevBrowserAgent] Could not persist ChatGPT URL:', err.message);
+      console.warn(`[ChannelBrowserAgent-${this.channelId}] Could not persist ChatGPT URL:`, err.message);
     }
   }
 
   /**
-   * Search ChatGPT sidebar or search dialog to locate the pinned "Create Mr Apple Videos" conversation.
+   * Search ChatGPT sidebar or search dialog to locate the channel's master prompt conversation.
    */
   public async locateMrAppleConversation(
     page: Page
   ): Promise<{ url: string; title: string } | null> {
     try {
-      console.log('[JevBrowserAgent] Searching ChatGPT for pinned "Create Mr Apple Videos" conversation...');
+      const ch = getChannel(this.channelId);
+      const targetChatName = (ch?.chatgpt_chat_name || (this.channelId === 1 ? 'Create Mr Apple Videos' : (ch?.name || ''))).trim();
+      if (!targetChatName) {
+        console.log(`[ChannelBrowserAgent-${this.channelId}] No chat name configured for channel ${this.channelId}; skipping sidebar search.`);
+        return null;
+      }
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Searching ChatGPT for chat: "${targetChatName}"...`);
 
       // 1. Ensure sidebar is open
       const openSidebarBtn = await page.$(
@@ -318,7 +336,7 @@ export class ChannelBrowserAgent {
       if (openSidebarBtn) {
         const isVisible = await openSidebarBtn.isVisible().catch(() => false);
         if (isVisible) {
-          console.log('[JevBrowserAgent] Opening collapsed sidebar...');
+          console.log(`[ChannelBrowserAgent-${this.channelId}] Opening collapsed sidebar...`);
           await openSidebarBtn.click().catch(() => {});
           await page.waitForTimeout(1000);
         }
@@ -330,24 +348,27 @@ export class ChannelBrowserAgent {
       }).catch(() => null);
 
       // 2. Scan links in DOM
-      const match = await page.evaluate(() => {
+      const match = await page.evaluate((target: string) => {
         const links = Array.from(document.querySelectorAll('a[href*="/c/"]')) as HTMLAnchorElement[];
-
         const normalize = (str: string) => str.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+        const normTarget = normalize(target);
+        const targetWords = normTarget.split(' ').filter((w) => w.length > 2);
 
-        // Pass 1: Look for exact phrase "create mr apple videos" or "create mr apple"
+        // Pass 1: Look for exact phrase match
         for (const a of links) {
           const text = normalize(a.innerText || a.getAttribute('aria-label') || a.title || '');
-          if (text.includes('create mr apple videos') || (text.includes('mr apple') && text.includes('video'))) {
-            return { url: a.href, title: (a.innerText || a.title || 'Create Mr Apple Videos').trim() };
+          if (text.includes(normTarget)) {
+            return { url: a.href, title: (a.innerText || a.title || target).trim() };
           }
         }
 
-        // Pass 2: Look for any "mr apple"
-        for (const a of links) {
-          const text = normalize(a.innerText || a.getAttribute('aria-label') || a.title || '');
-          if (text.includes('mr apple') || text.includes('apple video')) {
-            return { url: a.href, title: (a.innerText || a.title || 'Mr Apple').trim() };
+        // Pass 2: Look for all words matching
+        if (targetWords.length > 0) {
+          for (const a of links) {
+            const text = normalize(a.innerText || a.getAttribute('aria-label') || a.title || '');
+            if (targetWords.every((w) => text.includes(w))) {
+              return { url: a.href, title: (a.innerText || a.title || target).trim() };
+            }
           }
         }
 
@@ -360,7 +381,7 @@ export class ChannelBrowserAgent {
             const pinnedLinks = Array.from(parent.querySelectorAll('a[href*="/c/"]')) as HTMLAnchorElement[];
             for (const a of pinnedLinks) {
               const text = normalize(a.innerText || a.getAttribute('aria-label') || '');
-              if (text.includes('apple') || text.includes('video')) {
+              if (text.includes(normTarget) || (targetWords.length > 0 && targetWords.some((w) => text.includes(w)))) {
                 return { url: a.href, title: a.innerText.trim() };
               }
             }
@@ -368,15 +389,15 @@ export class ChannelBrowserAgent {
         }
 
         return null;
-      });
+      }, targetChatName);
 
       if (match) {
-        console.log(`[JevBrowserAgent] Successfully found chat link in sidebar: "${match.title}" -> ${match.url}`);
+        console.log(`[ChannelBrowserAgent-${this.channelId}] Successfully found chat link in sidebar: "${match.title}" -> ${match.url}`);
         return match;
       }
 
       // 3. Fallback: Try ChatGPT Search Chats (Meta+K / Ctrl+K)
-      console.log('[JevBrowserAgent] Not immediately visible in sidebar. Trying ChatGPT Search dialog (Meta+K)...');
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Not immediately visible in sidebar. Trying ChatGPT Search dialog (Meta+K)...`);
       await page.keyboard.press('Meta+K');
       await page.waitForTimeout(1000);
 
@@ -384,17 +405,17 @@ export class ChannelBrowserAgent {
         'input[placeholder*="Search" i], input[type="search"], [role="combobox"], [data-testid="search-input"]'
       );
       if (searchInput) {
-        await searchInput.fill('Create Mr Apple Videos');
+        await searchInput.fill(targetChatName);
         await page.waitForTimeout(1500);
 
-        // Click first matching search result
-        const searchResult = await page.$('a[href*="/c/"]:has-text("Apple"), [role="option"]:has-text("Apple"), div:has-text("Mr Apple")');
+        const firstWord = targetChatName.split(' ')[0] || targetChatName;
+        const searchResult = await page.$(`a[href*="/c/"]:has-text("${firstWord}"), [role="option"]:has-text("${firstWord}")`);
         if (searchResult) {
           await searchResult.click().catch(() => {});
           await page.waitForTimeout(2000);
           const currentUrl = page.url();
           if (currentUrl.includes('/c/')) {
-            const currentTitle = await page.title().catch(() => 'Create Mr Apple Videos');
+            const currentTitle = await page.title().catch(() => targetChatName);
             return { url: currentUrl, title: currentTitle };
           }
         }
@@ -403,7 +424,7 @@ export class ChannelBrowserAgent {
 
       return null;
     } catch (err: any) {
-      console.warn('[JevBrowserAgent] locateMrAppleConversation search note:', err.message);
+      console.warn(`[ChannelBrowserAgent-${this.channelId}] locateMrAppleConversation search note:`, err.message);
       return null;
     }
   }
@@ -466,42 +487,45 @@ export class ChannelBrowserAgent {
 
     // Strategy 1: If user already has a saved/configured URL that looks valid
     if (configuredUrl) {
-      console.log(`[JevBrowserAgent] Attempting to navigate to configured conversation URL: ${configuredUrl}`);
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Attempting to navigate to configured conversation URL: ${configuredUrl}`);
       try {
         await page.goto(configuredUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
         await waitForConversationReady();
 
         if (await checkLogin()) {
           await page.screenshot({ path: localScreenshotPath });
-          throw new Error('ChatGPT requires login. Please open the interactive browser to log in to your new ChatGPT account first.');
+          throw new Error('ChatGPT requires login. Please open the interactive browser to log in to your ChatGPT account first.');
         }
 
         const isError = await checkConversationError();
         if (!isError && page.url().includes('/c/')) {
-          console.log('[JevBrowserAgent] Successfully connected to configured conversation URL:', page.url());
+          console.log(`[ChannelBrowserAgent-${this.channelId}] Successfully connected to configured conversation URL: ${page.url()}`);
           return page.url();
         }
 
-        console.warn(`[JevBrowserAgent] Configured conversation URL returned error or redirected (likely from previous account). Resetting and auto-detecting...`);
+        console.warn(`[ChannelBrowserAgent-${this.channelId}] Configured conversation URL returned error or redirected (${page.url()}). Checking alternatives...`);
       } catch (err: any) {
         if (err.message.includes('ChatGPT requires login')) throw err;
-        console.warn('[JevBrowserAgent] Error loading configured URL:', err.message);
+        console.warn(`[ChannelBrowserAgent-${this.channelId}] Error loading configured URL:`, err.message);
       }
     }
 
-    // Strategy 2: Navigate to https://chatgpt.com/ and detect the pinned conversation
-    console.log('[JevBrowserAgent] Navigating to https://chatgpt.com/ to detect pinned "Create Mr Apple Videos" conversation...');
+    const ch = getChannel(this.channelId);
+    const targetChatName = ch?.chatgpt_chat_name || (this.channelId === 1 ? 'Create Mr Apple Videos' : (ch?.name || ''));
+
+    // Strategy 2: Navigate to https://chatgpt.com/ and detect the conversation
+    console.log(`[ChannelBrowserAgent-${this.channelId}] Navigating to https://chatgpt.com/ to detect chat "${targetChatName}"...`);
     await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(3500);
 
     if (await checkLogin()) {
       await page.screenshot({ path: localScreenshotPath });
-      throw new Error('ChatGPT requires login. Please open the interactive browser via Settings ("Launch Browser Window to Log In") to log in to your new ChatGPT account first.');
+      throw new Error('ChatGPT requires login. Please open the browser window and sign into ChatGPT first.');
     }
 
     const detected = await this.locateMrAppleConversation(page);
     if (detected && detected.url) {
-      console.log(`[JevBrowserAgent] Detected pinned conversation: "${detected.title}". Navigating to ${detected.url}...`);
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Detected conversation: "${detected.title}". Navigating to ${detected.url}...`);
       await page.goto(detected.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await waitForConversationReady();
 
@@ -517,7 +541,7 @@ export class ChannelBrowserAgent {
     const hasInput = await page.$(inputSelector);
     if (hasInput && page.url().includes('/c/')) {
       const pageTitle = await page.title().catch(() => '');
-      console.log(`[JevBrowserAgent] Current page has active chat: "${pageTitle}" -> ${page.url()}`);
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Current page has active chat: "${pageTitle}" -> ${page.url()}`);
       this.saveChatGptUrl(page.url());
       return page.url();
     }
@@ -525,8 +549,8 @@ export class ChannelBrowserAgent {
     // If still not found, capture screenshot and give user exact helpful action items
     await page.screenshot({ path: localScreenshotPath }).catch(() => {});
     throw new Error(
-      `ChatGPT is logged in, but the pinned conversation "Create Mr Apple Videos" could not be detected in your sidebar. ` +
-      `Please ensure the conversation is pinned in your new ChatGPT account, or copy its URL (e.g. https://chatgpt.com/c/...) and paste it into Kindred Studio Settings under "ChatGPT Conversation URL". Screenshot saved: ${localScreenshotPath}`
+      `ChatGPT is logged in, but the conversation "${targetChatName}" could not be detected. ` +
+      `Please copy its URL (e.g. https://chatgpt.com/c/...) and paste it in the channel settings under "ChatGPT Chat URL". Screenshot saved: ${localScreenshotPath}`
     );
   }
 
@@ -710,8 +734,11 @@ export class ChannelBrowserAgent {
     rawText: string;
     promptCount: number;
   }> {
-    const domData = await page.evaluate(() => {
-      // 1. Collect all Mr. Apple Grok prompts in chronological order
+    const ch = getChannel(this.channelId);
+    const hashtagHint = ch?.hashtag_hint?.trim() || '#';
+
+    const domData = await page.evaluate((hint: string) => {
+      // 1. Collect all Grok prompts in chronological order
       const pres = Array.from(document.querySelectorAll('pre, code'));
       const matchingPrompts: string[] = [];
       for (const el of pres) {
@@ -719,12 +746,13 @@ export class ChannelBrowserAgent {
         const t = ((el as HTMLElement).innerText || '').trim();
         if (
           t.includes('CRITICAL: EXACTLY TWO CHARACTERS') ||
-          (t.includes('Mr. Apple') &&
-            (t.includes('0-2 SECONDS') ||
-              t.includes('0–2 SECONDS') ||
-              t.includes('15 seconds') ||
-              t.includes('10 seconds') ||
-              t.includes('FINAL RULE')))
+          (t.includes('0-2 SECONDS') ||
+            t.includes('0–2 SECONDS') ||
+            t.includes('15 seconds') ||
+            t.includes('10 seconds') ||
+            t.includes('FINAL RULE') ||
+            t.includes('CHOREOGRAPHY') ||
+            t.includes('MAIN CHARACTER'))
         ) {
           matchingPrompts.push(t);
         }
@@ -735,7 +763,7 @@ export class ChannelBrowserAgent {
         const containers = Array.from(document.querySelectorAll('[data-testid*="canvas"], article, [data-message-author-role="assistant"]'));
         for (const c of containers) {
           const t = ((c as HTMLElement).innerText || '').trim();
-          if (t.includes('CRITICAL: EXACTLY TWO CHARACTERS') && (t.includes('0-2 SECONDS') || t.includes('0–2 SECONDS') || t.includes('FINAL RULE'))) {
+          if ((t.includes('0-2 SECONDS') || t.includes('0–2 SECONDS') || t.includes('FINAL RULE')) && t.length > 200) {
             matchingPrompts.push(t);
           }
         }
@@ -763,10 +791,11 @@ export class ChannelBrowserAgent {
       let hook = '';
       const allNodes = Array.from(document.querySelectorAll('pre, code, [contenteditable="true"], p, div, h1, h2, h3, h4'));
 
-      // Look from bottom up for the latest TikTok Title + #MrApple hashtag box
+      // Look from bottom up for the latest hashtag box
+      const cleanHint = hint && hint !== '#' ? hint.toLowerCase() : '#';
       for (let i = allNodes.length - 1; i >= 0; i--) {
         const text = ((allNodes[i] as HTMLElement).innerText || '').trim();
-        if (text.includes('#MrApple') && text.length < 500) {
+        if (text.includes('#') && (cleanHint === '#' || text.toLowerCase().includes(cleanHint)) && text.length < 500) {
           const lines = text
             .split('\n')
             .map((l) => l.trim())
@@ -777,7 +806,7 @@ export class ChannelBrowserAgent {
                 !/^start writing$/i.test(l) &&
                 !/^tiktok title$/i.test(l.replace(/[🍎🎬]/g, '').trim())
             );
-          const hashLine = lines.find((l) => l.includes('#MrApple')) || '';
+          const hashLine = lines.find((l) => l.includes('#')) || '';
           const titleCandidate = lines.find((l) => !l.startsWith('#') && l.length > 5 && l.length < 140) || '';
           if (hashLine && !hook) hook = hashLine;
           if (titleCandidate && !title) {
@@ -787,13 +816,13 @@ export class ChannelBrowserAgent {
         }
       }
 
-      // Fallback for title if not inside the hashtag box: check headings with "Mr. Apple vs."
+      // Fallback for title: check headings with vs. or any short heading
       if (!title) {
         for (let i = allNodes.length - 1; i >= 0; i--) {
           const text = ((allNodes[i] as HTMLElement).innerText || '').trim();
-          if (text.includes('Mr. Apple vs.') && text.length < 200) {
+          if ((text.includes('vs.') || text.includes('Challenge') || text.includes('#')) && text.length < 200) {
             const firstLine = text.split('\n')[0].replace(/^[🍎🎬"'#\s]+|["'\s]+$/g, '').trim();
-            if (firstLine.length > 5 && firstLine.length < 140) {
+            if (firstLine.length > 5 && firstLine.length < 140 && !firstLine.startsWith('#')) {
               title = firstLine;
               break;
             }
@@ -802,7 +831,7 @@ export class ChannelBrowserAgent {
       }
 
       return { domPrompt, title, hook, promptCount };
-    });
+    }, hashtagHint);
 
     let grokPrompt = domData.domPrompt || '';
     const codeMatch = grokPrompt.match(/```(?:[a-zA-Z]*\n)?([\s\S]*?)```/);
@@ -1548,7 +1577,7 @@ export class ChannelBrowserAgent {
 
     this.isLaunching = true;
     try {
-      console.log('[JevBrowserAgent] Opening interactive browser for login session...');
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Opening interactive browser for login session...`);
       const context = await this.launchContext(false);
 
       // Use the default page for ChatGPT
@@ -1559,9 +1588,9 @@ export class ChannelBrowserAgent {
       const configuredUrl = this.getConfiguredChatGptUrl();
       const targetChatUrl = configuredUrl || 'https://chatgpt.com/';
 
-      console.log(`[JevBrowserAgent] Navigating Tab 1 to ${targetChatUrl} (Create Mr Apple Videos)...`);
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Navigating Tab 1 to ${targetChatUrl}...`);
       chatGptPage.goto(targetChatUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((err) => {
-        console.warn('[JevBrowserAgent] ChatGPT background navigation note:', err.message);
+        console.warn(`[ChannelBrowserAgent-${this.channelId}] ChatGPT background navigation note:`, err.message);
       });
 
       // Automatically capture new conversation URL if operator opens or clicks the pinned chat
@@ -1570,8 +1599,10 @@ export class ChannelBrowserAgent {
           const currentUrl = frame.url();
           if (currentUrl.includes('chatgpt.com/c/')) {
             const pageTitle = (await chatGptPage.title().catch(() => '')).toLowerCase();
-            if (pageTitle.includes('apple') || pageTitle.includes('video') || pageTitle.includes('create')) {
-              console.log(`[JevBrowserAgent] Auto-learned Mr Apple chat URL from operator navigation: ${currentUrl}`);
+            const ch = getChannel(this.channelId);
+            const targetName = (ch?.chatgpt_chat_name || ch?.name || '').toLowerCase();
+            if (!targetName || pageTitle.includes(targetName) || (this.channelId === 1 && (pageTitle.includes('apple') || pageTitle.includes('create')))) {
+              console.log(`[ChannelBrowserAgent-${this.channelId}] Auto-learned chat URL from operator navigation: ${currentUrl}`);
               this.saveChatGptUrl(currentUrl);
             }
           }
@@ -1743,22 +1774,66 @@ export class ChannelBrowserAgent {
       const authHost = /auth\.openai\.com|auth0\.com|accounts\.google\.com|appleid\.apple\.com|login\.live\.com|accounts\.x\.ai|x\.com\/i\/flow|twitter\.com\/i\/flow/i;
       const host = { chatgpt: 'chatgpt.com', grok: 'grok.com', tiktok: 'tiktok.com', youtube: 'youtube.com' }[site];
 
+      // Check if ANY page or popup in this context is currently on an OAuth auth host
+      try {
+        const ctxPages = page.context().pages();
+        const authPopup = ctxPages.find(p => !p.isClosed() && authHost.test(p.url()));
+        if (authPopup) {
+          return { state: 'out', why: `OAuth sign-in window in progress (${new URL(authPopup.url()).host})` };
+        }
+      } catch {}
+
       if (!url.includes(host)) return authHost.test(url) ? { state: 'out', why: `on a sign-in page (${new URL(url).host})` } : { state: 'unknown', why: `off-site (${url.slice(0, 60)})` };
 
       if (site === 'chatgpt') {
         if (/\/auth\/|\/log-?in/i.test(url)) return { state: 'out', why: 'login URL' };
         if (await visible(page.locator('[data-testid="login-button"], a[href*="/auth/login"]'))) return { state: 'out', why: 'login-button element' };
-        if (await anyVisible(named(/^\s*(Log in|Sign up for free)\s*$/i))) return { state: 'out', why: '"Log in"/"Sign up for free" button' };
+        if (await anyVisible(named(/^\s*(Log in|Sign up for free|Sign in)\s*$/i))) return { state: 'out', why: '"Log in" button' };
         if (await visible(page.locator('[data-testid="accounts-profile-button"], nav a[href*="/c/"], #prompt-textarea, form [contenteditable="true"]')))
           return { state: 'in', why: 'composer / history visible, no login button' };
         return { state: 'unknown', why: 'page not ready' };
       }
 
       if (site === 'grok') {
-        if (/sign-?in|login/i.test(url)) return { state: 'out', why: 'login URL' };
-        if (await anyVisible(named(/^\s*Sign in\s*$/i))) return { state: 'out', why: '"Sign in" button' };
-        if (await visible(page.locator('[role="textbox"], [contenteditable="true"], textarea'))) return { state: 'in', why: 'prompt box visible, no Sign in button' };
-        return { state: 'unknown', why: 'page not ready' };
+        if (/sign-?in|login|auth/i.test(url)) return { state: 'out', why: 'login URL' };
+
+        // 1. Explicit sign in / log in buttons or links
+        const signInBtn = await page.locator('button, a, [role="button"]')
+          .filter({ hasText: /^\s*(Sign\s*in|Log\s*in|Sign\s*up|Continue with Google|Sign in with Google|Sign in with X)\s*$/i })
+          .filter({ visible: true })
+          .count()
+          .catch(() => 0);
+        if (signInBtn > 0) return { state: 'out', why: 'Sign in / Log in button visible' };
+
+        // 2. Auth dialogs / modals
+        const authDialog = await page.locator('[role="dialog"], [aria-modal="true"]')
+          .filter({ hasText: /sign\s*in|log\s*in|google|x\.ai|register/i })
+          .filter({ visible: true })
+          .count()
+          .catch(() => 0);
+        if (authDialog > 0) return { state: 'out', why: 'Sign-in modal dialog visible' };
+
+        // 3. User profile avatar button (visible when logged in)
+        const profileBtn = await page.locator(
+          'button[aria-label*="profile" i], button[aria-label*="account" i], [data-testid*="user-nav"], [data-testid*="profile"], button:has(img[alt*="avatar" i]), [data-testid*="user-avatar"]'
+        ).filter({ visible: true }).count().catch(() => 0);
+        if (profileBtn > 0) return { state: 'in', why: 'user profile avatar visible' };
+
+        // 4. In-page DOM inspection for user session
+        const hasUserSession = await page.evaluate(() => {
+          const navImgs = document.querySelectorAll('nav img, aside img, [role="navigation"] img');
+          if (navImgs.length > 0) return true;
+          const buttons = Array.from(document.querySelectorAll('button, a'));
+          return buttons.some((b) => {
+            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return (aria.includes('profile') || aria.includes('account') || aria.includes('user')) && !b.textContent?.toLowerCase().includes('sign in');
+          });
+        }).catch(() => false);
+
+        if (hasUserSession) return { state: 'in', why: 'user session elements visible' };
+
+        // Never return 'in' simply because the textbox is visible
+        return { state: 'unknown', why: 'Grok session not verified yet' };
       }
 
       if (site === 'youtube') {
@@ -1836,8 +1911,8 @@ export class ChannelBrowserAgent {
         await page.waitForTimeout(5000);
         st = await this.siteLoginState(page, site.key);
       }
-      console.log(`[JevBrowserAgent] ${site.name} login check: ${st.state} (${st.why})`);
-      recordAccountStatus(site.key, st.state);
+      console.log(`[ChannelBrowserAgent-${this.channelId}] ${site.name} login check: ${st.state} (${st.why})`);
+      recordAccountStatus(site.key, st.state, this.channelId);
       if (st.state !== 'out') continue;
 
       await page.screenshot({ path: path.join(framesDir, `login_wait_${site.key}.png`) }).catch(() => {});
@@ -1852,10 +1927,19 @@ export class ChannelBrowserAgent {
         if (page.isClosed()) throw new Error('The browser window was closed while waiting for you to sign in.');
         if (this.skipLogin) {
           this.skipLogin = false;
-          console.log(`[JevBrowserAgent] Operator says ${site.name} is already signed in — continuing.`);
+          console.log(`[ChannelBrowserAgent-${this.channelId}] Operator says ${site.name} is already signed in — continuing.`);
           ok = true;
           break;
         }
+
+        // Do not advance while user is actively inside an OAuth popup
+        const inOAuth = context.pages().some(
+          (p) => !p.isClosed() && /auth\.openai\.com|auth0\.com|accounts\.google\.com|appleid\.apple\.com|accounts\.x\.ai|x\.com\/i\/flow|twitter\.com\/i\/flow/i.test(p.url())
+        );
+        if (inOAuth) {
+          continue;
+        }
+
         const now = await this.siteLoginState(page, site.key);
         if (now.state === 'in') {
           ok = true;
@@ -1870,13 +1954,13 @@ export class ChannelBrowserAgent {
       }
       if (!ok && site.optional) {
         say(`${site.name} was not signed in — skipping ${site.name} for this run.`);
-        console.warn(`[JevBrowserAgent] ${site.name} sign-in timed out; continuing without it.`);
+        console.warn(`[ChannelBrowserAgent-${this.channelId}] ${site.name} sign-in timed out; continuing without it.`);
         skipped.push(site.key as 'youtube');
         continue;
       }
       if (!ok) throw new Error(`${site.name} is not signed in. Run again and sign into ${site.name} in the browser window.`);
       say(`${site.name} signed in.`);
-      recordAccountStatus(site.key, 'in');
+      recordAccountStatus(site.key, 'in', this.channelId);
       await page.waitForTimeout(1500);
       await this.saveCookies(context);
     }
@@ -1950,8 +2034,8 @@ export class ChannelBrowserAgent {
         await page.waitForTimeout(5000);
         st = await this.siteLoginState(page, key);
       }
-      console.log(`[JevBrowserAgent] ${cfg.name} account check: ${st.state} (${st.why})`);
-      recordAccountStatus(key, st.state);
+      console.log(`[ChannelBrowserAgent-${this.channelId}] ${cfg.name} account check: ${st.state} (${st.why})`);
+      recordAccountStatus(key, st.state, this.channelId);
     }
     await this.shutdown();
   }
@@ -1983,8 +2067,10 @@ export class ChannelBrowserAgent {
     await this.saveCookies(context, true);
     recordAccountStatus(key, 'out', this.channelId);
     if (key === 'chatgpt') {
-      // The "Create Mr Apple Videos" chat belongs to the OLD account; it is re-detected for the new one below.
-      db.prepare("UPDATE settings SET chatgpt_chat_url = '', updated_at = CURRENT_TIMESTAMP WHERE id = 1").run();
+      updateChannel(this.channelId, { chatgpt_chat_url: '' });
+      if (this.channelId === 1) {
+        db.prepare("UPDATE settings SET chatgpt_chat_url = '', updated_at = CURRENT_TIMESTAMP WHERE id = 1").run();
+      }
     }
 
     // 2. Wait for the new sign-in.
@@ -1992,7 +2078,7 @@ export class ChannelBrowserAgent {
     await page.waitForTimeout(3000);
     await page.bringToFront().catch(() => {});
     say(`Sign into the account you want to use for ${cfg.name} in the browser window. It closes by itself when you're done.`, 'waiting_login');
-    console.log(`[JevBrowserAgent] Waiting for a new ${cfg.name} sign-in...`);
+    console.log(`[ChannelBrowserAgent-${this.channelId}] Waiting for a new ${cfg.name} sign-in...`);
 
     const deadline = Date.now() + 10 * 60 * 1000;
     let signedIn = false;
@@ -2000,9 +2086,24 @@ export class ChannelBrowserAgent {
       await new Promise((r) => setTimeout(r, 3000));
       if (this.accountCancel) throw new Error(`Cancelled. ${cfg.name} is signed out — sign in again before the next run.`);
       if (page.isClosed()) throw new Error(`The browser window was closed before ${cfg.name} was signed in.`);
-      if ((await this.siteLoginState(page, key)).state === 'in') {
-        signedIn = true;
-        break;
+
+      // Never finish while user is still in an OAuth popup (Google, Apple, X)
+      const inOAuth = context.pages().some(
+        (p) => !p.isClosed() && /auth\.openai\.com|auth0\.com|accounts\.google\.com|appleid\.apple\.com|accounts\.x\.ai|x\.com\/i\/flow|twitter\.com\/i\/flow/i.test(p.url())
+      );
+      if (inOAuth) {
+        continue;
+      }
+
+      const st = await this.siteLoginState(page, key);
+      if (st.state === 'in') {
+        // Double check after 2 seconds to ensure it wasn't a transient navigation state
+        await page.waitForTimeout(2000);
+        const doubleCheck = await this.siteLoginState(page, key);
+        if (doubleCheck.state === 'in') {
+          signedIn = true;
+          break;
+        }
       }
     }
     if (!signedIn) throw new Error(`Timed out waiting for the ${cfg.name} sign-in. ${cfg.name} is signed out — try again.`);

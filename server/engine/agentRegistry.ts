@@ -30,3 +30,4 @@ export function isChannelBusy(channelId: number): { busy: boolean; reason?: stri
 
 // Hook into channels.ts so deleteChannel cannot delete an active channel
 registerChannelBusyChecker(isChannelBusy);
+

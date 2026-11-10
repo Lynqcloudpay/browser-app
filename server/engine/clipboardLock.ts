@@ -35,3 +35,4 @@ export const clipboardMutex = new ClipboardMutex();
 export async function withClipboard<T>(fn: () => Promise<T>): Promise<T> {
   return clipboardMutex.runExclusive(fn);
 }
+

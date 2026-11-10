@@ -293,3 +293,4 @@ export const StudioTab: React.FC<StudioTabProps> = ({ onSelectChannel }) => {
 };
 
 export default StudioTab;
+
