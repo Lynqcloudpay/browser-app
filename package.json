@@ -12,7 +12,9 @@
     "test": "DATABASE_PATH=./storage/test_kindred_studio.db tsx tests/safety_and_loop.test.ts",
     "demo": "tsx scripts/demo.ts",
     "smoke": "tsx scripts/smoke.ts",
-    "daily": "tsx scripts/dailyRun.ts"
+    "daily": "tsx scripts/dailyRun.ts",
+    "setup": "node scripts/setup.mjs",
+    "doctor": "node scripts/setup.mjs --check"
   },
   "keywords": [
     "childrens-media",
@@ -52,5 +54,8 @@
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.7"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

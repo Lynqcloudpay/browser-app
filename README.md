@@ -7,6 +7,21 @@ The core business objective is to discover and pilot kids’ series that generat
 
 ---
 
+## Quick start (humans and AI agents)
+
+```bash
+git clone https://github.com/Lynqcloudpay/browser-app.git
+cd browser-app
+node scripts/setup.mjs     # installs everything and verifies it; must end with "SETUP OK"
+npm run dev                # then open http://localhost:5173
+```
+
+Then, in **Settings**, click **Make & Post a Video Now** and sign into ChatGPT, Grok and TikTok when the browser window asks.
+Needs macOS and Node 20+. `npm run doctor` re-checks the setup without changing anything.
+**AI agents: read [AGENTS.md](AGENTS.md) first** — it has the exact setup steps, what only a human can do, and the gotchas.
+
+---
+
 ## System Architecture & Roles
 
 ```
