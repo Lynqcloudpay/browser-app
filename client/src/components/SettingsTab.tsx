@@ -51,9 +51,83 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
   const [savingSettings, setSavingSettings] = useState(false);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
-  const [isLaunchingBrowser, setIsLaunchingBrowser] = useState(false);
-  const [isRunningBrowserRun, setIsRunningBrowserRun] = useState(false);
-  const [browserStatusMsg, setBrowserStatusMsg] = useState<{ type: 'info' | 'success' | 'error'; text: string } | null>(null);
+  const [runStatus, setRunStatus] = useState<any>({ state: 'idle', step: '' });
+  const [schedule, setSchedule] = useState<any>(null);
+  const [scheduleTimes, setScheduleTimes] = useState<string[]>(['10:00']);
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  const [scheduleMsg, setScheduleMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const runBusy = runStatus.state === 'running' || runStatus.state === 'waiting_login';
+
+  // Live progress of the one-button run (also shows runs started by the daily schedule).
+  useEffect(() => {
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const st = await safeFetchJson('/api/browser/run-status');
+        if (!stopped) setRunStatus(st);
+      } catch {
+        /* server restarting */
+      }
+    };
+    tick();
+    const id = setInterval(tick, 2500);
+    return () => {
+      stopped = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  useEffect(() => {
+    safeFetchJson('/api/schedule')
+      .then((sc) => {
+        setSchedule(sc);
+        if (Array.isArray(sc?.times) && sc.times.length) setScheduleTimes(sc.times);
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleRunClick = async () => {
+    try {
+      const data = await safeFetchJson('/api/browser/run', { method: 'POST', body: JSON.stringify({}) });
+      if (data.state) setRunStatus(data);
+      else setRunStatus({ state: 'error', step: data.error || 'Could not start.', error: data.error });
+    } catch (e: any) {
+      setRunStatus({ state: 'error', step: e.message, error: e.message });
+    }
+  };
+
+  const DEFAULT_SLOTS = ['10:00', '14:30', '18:30', '21:00', '07:00', '12:00', '16:00', '23:00'];
+  const changeScheduleCount = (count: number) => {
+    setScheduleTimes((prev) => {
+      if (count <= prev.length) return prev.slice(0, count);
+      const next = [...prev];
+      for (const t of DEFAULT_SLOTS) {
+        if (next.length >= count) break;
+        if (!next.includes(t)) next.push(t);
+      }
+      return next;
+    });
+  };
+
+  const saveSchedule = async (enabled: boolean) => {
+    setSavingSchedule(true);
+    setScheduleMsg(null);
+    try {
+      const sc = await safeFetchJson('/api/schedule', { method: 'POST', body: JSON.stringify({ enabled, times: scheduleTimes }) });
+      if (sc.error) throw new Error(sc.error);
+      setSchedule(sc);
+      setScheduleMsg({
+        type: 'success',
+        text: enabled
+          ? `Done. ${sc.times.length} video${sc.times.length > 1 ? 's' : ''} a day will be made and posted at ${sc.times.join(', ')}.`
+          : 'Daily posting is turned off.',
+      });
+    } catch (e: any) {
+      setScheduleMsg({ type: 'error', text: e.message });
+    } finally {
+      setSavingSchedule(false);
+    }
+  };
 
   const handleSettingsSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -193,7 +267,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <div className="space-y-1">
               <h5 className="font-bold text-slate-200">Persistent Browser Session Profile</h5>
               <p className="text-slate-400 leading-relaxed text-[11px]">
-                Your session cookies and login states are stored locally in <code className="text-amber-400 font-mono">storage/browser_profile</code>. Log in once to your ChatGPT and Grok accounts in the interactive window, and Jev will automate prompt creation and video paste unattended.
+                Your session cookies and login states are stored locally in <code className="text-amber-400 font-mono">storage/browser_profile</code>. The first time (or whenever a login expires) the run pauses and asks you to sign into ChatGPT, Grok and TikTok in the browser window; after that it runs by itself.
               </p>
             </div>
           </div>
@@ -201,74 +275,145 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center gap-3">
             <button
               type="button"
-              disabled={isLaunchingBrowser}
-              onClick={async () => {
-                setIsLaunchingBrowser(true);
-                setBrowserStatusMsg({ type: 'info', text: 'Launching Chromium and navigating to ChatGPT & Grok...' });
-                try {
-                  const res = await safeFetchJson('/api/browser/open', { method: 'POST' });
-                  setBrowserStatusMsg({
-                    type: 'success',
-                    text: res.message || 'Chromium is open! Log into ChatGPT (Tab 1) and Grok (Tab 2).',
-                  });
-                } catch (err: any) {
-                  setBrowserStatusMsg({ type: 'error', text: `Launch error: ${err.message}` });
-                } finally {
-                  setIsLaunchingBrowser(false);
-                }
-              }}
-              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-xs font-bold text-amber-400 rounded-xl border border-slate-700 transition flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
-            >
-              <Globe className="w-3.5 h-3.5" />
-              <span>{isLaunchingBrowser ? 'Opening Chromium...' : 'Launch Browser Window to Log In'}</span>
-            </button>
-
-            <button
-              type="button"
-              disabled={isRunningBrowserRun}
-              onClick={async () => {
-                setIsRunningBrowserRun(true);
-                setBrowserStatusMsg({
-                  type: 'info',
-                  text: 'Autonomous Jev Agent starting: Composing prompt in ChatGPT, transferring to Grok, assembling video, and staging on TikTok...',
-                });
-                try {
-                  const data = await safeFetchJson('/api/browser/run', { method: 'POST' });
-                  if (data.success) {
-                    setBrowserStatusMsg({
-                      type: 'success',
-                      text: `Autonomous Loop Completed! "${data.title}" (${data.durationSeconds || 18}s). QA Status: ${data.qaPassed ? 'PASSED (100% Kids Safe)' : 'Held for Review'}. Staged for TikTok publishing slot!`,
-                    });
-                  } else {
-                    setBrowserStatusMsg({
-                      type: 'error',
-                      text: `Autonomous loop notice: ${data.error || data.message || 'Unknown error'}`,
-                    });
-                  }
-                } catch (e: any) {
-                  setBrowserStatusMsg({ type: 'error', text: `Automation error: ${e.message}` });
-                } finally {
-                  setIsRunningBrowserRun(false);
-                }
-              }}
-              className="px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-xs font-bold rounded-xl transition shadow-lg shadow-amber-500/20 flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
+              disabled={runBusy}
+              onClick={handleRunClick}
+              className="px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 text-xs font-bold rounded-xl transition shadow-lg shadow-amber-500/20 flex items-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
             >
               <Sparkles className="w-3.5 h-3.5" />
-              <span>{isRunningBrowserRun ? 'Autonomous Sequence in Progress...' : 'Run Full Autonomous Loop (ChatGPT → Grok → TikTok)'}</span>
+              <span>{runBusy ? 'Working…' : 'Make & Post a Video Now'}</span>
             </button>
+            <span className="text-[11px] text-slate-500">
+              One click: opens the browser, asks you to sign in only if needed, then ChatGPT → Grok → TikTok.
+            </span>
           </div>
 
-          {browserStatusMsg && (
+          {runStatus.state !== 'idle' && (
             <div
-              className={`p-3 rounded-xl text-xs flex items-center gap-2 ${
-                browserStatusMsg.type === 'success'
+              className={`p-3 rounded-xl text-xs flex items-start gap-2 ${
+                runStatus.state === 'done'
                   ? 'bg-emerald-950/40 border border-emerald-800/80 text-emerald-300'
-                  : browserStatusMsg.type === 'error'
+                  : runStatus.state === 'error'
                   ? 'bg-rose-950/40 border border-rose-800/80 text-rose-300'
+                  : runStatus.state === 'waiting_login'
+                  ? 'bg-sky-950/40 border border-sky-700/80 text-sky-200'
                   : 'bg-amber-950/40 border border-amber-800/80 text-amber-300'
               }`}
             >
-              <span>{browserStatusMsg.text}</span>
+              <span>
+                {runStatus.state === 'waiting_login' && <strong>Sign-in needed — </strong>}
+                {runStatus.state === 'error' && <strong>Stopped — </strong>}
+                {runStatus.step}
+                {runStatus.trigger === 'schedule' && runBusy && <em> (started by the daily schedule)</em>}
+              </span>
+              {runStatus.state === 'waiting_login' && (
+                <button
+                  type="button"
+                  onClick={() => safeFetchJson('/api/browser/skip-login', { method: 'POST' }).catch(() => {})}
+                  className="ml-auto shrink-0 px-3 py-1.5 bg-sky-500 hover:bg-sky-400 text-slate-950 text-[11px] font-bold rounded-lg cursor-pointer"
+                >
+                  I'm already signed in — continue
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Daily automatic posting */}
+        <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 text-xs space-y-3">
+          <div className="flex items-start gap-3">
+            <Clock className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <h5 className="font-bold text-slate-200">
+                Post automatically every day
+                {schedule?.installed && (
+                  <span className="ml-2 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                    ON · {(schedule.times || []).join(' · ')}
+                  </span>
+                )}
+              </h5>
+              <p className="text-slate-400 leading-relaxed text-[11px]">
+                At each time you choose, your Mac opens the browser by itself, makes one video and posts it — even if this app is closed.
+                The Mac must be on (a sleeping Mac runs it when it wakes) and you must be logged in to macOS.
+              </p>
+            </div>
+          </div>
+          <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-slate-300">
+              <span className="text-[11px] text-slate-400">Videos per day</span>
+              <select
+                value={scheduleTimes.length}
+                onChange={(e) => changeScheduleCount(Number(e.target.value))}
+                className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-slate-200"
+              >
+                {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {scheduleTimes.map((t, i) => (
+              <label key={i} className="flex items-center gap-1.5 text-slate-300">
+                <span className="text-[11px] text-slate-500">#{i + 1}</span>
+                <input
+                  type="time"
+                  value={t}
+                  onChange={(e) => setScheduleTimes((prev) => prev.map((x, j) => (j === i ? e.target.value : x)))}
+                  className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-slate-200"
+                />
+              </label>
+            ))}
+            <button
+              type="button"
+              disabled={savingSchedule || scheduleTimes.some((t) => !t) || schedule?.platformSupported === false}
+              onClick={() => saveSchedule(true)}
+              className="px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-xs font-bold rounded-xl transition cursor-pointer disabled:cursor-not-allowed"
+            >
+              {schedule?.installed ? 'Save schedule' : 'Turn on daily posting'}
+            </button>
+            {schedule?.installed && (
+              <button
+                type="button"
+                disabled={savingSchedule}
+                onClick={() => saveSchedule(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-xs font-bold text-slate-300 rounded-xl border border-slate-700 transition cursor-pointer"
+              >
+                Turn off
+              </button>
+            )}
+          </div>
+          {schedule?.installed && (
+            <p className="text-[11px] text-slate-500 leading-relaxed">
+              Today: {schedule.completedToday ?? 0} of {(schedule.times || []).length} scheduled video(s) made.
+              {schedule.lastRun && (
+                <>
+                  {' '}
+                  Last scheduled run {new Date(schedule.lastRun.at).toLocaleString()} —{' '}
+                  <span
+                    className={
+                      schedule.lastRun.outcome === 'success'
+                        ? 'text-emerald-400'
+                        : schedule.lastRun.outcome === 'failed'
+                        ? 'text-rose-400'
+                        : 'text-amber-400'
+                    }
+                  >
+                    {schedule.lastRun.outcome}
+                  </span>
+                  : {schedule.lastRun.message}
+                </>
+              )}
+            </p>
+          )}
+          {scheduleMsg && (
+            <div
+              className={`p-3 rounded-xl text-xs ${
+                scheduleMsg.type === 'success'
+                  ? 'bg-emerald-950/40 border border-emerald-800/80 text-emerald-300'
+                  : 'bg-rose-950/40 border border-rose-800/80 text-rose-300'
+              }`}
+            >
+              {scheduleMsg.text}
             </div>
           )}
         </div>
@@ -392,7 +537,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <div className="bg-slate-900/40 rounded-lg p-2.5 text-[11px] text-slate-400 border border-slate-800/60 flex items-start gap-2">
               <span className="font-bold text-amber-400 shrink-0">Account Switch Tip:</span>
               <span>
-                1. Click <strong>"Launch Browser Window to Log In"</strong> above and log into your new ChatGPT account.
+                1. Click <strong>"Make &amp; Post a Video Now"</strong> above and sign into your new ChatGPT account when asked.
                 2. Open or pin your <strong>"Create Mr Apple Videos"</strong> chat.
                 3. Click <strong>"Auto-Detect from Sidebar"</strong> or paste its URL here to link it permanently.
               </span>

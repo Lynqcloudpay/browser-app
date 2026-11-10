@@ -2,6 +2,9 @@ node_modules/
 dist/
 client/dist/
 storage/browser_profile/
+storage/browser_cookies.json
+storage/schedule.json
+storage/schedule_state.json
 storage/test_interactive/
 storage/test_profile/
 storage/videos/*
@@ -17,3 +20,6 @@ storage/*.db*
 .DS_Store
 *.DS_Store
 *.log
+
+# local Claude Code settings (machine-specific)
+.claude/settings.local.json

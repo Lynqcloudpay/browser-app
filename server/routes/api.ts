@@ -4,6 +4,8 @@ import path from 'path';
 import fs from 'fs';
 import { exec } from 'child_process';
 import db, { resetContentCatalog } from '../db/database';
+import { startRun, getRunStatus } from '../engine/dailyRunner';
+import { getSchedule, setSchedule } from '../engine/dailySchedule';
 import ProductionWorker from '../engine/worker';
 import MonetizationEngine from '../engine/monetizationEngine';
 import Scheduler from '../engine/scheduler';
@@ -410,69 +412,37 @@ apiRouter.post('/browser/set-chatgpt-url', (req, res) => {
   }
 });
 
-// POST /browser/run - Run full autonomous Jev Browser Agent sequence (ChatGPT -> Grok -> TikTok)
-apiRouter.post('/browser/run', async (req, res) => {
+// POST /browser/run - ONE button: opens the browser, signs in only if needed, then ChatGPT -> Grok -> TikTok.
+// Runs in the background; poll GET /browser/run-status.
+apiRouter.post('/browser/run', (req, res) => {
+  const trigger = req.body?.trigger === 'schedule' ? 'schedule' : 'button';
+  const result = startRun(trigger, Number(req.body?.targetDurationSec) || 15);
+  if (!result.started) return res.status(409).json({ error: result.reason, ...getRunStatus() });
+  res.status(202).json({ started: true, ...getRunStatus() });
+});
+
+// "I'm already signed in — continue": stops the run from waiting on a sign-in it wrongly thinks is needed.
+apiRouter.post('/browser/skip-login', (req, res) => {
+  JevBrowserAgent.skipLoginWait();
+  res.json({ success: true });
+});
+
+apiRouter.get('/browser/run-status', (req, res) => {
+  res.json(getRunStatus());
+});
+
+// Daily automatic posting (macOS LaunchAgent)
+apiRouter.get('/schedule', (req, res) => {
+  res.json(getSchedule());
+});
+
+apiRouter.post('/schedule', async (req, res) => {
   try {
-    const settings = db.prepare('SELECT * FROM settings WHERE id = 1').get() as any;
-
-    // Dynamic Trending Children's Concepts (Different every single run!)
-    const TRENDING_THEMES = [
-      {
-        seriesTitle: 'Wonder Lab: Secret Shapes & Everyday Mysteries',
-        format: 'visual_puzzle',
-        topic: 'The Glowing Sea Shell Mystery: A curious baby sea otter finding magical swirling shell patterns under bioluminescent waves',
-        goal: 'Marine curiosity, color patterns, and underwater shape matching',
-      },
-      {
-        seriesTitle: 'Wonder Lab: Secret Shapes & Everyday Mysteries',
-        format: 'visual_puzzle',
-        topic: 'The Little Star Rover: A friendly cartoon robot discovering sparkling geometric crystal shapes on a candy galaxy moon',
-        goal: 'Astronomy curiosity, rotational shape matching, and playful discovery',
-      },
-      {
-        seriesTitle: 'Paper Dragon & Shadow Puzzles',
-        format: 'visual_puzzle',
-        topic: 'The Enchanted Forest Bakery: A cute baby hedgehog baking rainbow berry tarts with secret leaf shape stamps',
-        goal: 'Sequencing, sensory observation, and nature silhouettes',
-      },
-      {
-        seriesTitle: 'Paper Dragon & Shadow Puzzles',
-        format: 'visual_puzzle',
-        topic: 'The Detective Dinosaur: A joyful baby Triceratops following mysterious glowing footprint tracks through giant ferns',
-        goal: 'Size comparison, deductive tracking, and fossil clue puzzles',
-      },
-      {
-        seriesTitle: 'Wonder Lab: Secret Shapes & Everyday Mysteries',
-        format: 'visual_puzzle',
-        topic: 'The Clockwork Cloud Castle: A playful winged dragon sorting bouncing star-shaped wind-up gears',
-        goal: 'Mechanical cause-and-effect, sorting logic, and celebratory problem solving',
-      },
-      {
-        seriesTitle: 'Wonder Lab: Secret Shapes & Everyday Mysteries',
-        format: 'visual_puzzle',
-        topic: 'The Rainbow Dewdrop Garden: Dancing water droplets on giant clover leaves reflecting hidden garden creatures',
-        goal: 'Visual deduction, color reflection, and gentle pattern recognition',
-      },
-    ];
-
-    const pastJobsCount = (db.prepare('SELECT COUNT(*) as count FROM jobs').get() as any).count || 0;
-    const currentTheme = TRENDING_THEMES[pastJobsCount % TRENDING_THEMES.length];
-
-    console.log(`[POST /browser/run] Selected trending theme (${pastJobsCount + 1}): "${currentTheme.topic}"`);
-
-    // Execute the complete autonomous sequence (Default: 1 video of 15 seconds)
-    const result = await JevBrowserAgent.runFullAutonomousPipeline({
-      format: currentTheme.format,
-      ageBand: settings.age_band,
-      seriesTitle: currentTheme.seriesTitle,
-      creativeTopic: currentTheme.topic,
-      learningGoal: currentTheme.goal,
-      targetDurationSec: req.body?.targetDurationSec || 15,
-    });
-
-    res.json(result);
+    const enabled = !!req.body?.enabled;
+    const times: string[] = Array.isArray(req.body?.times) ? req.body.times.map(String) : [String(req.body?.time || '10:00')];
+    res.json(await setSchedule(enabled, times));
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    res.status(400).json({ error: err.message });
   }
 });
 

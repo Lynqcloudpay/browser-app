@@ -3,7 +3,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { chromium, BrowserContext, Page } from 'playwright';
+import { chromium, BrowserContext, Page, FileChooser } from 'playwright';
 
 const execFileAsync = promisify(execFile);
 import JevEngine from './jevEngine';
@@ -22,6 +22,14 @@ export interface BrowserJobResult {
   screenshotPath?: string;
 }
 
+/** Video options Grok Imagine offers in its composer. */
+export interface GrokVideoSpec {
+  durationSec: 6 | 10 | 15;
+  resolution: '480p' | '720p';
+  aspect: '9:16' | '16:9' | '1:1';
+}
+const GROK_DURATIONS: GrokVideoSpec['durationSec'][] = [6, 10, 15];
+
 export class JevBrowserAgent {
   private static userProfileDir = path.join(__dirname, '../../storage/browser_profile');
   private static activeInteractiveContext: BrowserContext | null = null;
@@ -31,6 +39,25 @@ export class JevBrowserAgent {
    * Remove stale Chromium lock files if a previous browser session crashed.
    */
   private static cleanupStaleLocks(dir: string): void {
+    try {
+      // SingletonLock is a symlink "<hostname>-<pid>". If that browser is still running, the lock is NOT stale:
+      // removing it would let two browsers share one profile and overwrite each other's saved logins.
+      const target = fs.readlinkSync(path.join(dir, 'SingletonLock'));
+      const pid = Number(target.split('-').pop());
+      if (pid > 0) {
+        try {
+          process.kill(pid, 0);
+          throw new Error(
+            'The app browser profile is already open in another window. Quit that browser (⌘Q) and try again.'
+          );
+        } catch (err: any) {
+          if (err.code !== 'ESRCH') throw err.code === 'EPERM' ? new Error('Browser profile is in use by another process.') : err;
+        }
+      }
+    } catch (err: any) {
+      if (err?.message?.includes('already open') || err?.message?.includes('in use')) throw err;
+      // no lock / unreadable lock → treat as stale
+    }
     try {
       const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
       for (const file of lockFiles) {
@@ -58,20 +85,37 @@ export class JevBrowserAgent {
    * Launch a persistent browser context so logins to ChatGPT and Grok persist.
    * If an interactive window is already open on the user's desktop, reuses it seamlessly.
    */
+  private static launchPromise: Promise<BrowserContext> | null = null;
+  private static tiktokDialogPages = new WeakSet<Page>();
+
   public static async launchContext(headless = false): Promise<BrowserContext> {
-    // If an interactive session is already open and valid, reuse it directly!
+    // Reuse the one open browser window for every step (ChatGPT -> Grok -> TikTok).
     if (this.activeInteractiveContext) {
       try {
-        const pages = this.activeInteractiveContext.pages();
-        if (pages.length > 0 && !pages[0].isClosed()) {
-          console.log('[JevBrowserAgent] Reusing active desktop browser session.');
-          return this.activeInteractiveContext;
-        }
+        this.activeInteractiveContext.pages();
+        return this.activeInteractiveContext;
       } catch {
         this.activeInteractiveContext = null;
       }
     }
+    if (!this.launchPromise) {
+      this.launchPromise = this.launchPersistent(headless)
+        .then(async (context) => {
+          await this.restoreCookies(context);
+          this.activeInteractiveContext = context;
+          context.on('close', () => {
+            if (this.activeInteractiveContext === context) this.activeInteractiveContext = null;
+          });
+          return context;
+        })
+        .finally(() => {
+          this.launchPromise = null;
+        });
+    }
+    return this.launchPromise;
+  }
 
+  private static async launchPersistent(headless: boolean): Promise<BrowserContext> {
     const profileDir = this.ensureProfileDir();
     this.cleanupStaleLocks(profileDir);
 
@@ -83,8 +127,12 @@ export class JevBrowserAgent {
         '--no-sandbox',
         '--disable-blink-features=AutomationControlled',
         '--disable-dev-shm-usage',
+        '--disable-session-crashed-bubble',
+        '--hide-crash-restore-bubble',
       ],
     });
+    // tsx/esbuild injects a __name() helper into in-page functions; give every page a no-op version so evaluate() never breaks.
+    await context.addInitScript('window.__name = window.__name || ((f) => f);');
     return context;
   }
 
@@ -649,8 +697,22 @@ export class JevBrowserAgent {
         }
       }
 
-      const domPrompt = matchingPrompts.length > 0 ? matchingPrompts[matchingPrompts.length - 1] : '';
-      const promptCount = matchingPrompts.length;
+      // Preferred: the longest code block in the LATEST assistant reply (independent of prompt wording)
+      const assistantTurns = document.querySelectorAll('[data-message-author-role="assistant"]');
+      const assistantCount = assistantTurns.length;
+      const lastTurn = assistantTurns[assistantCount - 1] as HTMLElement | undefined;
+      let latestReplyPrompt = '';
+      if (lastTurn) {
+        for (const pre of Array.from(lastTurn.querySelectorAll('pre'))) {
+          const t = ((pre as HTMLElement).innerText || '').trim();
+          if (t.length > 200 && t.length > latestReplyPrompt.length) latestReplyPrompt = t;
+        }
+      }
+
+      // Never mix sources: if the latest reply has no prompt yet, report none (so an OLD prompt is never reused).
+      const fallbackPrompt = matchingPrompts.length > 0 ? matchingPrompts[matchingPrompts.length - 1] : '';
+      const domPrompt = lastTurn ? latestReplyPrompt : fallbackPrompt;
+      const promptCount = lastTurn ? assistantCount : matchingPrompts.length;
 
       // 2. Extract Title & Hashtags from the latest TikTok Title block at the bottom of the page
       let title = '';
@@ -947,463 +1009,405 @@ export class JevBrowserAgent {
   }
 
   /**
-   * Step 2: Browse into Grok Imagine, activate Video mode, generate, and download video.
+   * Read the video settings ChatGPT wrote at the end of the prompt
+   * (e.g. "10 seconds • Vertical 9:16 • 720p • Sound enabled") and map them
+   * onto the options Grok Imagine actually offers (6s/10s/15s, 480p/720p, aspect ratio).
+   */
+  public static parseVideoSpec(prompt: string, fallbackSec = 10): GrokVideoSpec {
+    const lines = prompt.split('\n').map((l) => l.trim()).filter(Boolean);
+    const specLine =
+      [...lines].reverse().find(
+        (l) => /\b\d{1,2}\s*seconds?\b/i.test(l) && /(\d{3,4}p|\d+\s*:\s*\d+|sound|vertical)/i.test(l)
+      ) || '';
+    const requested = Number(specLine.match(/\b(\d{1,2})\s*seconds?\b/i)?.[1]) || fallbackSec;
+    const durationSec = GROK_DURATIONS.reduce((best, d) =>
+      Math.abs(d - requested) < Math.abs(best - requested) ? d : best
+    );
+    const resolution: GrokVideoSpec['resolution'] = /\b480p\b/i.test(specLine) ? '480p' : '720p';
+    const aspect: GrokVideoSpec['aspect'] = /16\s*:\s*9|horizontal|landscape/i.test(specLine)
+      ? '16:9'
+      : /1\s*:\s*1|square/i.test(specLine)
+        ? '1:1'
+        : '9:16';
+    return { durationSec, resolution, aspect };
+  }
+
+  /** Click a Grok composer radio (mode / resolution / duration) unless it is already selected. */
+  private static async selectGrokRadio(
+    page: Page,
+    by: { label?: string; text?: string },
+    waitMs = 3000
+  ): Promise<boolean> {
+    const btn = (
+      by.label
+        ? page.locator(`[role="radio"][aria-label="${by.label}"]`)
+        : page.locator('[role="radio"], [role="menuitemradio"], [role="option"]').filter({ hasText: new RegExp(`(^|\\s|\\b)${by.text}(\\b|\\s|$)`) })
+    ).filter({ visible: true }).first();
+    if (!(await btn.waitFor({ state: 'visible', timeout: waitMs }).then(() => true).catch(() => false))) return false;
+    if ((await btn.getAttribute('aria-checked')) !== 'true') {
+      // Short timeout and no retries into whatever pops up (e.g. a sign-in dialog).
+      await btn.click({ timeout: 5000 }).catch(() => {});
+      for (let i = 0; i < 4 && (await btn.getAttribute('aria-checked').catch(() => null)) !== 'true'; i++) {
+        await page.waitForTimeout(250);
+      }
+      const blocked = await page.locator('#dialog-portal').filter({ hasText: /continue with|sign in|log in|upgrade/i }).count().catch(() => 0);
+      if (blocked > 0) {
+        await page.keyboard.press('Escape').catch(() => {});
+        throw new Error(`Grok blocked the "${by.label || by.text}" option behind a sign-in/upgrade dialog. Log into Grok in the app's browser window, then run again.`);
+      }
+    }
+    const checked = (await btn.getAttribute('aria-checked')) === 'true' || (await btn.getAttribute('data-state')) === 'on';
+    if (!checked && by.text) {
+      const seen = await page.locator('[role="radio"]').evaluateAll((els) =>
+        els.map((e) => `${(e.textContent || e.getAttribute('aria-label') || '').trim()}=${e.getAttribute('aria-checked')}${(e as HTMLButtonElement).disabled ? '(disabled)' : ''}`).join(', ')
+      ).catch(() => '');
+      console.warn(`[JevBrowserAgent] Could not select "${by.text}". Grok options seen: ${seen}`);
+    }
+    return checked;
+  }
+
+  /**
+   * Signed-in Grok shows resolution and length as dropdown buttons ("Video resolution" = 480p, "Video duration" = 6s).
+   * Open the dropdown, choose the option, then confirm the button now shows it.
+   */
+  private static async selectGrokDropdown(page: Page, buttonLabel: string, optionText: string): Promise<boolean> {
+    const btn = page.locator(`button[aria-label="${buttonLabel}"]`).filter({ visible: true }).first();
+    if (!(await btn.waitFor({ state: 'visible', timeout: 3000 }).then(() => true).catch(() => false))) return false;
+    const current = async () => (await btn.innerText().catch(() => '')).trim();
+    if ((await current()) === optionText) return true;
+
+    await btn.click({ timeout: 5000 }).catch(() => {});
+    const item = page
+      .locator('[role="menuitemradio"], [role="menuitem"], [role="option"]')
+      .filter({ hasText: new RegExp(`^\\s*${optionText}\\s*$`) })
+      .filter({ visible: true })
+      .first();
+    if (!(await item.waitFor({ state: 'visible', timeout: 3000 }).then(() => true).catch(() => false))) {
+      await page.keyboard.press('Escape').catch(() => {});
+      return false;
+    }
+    await item.click({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(400);
+    await page.keyboard.press('Escape').catch(() => {}); // close the menu if it is still open
+    return (await current()) === optionText;
+  }
+
+  /**
+   * Put Grok Imagine's composer into Video mode with the requested duration, resolution and aspect ratio.
+   * Only touches the composer's own controls (Image/Video/Agent radios, 480p/720p, 6s/10s/15s, Aspect Ratio).
+   */
+  public static async configureGrokVideoMode(page: Page, spec: GrokVideoSpec): Promise<void> {
+    if (!(await this.selectGrokRadio(page, { label: 'Video' }, 15000))) {
+      const shot = path.join(__dirname, '../../storage/frames', `grok_no_video_toggle_${Date.now()}.png`);
+      await page.screenshot({ path: shot }).catch(() => {});
+      throw new Error(`Could not switch Grok Imagine to Video mode (the "Video" toggle beside the prompt box was not found). Screenshot: ${shot}`);
+    }
+    const resolutionOk =
+      (await this.selectGrokDropdown(page, 'Video resolution', spec.resolution)) ||
+      (await this.selectGrokRadio(page, { text: spec.resolution }, 1500));
+    const durationOk =
+      (await this.selectGrokDropdown(page, 'Video duration', `${spec.durationSec}s`)) ||
+      (await this.selectGrokRadio(page, { text: `${spec.durationSec}s` }, 1500));
+    if (!durationOk || !resolutionOk) {
+      console.warn(
+        `[JevBrowserAgent] Grok would not let us select ${!durationOk ? spec.durationSec + 's' : ''}${!durationOk && !resolutionOk ? ' / ' : ''}${!resolutionOk ? spec.resolution : ''}. ` +
+        'Grok will use whatever length/quality it already has selected. Check the Grok tab if the video comes out short or low-resolution.'
+      );
+    }
+
+    let aspectOk = false;
+    const aspectBtn = page.locator('button[aria-label="Aspect Ratio"]').first();
+    if (await aspectBtn.isVisible().catch(() => false)) {
+      if ((await aspectBtn.innerText().catch(() => '')).trim() === spec.aspect) {
+        aspectOk = true;
+      } else {
+        await aspectBtn.click();
+        const item = page.locator('[role="menuitemradio"]').filter({ hasText: spec.aspect }).first();
+        aspectOk = await item.waitFor({ state: 'visible', timeout: 2500 }).then(() => true).catch(() => false);
+        if (aspectOk) await item.click();
+        else await page.keyboard.press('Escape');
+        await page.waitForTimeout(250);
+      }
+    }
+    console.log(
+      `[JevBrowserAgent] Grok set to Video • ${spec.durationSec}s${durationOk ? '' : ' (not found)'} • ${spec.resolution}${resolutionOk ? '' : ' (not found)'} • ${spec.aspect}${aspectOk ? '' : ' (not found)'}`
+    );
+  }
+
+  /** The composer <form> on grok.com/imagine (the one holding the prompt textbox). */
+  private static grokComposer(page: Page) {
+    return page.locator('form').filter({ has: page.locator('[role="textbox"], [contenteditable="true"], textarea') }).first();
+  }
+
+  /**
+   * Attach the Mr. Apple reference image to the composer's OWN file input.
+   * (The page has other hidden file inputs that open the image editor — never use those.)
+   */
+  private static async attachGrokReferenceImage(page: Page, imagePath: string): Promise<void> {
+    const composer = this.grokComposer(page);
+    const countThumbs = () =>
+      page.evaluate(() => {
+        const form = Array.from(document.querySelectorAll('form')).find((f) => f.querySelector('[role="textbox"], [contenteditable="true"], textarea'));
+        return (form ? form.querySelectorAll('img').length : 0) + document.querySelectorAll('img[src^="blob:"]').length;
+      }).catch(() => 0);
+
+    const before = await countThumbs();
+    const fileInput = composer.locator('input[type="file"]').first();
+    if ((await fileInput.count()) > 0) {
+      await fileInput.setInputFiles(imagePath);
+    } else {
+      // Fallback (macOS): paste the image from the clipboard into the composer textbox.
+      console.warn('[JevBrowserAgent] Composer file input not found; pasting reference image from clipboard instead.');
+      await execFileAsync('osascript', ['-e', `set the clipboard to (read (POSIX file "${imagePath}") as JPEG picture)`]);
+      await composer.locator('[role="textbox"], [contenteditable="true"], textarea').first().click();
+      await page.keyboard.press('Meta+V');
+    }
+
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      if (!page.url().includes('/imagine') || page.url().includes('/imagine/post/')) {
+        throw new Error(`Uploading the reference image navigated Grok away from the prompt composer (${page.url()}).`);
+      }
+      if ((await countThumbs()) > before) {
+        console.log('[JevBrowserAgent] Mr. Apple reference image attached to Grok prompt.');
+        await page.waitForTimeout(800); // let the upload finish before submitting
+        return;
+      }
+      await page.waitForTimeout(400);
+    }
+    console.warn('[JevBrowserAgent] Could not visually confirm the reference image thumbnail; continuing.');
+  }
+
+  /**
+   * Step 2: In Grok Imagine — Video mode + reference image + EXACT ChatGPT prompt → generate → download the MP4.
    */
   public static async createVideoViaGrok(
     grokPrompt: string,
     jobId: string,
     shotNumber = 1,
-    headless = false
-  ): Promise<{ videoPath: string; screenshotPath?: string; imagePath?: string }> {
-    const context = await this.launchContext(headless);
-    const pages = context.pages();
-
-    // Find an existing Grok tab, or use Tab 2, or create a new tab
-    let page = pages.find((p) => p.url().includes('grok.com'));
-    if (!page) {
-      if (pages.length > 1 && !pages[1].url().includes('chatgpt.com')) {
-        page = pages[1];
-      } else {
-        page = await context.newPage();
-      }
+    headless = false,
+    requestedDurationSec?: number
+  ): Promise<{ videoPath: string; screenshotPath?: string; imagePath?: string; durationSec: number; width?: number; height?: number }> {
+    if (!grokPrompt || grokPrompt.length < 50) {
+      throw new Error(`Grok prompt is invalid or too short (${grokPrompt?.length || 0} chars). Aborting.`);
     }
-    await page.bringToFront().catch(() => { });
+
+    const context = await this.launchContext(headless);
+    const page = context.pages().find((p) => p.url().includes('grok.com')) || (await context.newPage());
+    await page.bringToFront().catch(() => {});
 
     const storageVideos = path.join(__dirname, '../../storage/videos');
     const framesDir = path.join(__dirname, '../../storage/frames');
-    if (!fs.existsSync(storageVideos)) fs.mkdirSync(storageVideos, { recursive: true });
-    if (!fs.existsSync(framesDir)) fs.mkdirSync(framesDir, { recursive: true });
+    fs.mkdirSync(storageVideos, { recursive: true });
+    fs.mkdirSync(framesDir, { recursive: true });
 
     const screenshotPath = path.join(framesDir, `grok_state_${jobId}_shot${shotNumber}_${Date.now()}.png`);
     const outputVideoPath = path.join(storageVideos, `shot_${jobId}_${shotNumber}.mp4`);
     const outputImagePath = path.join(framesDir, `shot_${jobId}_${shotNumber}.png`);
+    // The operator's requested length (default 15s) wins over the length written in the ChatGPT prompt.
+    const spec = this.parseVideoSpec(grokPrompt, requestedDurationSec || 15);
+    spec.resolution = '720p'; // always 720p, whatever the ChatGPT prompt says
+    if (requestedDurationSec) {
+      spec.durationSec = GROK_DURATIONS.reduce((best, d) =>
+        Math.abs(d - requestedDurationSec) < Math.abs(best - requestedDurationSec) ? d : best
+      );
+    }
 
-    let capturedVideoBuffer: Buffer | null = null;
-    let capturedVideoUrl = '';
-    let initialVideoSet = new Set<string>();
-
+    // Full (HTTP 200) video bodies seen after submit, keyed by URL. 206 range chunks are ignored — they are partial files.
+    const fullVideoBodies = new Map<string, Buffer>();
+    let listening = false;
     const onResponse = async (response: any) => {
       try {
-        const url = response.url();
+        if (response.status() !== 200) return;
         const ct = (response.headers()['content-type'] || '').toLowerCase();
-        const cleanUrl = url.toLowerCase().split('?')[0];
-        const isVideoMime = ct.includes('video/mp4') || ct.includes('video/webm') || ct.includes('video/quicktime');
-        const isVideoExt = cleanUrl.endsWith('.mp4') || cleanUrl.endsWith('.webm');
-        if (
-          (isVideoMime || isVideoExt) &&
-          !initialVideoSet.has(url) &&
-          response.status() >= 200 &&
-          response.status() < 300
-        ) {
-          const buf = await response.body().catch(() => null);
-          if (buf && this.isValidVideoBuffer(buf)) {
-            capturedVideoBuffer = buf;
-            capturedVideoUrl = url;
-            console.log(
-              `[JevBrowserAgent] Network interceptor captured genuine MP4 video for Shot ${shotNumber} (${buf.length} bytes): ${url.slice(0, 80)}...`
-            );
-          }
-        }
+        const url: string = response.url();
+        if (!ct.startsWith('video/') && !/\.(mp4|webm)(\?|$)/i.test(url)) return;
+        const buf = await response.body().catch(() => null);
+        if (buf && this.isValidVideoBuffer(buf)) fullVideoBodies.set(url, buf);
       } catch { }
     };
 
+    const fail = async (message: string): Promise<never> => {
+      await page.screenshot({ path: screenshotPath }).catch(() => {});
+      throw new Error(`${message} Screenshot: ${screenshotPath}`);
+    };
+
     try {
-      // 1. Always navigate to clean root Grok Imagine so NO old video exists on screen
-      console.log('[JevBrowserAgent] Navigating to fresh Grok Imagine session (https://grok.com/imagine)...');
+      // 1. Fresh Grok Imagine composer
+      console.log('[JevBrowserAgent] Opening fresh Grok Imagine composer (https://grok.com/imagine)...');
       await page.goto('https://grok.com/imagine', { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForTimeout(3000);
-
-      // Self-healing: dismiss Grok cookie banners or dialogs
-      const dismissBtn = await page.$(
-        'button:has-text("Accept All Cookies"), button:has-text("Accept"), button:has-text("Dismiss"), button:has-text("Got it"), button:has-text("Close"), button[aria-label="Dismiss cookie notice"]'
-      );
-      if (dismissBtn) {
-        await dismissBtn.click({ force: true }).catch(() => { });
-        await page.waitForTimeout(300);
+      const textbox = this.grokComposer(page).locator('[role="textbox"], [contenteditable="true"], textarea').first();
+      const ready = await textbox.waitFor({ state: 'visible', timeout: 20000 }).then(() => true).catch(() => false);
+      if (!ready) {
+        const needsLogin = await page.$('a[href*="/sign-in"], a[href*="/login"], button:has-text("Sign in"), button:has-text("Log in")');
+        await fail(needsLogin
+          ? 'Grok requires login. Open the interactive browser and sign into Grok first.'
+          : 'Grok Imagine prompt box did not load.');
       }
 
-      // Check for login requirement
-      const loginRequired = await page.$('a[href*="/login"], button:has-text("Sign in"), button:has-text("Log in")');
-      if (loginRequired && !page.url().includes('imagine')) {
-        await page.screenshot({ path: screenshotPath });
-        console.warn('[JevBrowserAgent] Grok requires login. Saved screenshot to:', screenshotPath);
-        if (context !== this.activeInteractiveContext) {
-          await context.close().catch(() => { });
-        }
-        throw new Error(`Grok requires login. Please open interactive browser to log into Grok first.`);
+      // Logged-out Grok only allows basic videos and pops a sign-in dialog on 10s/720p — stop and ask for login instead.
+      const signInVisible = await page
+        .locator('a, button')
+        .filter({ hasText: /^\s*Sign in\s*$/i })
+        .filter({ visible: true })
+        .count()
+        .catch(() => 0);
+      if (signInVisible > 0) {
+        await fail('Grok is not signed in. Click "Launch Browser Window to Log In" in Settings and sign into Grok, then run again.');
       }
 
-      // 2. Click the "Video" button to switch to Video Generation mode
-      console.log(`[JevBrowserAgent] Selecting Video mode in Grok Imagine for Shot ${shotNumber}...`);
-      const videoModeBtn = await page.$(
-        'button:has-text("Video"), [role="tab"]:has-text("Video"), button[aria-label*="Video" i], [role="radio"]:has-text("Video"), button:has(svg):has-text("Video")'
-      );
-      if (videoModeBtn) {
-        await videoModeBtn.click({ force: true }).catch(() => { });
-        await page.waitForTimeout(800);
-      }
+      // Decline non-essential cookies if the banner is up (it can cover the composer controls)
+      const rejectCookies = page.locator('button:has-text("Reject All")').first();
+      if (await rejectCookies.isVisible().catch(() => false)) await rejectCookies.click().catch(() => {});
 
-      // 3. Focus input box first
-      const inputSelector = 'div[aria-label="Ask Grok anything"], div[contenteditable="true"], textarea, div[role="textbox"], input[type="text"]';
-      await page.waitForSelector(inputSelector, { timeout: 10000 });
-      await page.focus(inputSelector);
-      await page.keyboard.press('Meta+A');
-      await page.keyboard.press('Backspace');
-      await page.waitForTimeout(200);
+      // 2. Video mode + settings from the ChatGPT prompt
+      await this.configureGrokVideoMode(page, spec);
 
-      // Attach Mr. Apple reference image to lock in character design (STRICTLY ONCE)
+      // 3. Reference image (character lock)
       const refImagePath = path.resolve(__dirname, '../../storage/mr_apple_reference.jpg');
       if (fs.existsSync(refImagePath)) {
-        console.log(`[JevBrowserAgent] Attaching Mr. Apple reference image to Grok: ${refImagePath}`);
-        let attached = false;
-
-        // Check if an image is already attached in the prompt box
-        const alreadyAttached = await page.evaluate(() => {
-          return !!document.querySelector('img[src*="blob:"], [aria-label*="Remove" i], [class*="thumbnail" i], [class*="attachment" i]');
-        }).catch(() => false);
-
-        if (!alreadyAttached) {
-          // Method 1: Primary file input
-          try {
-            const fileInput = await page.$('input[type="file"]');
-            if (fileInput) {
-              await fileInput.setInputFiles(refImagePath);
-              await page.waitForTimeout(1500);
-              console.log('[JevBrowserAgent] Reference image attached via Grok primary file input.');
-              attached = true;
-            }
-          } catch (fiErr: any) {
-            console.warn('[JevBrowserAgent] File input notice:', fiErr.message);
-          }
-
-          // Check if thumbnail appeared after file input
-          const hasThumbnail = await page.evaluate(() => {
-            return !!document.querySelector('img[src*="blob:"], [aria-label*="Remove" i], [class*="thumbnail" i], [class*="attachment" i]');
-          }).catch(() => false);
-
-          // Method 2: Native clipboard paste via execFileSync (handles paths with single quotes without bash errors)
-          if (!hasThumbnail) {
-            try {
-              const { execFileSync } = require('child_process');
-              execFileSync('osascript', ['-e', `set the clipboard to (read (POSIX file "${refImagePath}") as JPEG picture)`]);
-              await page.focus(inputSelector);
-              await page.waitForTimeout(200);
-              await page.keyboard.press('Meta+V');
-              await page.waitForTimeout(1500);
-              console.log('[JevBrowserAgent] Reference image attached via native clipboard Meta+V.');
-              attached = true;
-            } catch (clipErr: any) {
-              console.warn('[JevBrowserAgent] Clipboard paste notice:', clipErr.message);
-            }
-          }
-        } else {
-          console.log('[JevBrowserAgent] Reference image thumbnail already present in Grok prompt.');
-          attached = true;
-        }
+        await this.attachGrokReferenceImage(page, refImagePath);
+        // Attaching an image can change the composer's options — re-assert Video settings.
+        await this.configureGrokVideoMode(page, spec);
+      } else {
+        console.warn(`[JevBrowserAgent] Reference image missing at ${refImagePath}; generating without it.`);
       }
 
-      // Snapshot any existing video sources on /imagine BEFORE attaching listener & submitting prompt
-      const initialVideoSrcs = await page.$$eval('video', els =>
-        els.map(v => (v as HTMLVideoElement).currentSrc || (v as HTMLVideoElement).src || v.querySelector('source')?.src || '').filter(Boolean)
-      ).catch(() => []);
-      initialVideoSet = new Set(initialVideoSrcs);
+      // 4. Paste the EXACT ChatGPT prompt
+      console.log(`[JevBrowserAgent] Pasting exact ChatGPT prompt into Grok (${grokPrompt.length} chars)...`);
+      await textbox.click();
+      await page.keyboard.press('Meta+A');
+      await page.keyboard.press('Backspace');
+      await textbox.fill(grokPrompt).catch(() => {});
+      const typedLen = await textbox.evaluate((el: any) => (el.value ?? el.innerText ?? '').trim().length).catch(() => 0);
+      if (typedLen < grokPrompt.length * 0.8) {
+        await textbox.click();
+        await page.keyboard.press('Meta+A');
+        await page.keyboard.insertText(grokPrompt);
+      }
 
-      // Attach network response listener ONLY AFTER /imagine has loaded so gallery thumbnails are never captured
+      // Snapshot videos already on the page so we never download an old one
+      const initialSrcs = await page.$$eval('video', (els) =>
+        els.map((v) => (v as HTMLVideoElement).currentSrc || (v as HTMLVideoElement).src).filter(Boolean)
+      ).catch(() => [] as string[]);
+
       page.on('response', onResponse);
+      listening = true;
 
-      // 4. Type the EXACT ChatGPT prompt into Grok input box
-      if (!grokPrompt || grokPrompt.length < 50) {
-        throw new Error(`Grok prompt is invalid or too short (${grokPrompt?.length || 0} chars). Aborting.`);
+      // 5. Submit once
+      const submitBtn = this.grokComposer(page).locator('button[aria-label="Submit"], button[type="submit"]').first();
+      if (await submitBtn.isEnabled({ timeout: 5000 }).catch(() => false)) {
+        await submitBtn.click();
+      } else {
+        await textbox.click();
+        await page.keyboard.press('Enter');
       }
+      console.log(`[JevBrowserAgent] Submitted Shot ${shotNumber} to Grok. Waiting for the video...`);
 
-      await page.focus(inputSelector);
-      await page.waitForTimeout(200);
-      console.log(`[JevBrowserAgent] Pasting EXACT master prompt into Grok Imagine (${grokPrompt.length} chars):\n${grokPrompt.slice(0, 200)}...`);
+      // 6. Wait for the finished video (main/largest <video>, new src, expected length)
+      // Grok may hide the duration options once an image is attached (it then picks its own length, e.g. 6s),
+      // so accept any real clip; old videos are already excluded via initialSrcs.
+      const minDuration = 4;
+      const timeoutMs = 6 * 60 * 1000;
+      const start = Date.now();
+      let lastSrc = '';
+      let stableTicks = 0;
+      let lastLog = 0;
+      let main: { src: string; duration: number; w?: number; h?: number } | null = null;
 
-      // Fill prompt cleanly into contenteditable or textarea
-      try {
-        await page.fill(inputSelector, grokPrompt);
-      } catch {
-        await page.evaluate(({ sel, text }) => {
-          const el = document.querySelector(sel) as HTMLElement | null;
-          if (el) {
-            el.focus();
-            if ('value' in el) (el as any).value = text;
-            else el.innerText = text;
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-          }
-        }, { sel: inputSelector, text: grokPrompt });
-      }
-      await page.waitForTimeout(500);
-
-      // Submit prompt strictly ONCE via Enter key
-      console.log(`[JevBrowserAgent] Submitting prompt for Shot ${shotNumber} to Grok Imagine via Enter key...`);
-      await page.keyboard.press('Enter');
-      await page.waitForTimeout(600);
-
-      // Fallback: click explicit submit button if prompt text is still sitting in the input box
-      const submitBtn = await page.$('button[aria-label="Submit"], button[aria-label*="Generate" i], button[type="submit"]');
-      if (submitBtn) {
-        const isStillThere = await page.evaluate((sel) => {
-          const el = document.querySelector(sel);
-          return el ? (el as HTMLElement).innerText.length > 20 : false;
-        }, inputSelector).catch(() => false);
-        if (isStillThere) {
-          console.log('[JevBrowserAgent] Clicking Grok submit button as fallback...');
-          await submitBtn.click({ force: true }).catch(() => { });
-        }
-      }
-
-      // 5. Wait for Grok to acknowledge & start rendering (MUST observe generation in progress)
-      console.log(`[JevBrowserAgent] Waiting for Grok to acknowledge Shot ${shotNumber} generation...`);
-      let observedGeneration = false;
-      const startWaitBegin = Date.now();
-
-      while (Date.now() - startWaitBegin < 25000) {
-        await page.waitForTimeout(600);
-        const state = await page.evaluate(() => {
+      while (Date.now() - start < timeoutMs) {
+        await page.waitForTimeout(2000);
+        const state = await page.evaluate(({ initial, minDur }) => {
           const text = document.body.innerText || '';
-          const hasPct = /\b\d{1,2}%\b/.test(text);
-          const hasWorking = text.includes('Generating') || text.includes('Working');
-          return { hasPct, hasWorking, url: window.location.href };
-        }).catch(() => ({ hasPct: false, hasWorking: false, url: '' }));
-
-        if (state.hasPct || state.hasWorking || state.url.includes('/post/')) {
-          observedGeneration = true;
-          console.log(`[JevBrowserAgent] Grok confirmed generation in progress for Shot ${shotNumber}! (URL: ${state.url})`);
-          break;
-        }
-      }
-
-      // 6. Monitor Grok Imagine generation for Shot completion
-      console.log(`[JevBrowserAgent] Monitoring Grok Imagine generation for Shot ${shotNumber} until 100% complete...`);
-      const grokStartTime = Date.now();
-      const grokTimeoutMs = 240000; // 4 minutes max
-      let hasTriggeredAnimate = false;
-
-      while (Date.now() - grokStartTime < grokTimeoutMs) {
-        await page.waitForTimeout(1500);
-
-        // Check if progress percentage is still displayed
-        const progressState = await page.evaluate(() => {
-          const allText = document.body.innerText || '';
-          const matches = allText.match(/\b\d{1,2}%\b/g);
-          const hasProgress = (matches && matches.length > 0) || allText.includes('Generating video') || allText.includes('Generating...');
-          return {
-            hasProgress: !!hasProgress,
-            percentText: matches ? matches[0] : null,
-          };
-        }).catch(() => ({ hasProgress: false, percentText: null }));
-
-        if (progressState.hasProgress) {
-          observedGeneration = true;
-          if ((Date.now() - grokStartTime) % 6000 < 1600) {
-            console.log(`[JevBrowserAgent] Shot ${shotNumber} rendering: ${progressState.percentText || 'in progress'}...`);
+          const errorMatch = text.match(/content moderated|couldn['’]t generate|failed to generate|generation failed|rate limit|limit reached|try again later/i);
+          const progress = text.match(/\b(\d{1,2})%/)?.[1] || null;
+          const makeVideo = Array.from(document.querySelectorAll('button')).some((b) => /^\s*make video\s*$/i.test(b.textContent || ''));
+          let best: HTMLVideoElement | null = null;
+          let bestArea = 0;
+          for (const v of Array.from(document.querySelectorAll('video'))) {
+            const r = v.getBoundingClientRect();
+            const area = r.width * r.height;
+            if (area > bestArea) { best = v; bestArea = area; }
           }
-          continue; // Still generating, keep waiting!
-        }
-
-        // Check if an image was generated first with "Make Video" or "Animate" button
-        const makeVideoBtn = await page.$(
-          'button:has-text("Make Video"), button:has-text("Make video"), button:has-text("Animate"), button:has-text("Animate photo"), [role="button"]:has-text("Make Video")'
-        );
-        if (makeVideoBtn) {
-          console.log(`[JevBrowserAgent] Detected "Make Video" button on Grok image! Triggering video animation for Shot ${shotNumber}...`);
-          await makeVideoBtn.click({ force: true }).catch(() => {});
-          observedGeneration = true;
-          hasTriggeredAnimate = true;
-          await page.waitForTimeout(4000);
-          continue;
-        }
-
-        // Check for a BRAND NEW <video> element whose source is NOT in initialVideoSet and has loaded duration >= 5s
-        const newVideoStatus = await page.evaluate((initialSrcList) => {
-          const initialSet = new Set(initialSrcList);
-          const videos = Array.from(document.querySelectorAll('video')) as HTMLVideoElement[];
-          for (const v of videos) {
-            const src = v.currentSrc || v.src || v.querySelector('source')?.src || '';
-            if (src && !initialSet.has(src) && !src.includes('about:blank') && v.duration >= 5 && v.readyState >= 2) {
-              return { ready: true, src, duration: v.duration };
+          document.querySelectorAll('[data-kindred-main]').forEach((el) => el.removeAttribute('data-kindred-main'));
+          let video: { src: string; duration: number; w?: number; h?: number } | null = null;
+          if (best) {
+            const src = best.currentSrc || best.src || '';
+            if (src && !initial.includes(src) && best.readyState >= 1 && best.duration >= minDur) {
+              best.setAttribute('data-kindred-main', '1');
+              video = { src, duration: best.duration, w: best.videoWidth, h: best.videoHeight };
             }
           }
-          return { ready: false, src: '', duration: 0 };
-        }, Array.from(initialVideoSet)).catch(() => ({ ready: false, src: '', duration: 0 }));
+          return { url: location.href, error: errorMatch ? errorMatch[0] : null, progress, makeVideo, video };
+        }, { initial: initialSrcs, minDur: minDuration }).catch(() => null);
 
-        // Action buttons that are STRICTLY video-specific post-generation controls
-        const videoActionButtons = await page.$(
-          'button:has-text("Replace Audio"), button:has-text("Extend"), button:has-text("Upscale"), button[aria-label*="Replace Audio" i]'
-        ).catch(() => null);
-
-        // STRICT GUARD: Generation is complete ONLY when the real <video> (duration >= 5s) is ready on screen
-        // or the post-generation video tools are visible alongside a validated MP4 buffer (>= 250KB, ftyp header)
-        const hasValidCapturedMp4 = this.isValidVideoBuffer(capturedVideoBuffer);
-        const isVideoReady =
-          (newVideoStatus.ready && newVideoStatus.duration >= 5) ||
-          (videoActionButtons !== null && hasValidCapturedMp4 && Date.now() - grokStartTime > 15000);
-
-        if (observedGeneration && !progressState.hasProgress && isVideoReady) {
-          console.log(
-            `[JevBrowserAgent] Real newly generated Grok video confirmed ready for Shot ${shotNumber}! (Duration: ${newVideoStatus.duration || 15}s, Valid MP4 buffer: ${hasValidCapturedMp4})`
-          );
-          // Wait 3 seconds for the video player to stream/buffer completely
-          await page.waitForTimeout(3000);
-          break;
+        if (!state) continue;
+        if (state.error) await fail(`Grok reported: "${state.error}".`);
+        if (state.makeVideo && !state.video && !state.progress && Date.now() - start > 20000) {
+          await fail('Grok produced an IMAGE instead of a video (Video mode was not active). Not posting anything.');
+        }
+        if (Date.now() - lastLog > 10000) {
+          lastLog = Date.now();
+          console.log(`[JevBrowserAgent] Shot ${shotNumber}: ${state.progress ? state.progress + '%' : 'rendering'} (${Math.round((Date.now() - start) / 1000)}s)`);
+        }
+        if (state.video && !state.progress) {
+          stableTicks = state.video.src === lastSrc ? stableTicks + 1 : 0;
+          lastSrc = state.video.src;
+          if (stableTicks >= 1) { main = state.video; break; }
+        } else {
+          stableTicks = 0;
         }
       }
 
-      await page.screenshot({ path: screenshotPath }).catch(() => { });
-
-      // MULTI-LAYER VIDEO EXTRACTION (every layer strictly validates MP4 header & >= 250KB size!):
-      // Layer 1: Network Interceptor Buffer (already captured as the <video> played in Grok)
-      if (!this.isValidVideoFile(outputVideoPath) && this.isValidVideoBuffer(capturedVideoBuffer)) {
-        fs.writeFileSync(outputVideoPath, capturedVideoBuffer!);
-        console.log(
-          `[JevBrowserAgent] Shot ${shotNumber} saved from verified MP4 network stream (${capturedVideoBuffer!.length} bytes):`,
-          outputVideoPath
-        );
+      if (!main) await fail(`Grok did not finish a ${spec.durationSec}s video for Shot ${shotNumber} within 6 minutes.`);
+      const sizeNote = main!.w && main!.h ? `${main!.w}x${main!.h}` : 'size unknown';
+      console.log(`[JevBrowserAgent] Grok video ready (${main!.duration.toFixed(1)}s, ${sizeNote}): ${main!.src.slice(0, 90)}`);
+      if (main!.h && Math.min(main!.w || 0, main!.h) < 700) {
+        console.warn(`[JevBrowserAgent] WARNING: this video is ${sizeNote} — lower than 720p. Grok did not apply the 720p setting.`);
       }
 
-      // Layer 2: Direct URL fetch via Playwright APIRequestContext from <video>.currentSrc
-      if (!this.isValidVideoFile(outputVideoPath)) {
-        const targetSrc = await page.evaluate((initialSrcList) => {
-          const initialSet = new Set(initialSrcList);
-          const videos = Array.from(document.querySelectorAll('video')) as HTMLVideoElement[];
-          for (const v of videos) {
-            const s = v.currentSrc || v.src || v.querySelector('source')?.src || '';
-            if (s && !initialSet.has(s) && !s.includes('about:blank') && v.duration >= 5) return s;
-          }
-          return '';
-        }, Array.from(initialVideoSet)).catch(() => '');
-
-        if (targetSrc && targetSrc.startsWith('http')) {
-          console.log(`[JevBrowserAgent] Fetching Shot ${shotNumber} MP4 URL directly via Playwright:`, targetSrc);
+      // 7. Download the exact video that is on screen
+      let saved: Buffer | null = null;
+      if (main!.src.startsWith('http')) {
+        const resp = await page.request.get(main!.src).catch(() => null);
+        const buf = resp && resp.ok() ? await resp.body().catch(() => null) : null;
+        if (this.isValidVideoBuffer(buf)) saved = buf;
+      }
+      if (!saved && fullVideoBodies.has(main!.src)) saved = fullVideoBodies.get(main!.src)!;
+      if (!saved) {
+        const b64 = await page.evaluate(async (src) => {
           try {
-            const resp = await page.request.get(targetSrc);
-            if (resp.ok()) {
-              const buf = await resp.body();
-              if (this.isValidVideoBuffer(buf)) {
-                fs.writeFileSync(outputVideoPath, buf);
-                console.log(`[JevBrowserAgent] Shot ${shotNumber} saved via Playwright request (${buf.length} bytes):`, outputVideoPath);
-              }
-            }
-          } catch (reqErr: any) {
-            console.warn(`[JevBrowserAgent] Playwright direct request note for Shot ${shotNumber}:`, reqErr.message);
-          }
-        }
-      }
-
-      // Layer 3: In-page fetch() + FileReader (for blob: or authenticated video URLs)
-      if (!this.isValidVideoFile(outputVideoPath)) {
-        const videoBase64 = await page.evaluate(async (initialSrcList) => {
-          const initialSet = new Set(initialSrcList);
-          const videos = Array.from(document.querySelectorAll('video')) as HTMLVideoElement[];
-          let targetVideo: HTMLVideoElement | null = null;
-          for (const v of videos) {
-            const src = v.currentSrc || v.src || v.querySelector('source')?.src || '';
-            if (src && !initialSet.has(src) && !src.includes('about:blank') && v.duration >= 5) {
-              targetVideo = v;
-              break;
-            }
-          }
-          if (!targetVideo) return null;
-          const src = targetVideo?.currentSrc || targetVideo?.src || targetVideo?.querySelector('source')?.src;
-          if (!src) return null;
-          try {
-            const res = await fetch(src);
-            const blob = await res.blob();
-            if (blob.size < 250000) return null;
-            return new Promise<string>((resolve) => {
-              const reader = new FileReader();
-              reader.onloadend = () => resolve(reader.result as string);
-              reader.readAsDataURL(blob);
+            const blob = await (await fetch(src)).blob();
+            return await new Promise<string>((resolve) => {
+              const r = new FileReader();
+              r.onloadend = () => resolve(String(r.result));
+              r.readAsDataURL(blob);
             });
-          } catch {
-            return null;
-          }
-        }, Array.from(initialVideoSet)).catch(() => null);
-
-        if (videoBase64 && videoBase64.includes('base64,')) {
-          const buffer = Buffer.from(videoBase64.split('base64,')[1], 'base64');
-          if (this.isValidVideoBuffer(buffer)) {
-            fs.writeFileSync(outputVideoPath, buffer);
-            console.log(`[JevBrowserAgent] Shot ${shotNumber} saved via in-page FileReader (${buffer.length} bytes):`, outputVideoPath);
-          }
+          } catch { return null; }
+        }, main!.src).catch(() => null);
+        if (b64?.includes('base64,')) {
+          const buf = Buffer.from(b64.split('base64,')[1], 'base64');
+          if (this.isValidVideoBuffer(buf)) saved = buf;
         }
       }
+      if (!saved) await fail('Grok finished the video but it could not be downloaded.');
+      fs.writeFileSync(outputVideoPath, saved!);
+      console.log(`[JevBrowserAgent] Shot ${shotNumber} saved (${saved!.length} bytes): ${outputVideoPath}`);
 
-      // Layer 4: Grok Native UI Download Button
-      if (!this.isValidVideoFile(outputVideoPath)) {
-        try {
-          const downloadBtn = await page.$(
-            'button[aria-label*="Download" i], button[title*="Download" i], a[download]'
-          );
-          if (downloadBtn) {
-            console.log(`[JevBrowserAgent] Triggering Grok native UI Download button for Shot ${shotNumber}...`);
-            const downloadPromise = page.waitForEvent('download', { timeout: 15000 }).catch(() => null);
-            await downloadBtn.click({ force: true }).catch(() => { });
-            const download = await downloadPromise;
-            if (download) {
-              await download.saveAs(outputVideoPath);
-              console.log(`[JevBrowserAgent] Shot ${shotNumber} downloaded via UI Download button:`, outputVideoPath);
-            }
-          }
-        } catch (dlErr: any) {
-          console.warn(`[JevBrowserAgent] Grok Download button attempt note for Shot ${shotNumber}:`, dlErr.message);
-        }
-      }
+      // Thumbnail: a frame of the finished video
+      await page.locator('video[data-kindred-main]').first().screenshot({ path: outputImagePath, timeout: 5000 }).catch(() => {});
+      await page.screenshot({ path: screenshotPath }).catch(() => {});
 
-      // Final validation: if outputVideoPath is not a valid MP4/WebM video, remove it so we never upload a bad file
-      if (fs.existsSync(outputVideoPath) && !this.isValidVideoFile(outputVideoPath)) {
-        console.warn(`[JevBrowserAgent] Rejecting invalid/non-MP4 file at ${outputVideoPath}`);
-        fs.unlinkSync(outputVideoPath);
-      }
-
-      // Also capture the generated image card as visual keyframe asset (only if real image > 5KB)
-      const imageBase64 = await page.evaluate(async () => {
-        const img = document.querySelector('img[src*="x.ai"], img[src*="grok"], img[src*="blob:"], div[data-testid*="image"] img') as HTMLImageElement | null;
-        if (!img || !img.src) return null;
-        try {
-          const res = await fetch(img.src);
-          const blob = await res.blob();
-          if (blob.size < 5000) return null;
-          return new Promise<string>((resolve) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result as string);
-            reader.readAsDataURL(blob);
-          });
-        } catch {
-          return null;
-        }
-      }).catch(() => null);
-
-      if (imageBase64 && imageBase64.includes('base64,')) {
-        const imgBuffer = Buffer.from(imageBase64.split('base64,')[1], 'base64');
-        if (imgBuffer.length > 5000) {
-          fs.writeFileSync(outputImagePath, imgBuffer);
-          console.log(`[JevBrowserAgent] Real Grok artwork saved to computer (${imgBuffer.length} bytes):`, outputImagePath);
-        }
-      }
-
-      page.off('response', onResponse);
-
-      if (context !== this.activeInteractiveContext) {
-        await context.close().catch(() => { });
-      }
       return {
-        videoPath: fs.existsSync(outputVideoPath) ? outputVideoPath : '',
+        videoPath: outputVideoPath,
         imagePath: fs.existsSync(outputImagePath) ? outputImagePath : undefined,
         screenshotPath,
+        durationSec: Math.round(main!.duration),
+        width: main!.w,
+        height: main!.h,
       };
-    } catch (err: any) {
-      page.off('response', onResponse);
-      if (page && !page.isClosed()) {
-        await page.screenshot({ path: screenshotPath }).catch(() => { });
-      }
-      if (context !== this.activeInteractiveContext) {
-        await context.close().catch(() => { });
-      }
-      throw err;
+    } finally {
+      if (listening) page.off('response', onResponse);
     }
   }
 
@@ -1430,24 +1434,7 @@ export class JevBrowserAgent {
     this.isLaunching = true;
     try {
       console.log('[JevBrowserAgent] Opening interactive browser for login session...');
-      const profileDir = this.ensureProfileDir();
-      this.cleanupStaleLocks(profileDir);
-
-      const context = await chromium.launchPersistentContext(profileDir, {
-        headless: false,
-        viewport: { width: 1280, height: 850 },
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        args: [
-          '--no-sandbox',
-          '--disable-blink-features=AutomationControlled',
-          '--disable-dev-shm-usage',
-        ],
-      });
-
-      this.activeInteractiveContext = context;
-      context.on('close', () => {
-        this.activeInteractiveContext = null;
-      });
+      const context = await this.launchContext(false);
 
       // Use the default page for ChatGPT
       const pages = context.pages();
@@ -1573,14 +1560,349 @@ export class JevBrowserAgent {
     return result;
   }
 
+  // ───────────────────────── Logins: saved cookies + "sign in only if needed" ─────────────────────────
+
+  private static cookiesFile = path.join(__dirname, '../../storage/browser_cookies.json');
+
+  /**
+   * Chromium drops "session" cookies (which most sites use for the login) when the browser closes.
+   * We save every cookie after a successful login check / run and put the missing ones back on the next launch,
+   * so unattended daily runs stay signed in. The file is private to this user (chmod 600) and git-ignored.
+   */
+  public static async saveCookies(context: BrowserContext): Promise<void> {
+    try {
+      const cookies = await context.cookies();
+      if (cookies.length === 0) return;
+      fs.writeFileSync(this.cookiesFile, JSON.stringify(cookies), { mode: 0o600 });
+      fs.chmodSync(this.cookiesFile, 0o600);
+    } catch (err: any) {
+      console.warn('[JevBrowserAgent] Could not save login cookies:', err.message);
+    }
+  }
+
+  private static async restoreCookies(context: BrowserContext): Promise<void> {
+    try {
+      if (!fs.existsSync(this.cookiesFile)) return;
+      const saved: any[] = JSON.parse(fs.readFileSync(this.cookiesFile, 'utf8'));
+      const have = new Set((await context.cookies()).map((c) => `${c.domain}|${c.path}|${c.name}`));
+      const nowSec = Date.now() / 1000;
+      const missing = saved.filter(
+        (c) => !have.has(`${c.domain}|${c.path}|${c.name}`) && !(c.expires > 0 && c.expires < nowSec)
+      );
+      if (missing.length === 0) return;
+      try {
+        await context.addCookies(missing);
+      } catch {
+        for (const c of missing) await context.addCookies([c]).catch(() => {});
+      }
+      console.log(`[JevBrowserAgent] Restored ${missing.length} saved login cookies.`);
+    } catch (err: any) {
+      console.warn('[JevBrowserAgent] Could not restore login cookies:', err.message);
+    }
+  }
+
+  /** Save logins and close the browser (used by the scheduled job, which should not leave a window behind). */
+  public static async shutdown(): Promise<void> {
+    const ctx = this.activeInteractiveContext;
+    if (!ctx) return;
+    await this.saveCookies(ctx);
+    this.activeInteractiveContext = null;
+    await ctx.close().catch(() => {});
+  }
+
+  /**
+   * Decide whether a site is signed in. We only say "out" on an EXPLICIT signed-out signal (a Log in / Sign in button
+   * with exactly that name, a login URL). "Not sure" never blocks the run — the steps themselves report a real login problem.
+   */
+  private static async siteLoginState(
+    page: Page,
+    site: 'chatgpt' | 'grok' | 'tiktok'
+  ): Promise<{ state: 'in' | 'out' | 'unknown'; why: string }> {
+    try {
+      const url = page.url();
+      const visible = async (loc: ReturnType<Page['locator']>) => (await loc.filter({ visible: true }).count().catch(() => 0)) > 0;
+      const named = (re: RegExp) => [page.getByRole('button', { name: re }), page.getByRole('link', { name: re })];
+      const anyVisible = async (locs: ReturnType<Page['locator']>[]) => {
+        for (const l of locs) if (await visible(l)) return true;
+        return false;
+      };
+      const authHost = /auth\.openai\.com|auth0\.com|accounts\.google\.com|appleid\.apple\.com|login\.live\.com|accounts\.x\.ai|x\.com\/i\/flow|twitter\.com\/i\/flow/i;
+      const host = site === 'chatgpt' ? 'chatgpt.com' : site === 'grok' ? 'grok.com' : 'tiktok.com';
+
+      if (!url.includes(host)) return authHost.test(url) ? { state: 'out', why: `on a sign-in page (${new URL(url).host})` } : { state: 'unknown', why: `off-site (${url.slice(0, 60)})` };
+
+      if (site === 'chatgpt') {
+        if (/\/auth\/|\/log-?in/i.test(url)) return { state: 'out', why: 'login URL' };
+        if (await visible(page.locator('[data-testid="login-button"], a[href*="/auth/login"]'))) return { state: 'out', why: 'login-button element' };
+        if (await anyVisible(named(/^\s*(Log in|Sign up for free)\s*$/i))) return { state: 'out', why: '"Log in"/"Sign up for free" button' };
+        if (await visible(page.locator('[data-testid="accounts-profile-button"], nav a[href*="/c/"], #prompt-textarea, form [contenteditable="true"]')))
+          return { state: 'in', why: 'composer / history visible, no login button' };
+        return { state: 'unknown', why: 'page not ready' };
+      }
+
+      if (site === 'grok') {
+        if (/sign-?in|login/i.test(url)) return { state: 'out', why: 'login URL' };
+        if (await anyVisible(named(/^\s*Sign in\s*$/i))) return { state: 'out', why: '"Sign in" button' };
+        if (await visible(page.locator('[role="textbox"], [contenteditable="true"], textarea'))) return { state: 'in', why: 'prompt box visible, no Sign in button' };
+        return { state: 'unknown', why: 'page not ready' };
+      }
+
+      if (/\/login/i.test(url)) return { state: 'out', why: 'login URL' };
+      if (await anyVisible(named(/^\s*(Log in|Use QR code)\s*$/i))) return { state: 'out', why: '"Log in" button' };
+      if ((await page.locator('input[type="file"]').count().catch(() => 0)) > 0) return { state: 'in', why: 'upload form present' };
+      return { state: 'unknown', why: 'page not ready' };
+    } catch (err: any) {
+      return { state: 'unknown', why: err.message };
+    }
+  }
+
+  private static skipLogin = false;
+
+  /** Called by the "I'm already signed in — continue" button. */
+  public static skipLoginWait(): void {
+    this.skipLogin = true;
+  }
+
+  /**
+   * Open ChatGPT, Grok and TikTok (all three tabs, right away) and make sure each is signed in. Only a site that is
+   * clearly signed OUT makes us wait — the operator signs in and the run continues by itself.
+   */
+  public static async ensureLoggedIn(
+    context: BrowserContext,
+    say: (step: string, kind?: 'running' | 'waiting_login') => void,
+    maxWaitMs = 10 * 60 * 1000
+  ): Promise<void> {
+    const sites = [
+      { key: 'chatgpt' as const, name: 'ChatGPT', url: this.getConfiguredChatGptUrl() || 'https://chatgpt.com/', host: 'chatgpt.com' },
+      { key: 'grok' as const, name: 'Grok', url: 'https://grok.com/imagine', host: 'grok.com' },
+      { key: 'tiktok' as const, name: 'TikTok', url: 'https://www.tiktok.com/tiktokstudio/upload', host: 'tiktok.com' },
+    ];
+    const framesDir = path.join(__dirname, '../../storage/frames');
+    fs.mkdirSync(framesDir, { recursive: true });
+    this.skipLogin = false;
+
+    // 1. One tab per site, all loading at once so the operator sees them open immediately.
+    say('Opening ChatGPT, Grok and TikTok…');
+    const pages: Page[] = [];
+    for (const site of sites) {
+      let page = context.pages().find((p) => !p.isClosed() && p.url().includes(site.host) && !pages.includes(p));
+      if (!page) {
+        page =
+          context.pages().find((p) => !p.isClosed() && !pages.includes(p) && (p.url() === 'about:blank' || p.url().startsWith('chrome://'))) ||
+          (await context.newPage());
+      }
+      pages.push(page);
+    }
+    await Promise.all(
+      sites.map((site, i) => pages[i].goto(site.url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}))
+    );
+    await pages[0].bringToFront().catch(() => {});
+    await pages[0].waitForTimeout(4000);
+
+    // 2. Check each one.
+    for (let i = 0; i < sites.length; i++) {
+      const site = sites[i];
+      const page = pages[i];
+      say(`Checking your ${site.name} login…`);
+
+      let st = await this.siteLoginState(page, site.key);
+      if (st.state === 'unknown') {
+        await page.waitForTimeout(5000);
+        st = await this.siteLoginState(page, site.key);
+      }
+      console.log(`[JevBrowserAgent] ${site.name} login check: ${st.state} (${st.why})`);
+      if (st.state !== 'out') continue;
+
+      await page.screenshot({ path: path.join(framesDir, `login_wait_${site.key}.png`) }).catch(() => {});
+      await page.bringToFront().catch(() => {});
+      say(`Sign into ${site.name} in the browser window — it looks signed out (${st.why}). The run continues by itself when you're done, or press the button if you're already signed in.`, 'waiting_login');
+
+      const deadline = Date.now() + maxWaitMs;
+      let ok = false;
+      let unknownStreak = 0;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 3000));
+        if (page.isClosed()) throw new Error('The browser window was closed while waiting for you to sign in.');
+        if (this.skipLogin) {
+          this.skipLogin = false;
+          console.log(`[JevBrowserAgent] Operator says ${site.name} is already signed in — continuing.`);
+          ok = true;
+          break;
+        }
+        const now = await this.siteLoginState(page, site.key);
+        if (now.state === 'in') {
+          ok = true;
+          break;
+        }
+        // Signed-out signal gone and we're back on the site for ~30s → treat as signed in.
+        unknownStreak = now.state === 'unknown' && page.url().includes(site.host) ? unknownStreak + 1 : 0;
+        if (unknownStreak >= 10) {
+          ok = true;
+          break;
+        }
+      }
+      if (!ok) throw new Error(`${site.name} is not signed in. Run again and sign into ${site.name} in the browser window.`);
+      say(`${site.name} signed in.`);
+      await page.waitForTimeout(1500);
+      await this.saveCookies(context);
+    }
+    await this.saveCookies(context);
+  }
+
+  // ───────────────────────── Cover image: a different frame for every video ─────────────────────────
+
+  /**
+   * Grok's video starts on the reference image (Mr. Apple alone), so TikTok's automatic cover is identical every time.
+   * Pick the frame (25%–75% into the video) that differs MOST from the first frame — that is where the guest animal and
+   * the scene appear — and save it as a JPEG. Decoding happens in a blank browser tab; no ffmpeg involved.
+   */
+  public static async extractCoverFrame(
+    page: Page,
+    videoPath: string,
+    outPath: string
+  ): Promise<{ timeSec: number; durationSec: number }> {
+    const b64 = fs.readFileSync(videoPath).toString('base64');
+    await page.evaluate('window.__name = window.__name || ((f) => f);');
+    const res = await page.evaluate(async ({ b64 }) => {
+      const blob = await (await fetch('data:video/mp4;base64,' + b64)).blob();
+      const url = URL.createObjectURL(blob);
+      const v = document.createElement('video');
+      v.muted = true;
+      v.preload = 'auto';
+      v.src = url;
+      await new Promise<void>((resolve, reject) => {
+        v.onloadeddata = () => resolve();
+        v.onerror = () => reject(new Error('The browser could not decode this video.'));
+      });
+      const d = v.duration;
+      if (!isFinite(d) || d < 2) throw new Error('Video is too short to pick a cover frame.');
+      const seek = (t: number) =>
+        new Promise<void>((resolve) => {
+          v.onseeked = () => resolve();
+          v.currentTime = t;
+        });
+      const small = () => {
+        const c = document.createElement('canvas');
+        c.width = 48;
+        c.height = 84;
+        const x = c.getContext('2d')!;
+        x.drawImage(v, 0, 0, 48, 84);
+        return x.getImageData(0, 0, 48, 84).data;
+      };
+      await seek(0.05);
+      const first = small();
+      let best = { t: d * 0.5, diff: -1 };
+      for (const f of [0.25, 0.35, 0.45, 0.55, 0.65, 0.75]) {
+        const t = d * f;
+        await seek(t);
+        const px = small();
+        let diff = 0;
+        for (let i = 0; i < px.length; i += 4) {
+          diff += Math.abs(px[i] - first[i]) + Math.abs(px[i + 1] - first[i + 1]) + Math.abs(px[i + 2] - first[i + 2]);
+        }
+        if (diff > best.diff) best = { t, diff };
+      }
+      await seek(best.t);
+      const c = document.createElement('canvas');
+      c.width = v.videoWidth;
+      c.height = v.videoHeight;
+      c.getContext('2d')!.drawImage(v, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      return { dataUrl: c.toDataURL('image/jpeg', 0.92), t: best.t, d };
+    }, { b64 });
+
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, Buffer.from(res.dataUrl.split(',')[1], 'base64'));
+    return { timeSec: res.t, durationSec: res.d };
+  }
+
+  private static async makeCoverImage(videoPath: string, jobId: string): Promise<string | null> {
+    const outPath = path.join(__dirname, '../../storage/thumbnails', `thumb_${jobId}.jpg`);
+    let page: Page | null = null;
+    try {
+      const context = await this.launchContext(false);
+      page = await context.newPage();
+      const r = await this.extractCoverFrame(page, videoPath, outPath);
+      console.log(`[JevBrowserAgent] Cover frame chosen at ${r.timeSec.toFixed(1)}s of ${r.durationSec.toFixed(1)}s: ${outPath}`);
+      return outPath;
+    } catch (err: any) {
+      console.warn('[JevBrowserAgent] Could not pick a cover frame (TikTok will use its automatic cover):', err.message);
+      return null;
+    } finally {
+      await page?.close().catch(() => {});
+    }
+  }
+
+  /**
+   * On TikTok Studio's upload form: Edit cover → Upload cover → pick our JPEG → Confirm.
+   * Best effort: if TikTok's layout differs, we save screenshots for debugging, back out, and post with the automatic cover.
+   */
+  private static async setTikTokCover(page: Page, coverPath: string): Promise<boolean> {
+    const framesDir = path.join(__dirname, '../../storage/frames');
+    const snap = (tag: string) => page.screenshot({ path: path.join(framesDir, `tiktok_cover_${tag}_${Date.now()}.png`) }).catch(() => {});
+    let chooserHandled = false;
+    const onChooser = async (chooser: FileChooser) => {
+      chooserHandled = true;
+      await chooser.setFiles(coverPath).catch(() => {});
+    };
+    page.on('filechooser', onChooser);
+    try {
+      const edit = page.getByText(/^\s*Edit cover\s*$/i).filter({ visible: true }).first();
+      if (!(await edit.waitFor({ state: 'visible', timeout: 15000 }).then(() => true).catch(() => false))) {
+        await snap('no_edit_button');
+        console.warn('[JevBrowserAgent] TikTok "Edit cover" button not found; using the automatic cover.');
+        return false;
+      }
+      await edit.click();
+
+      const dialog = page.locator('[role="dialog"], [class*="modal" i]').filter({ hasText: /cover/i }).filter({ visible: true }).last();
+      await dialog.waitFor({ state: 'visible', timeout: 10000 });
+
+      // The "Upload cover" tab can be a <label> for a hidden file input, so merely clicking it asks Chrome to open the
+      // Mac's file picker. A 'filechooser' listener (registered above) intercepts that picker and feeds it our JPEG instead.
+      const uploadTab = dialog.getByText(/^\s*Upload cover\s*$/i).first();
+      if (await uploadTab.isVisible().catch(() => false)) await uploadTab.click();
+      await page.waitForTimeout(1200);
+
+      if (!chooserHandled) {
+        const input = dialog.locator('input[type="file"]').first();
+        if ((await input.count()) > 0) {
+          await input.setInputFiles(coverPath);
+        } else {
+          await dialog.getByText(/upload/i).filter({ visible: true }).last().click();
+          for (let i = 0; i < 20 && !chooserHandled; i++) await page.waitForTimeout(400);
+          if (!chooserHandled) throw new Error('TikTok did not offer a way to upload the cover image.');
+        }
+      }
+      await page.waitForTimeout(2500);
+      await snap('uploaded');
+
+      const confirm = dialog.getByRole('button', { name: /^(Confirm|Save|Done|Apply)$/i }).first();
+      await confirm.waitFor({ state: 'visible', timeout: 10000 });
+      await confirm.click({ timeout: 5000 });
+      await dialog.waitFor({ state: 'hidden', timeout: 15000 });
+      console.log('[JevBrowserAgent] Custom cover image set on TikTok.');
+      return true;
+    } catch (err: any) {
+      await snap('failed');
+      console.warn('[JevBrowserAgent] Could not set a custom TikTok cover (continuing with the automatic one):', err.message);
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(500);
+      return false;
+    } finally {
+      page.off('filechooser', onChooser);
+    }
+  }
+
   /**
    * Step 3: Browse into TikTok Upload, upload the video, set caption & AIGC disclosure, and stage/publish.
    */
   public static async uploadToTikTokViaBrowser(
     videoPath: string,
     title: string,
-    hook: string
-  ): Promise<{ success: boolean; shareUrl?: string; message: string }> {
+    hook: string,
+    coverPath?: string
+  ): Promise<{ success: boolean; verified?: boolean; shareUrl?: string; message: string }> {
     const context = await this.launchContext(false);
     const pages = context.pages();
     let page = pages.find((p) => p.url().includes('tiktok.com'));
@@ -1647,10 +1969,15 @@ export class JevBrowserAgent {
         await page.evaluate(() => {
           window.onbeforeunload = null;
         });
-        page.on('dialog', async (dialog) => {
-          console.log('[JevBrowserAgent] Handling TikTok browser dialog:', dialog.message());
-          await dialog.accept().catch(() => { });
-        });
+        if (!this.tiktokDialogPages.has(page)) {
+          this.tiktokDialogPages.add(page);
+          // Having ANY 'filechooser' listener stops Chrome from opening the Mac's native "choose a file" window on this tab.
+          page.on('filechooser', () => {});
+          page.on('dialog', async (dialog) => {
+            console.log('[JevBrowserAgent] Handling TikTok browser dialog:', dialog.message());
+            await dialog.accept().catch(() => { });
+          });
+        }
 
         // 2. Fill caption / description with clean title and hashtags (without corrupting Draft.js DOM spans)
         const cleanTitle = title.replace(/\s*\(ChatGPT Browser\)\s*/gi, '').replace(/^["']|["']$/g, '').trim();
@@ -1687,8 +2014,14 @@ export class JevBrowserAgent {
 
         // 4. Wait for video upload & processing status to be 100% complete
         console.log('[JevBrowserAgent] Waiting for TikTok video upload to show Uploaded (100%)...');
-        await page.waitForSelector('text="Uploaded", [class*="upload-status"], [class*="success"]', { timeout: 60000 }).catch(() => null);
+        await page.getByText(/^\s*Uploaded\b/i).first().waitFor({ state: 'visible', timeout: 120000 }).catch(() => null);
         await page.waitForTimeout(2000);
+
+        // 4b. Unique cover image (a mid-video frame instead of the identical first frame)
+        if (coverPath && fs.existsSync(coverPath)) {
+          await this.setTikTokCover(page, coverPath);
+          await dismissExitModal();
+        }
 
         // 5. Ensure any exit modal is dismissed before scrolling
         await dismissExitModal();
@@ -1737,7 +2070,7 @@ export class JevBrowserAgent {
 
           // Wait for TikTok Post button to become enabled (checks finishing)
           const waitPostStart = Date.now();
-          while (Date.now() - waitPostStart < 25000) {
+          while (Date.now() - waitPostStart < 120000) {
             const isDisabled = await targetPostBtn.evaluate((el: HTMLButtonElement) => el.disabled || el.getAttribute('aria-disabled') === 'true').catch(() => false);
             if (!isDisabled) {
               console.log('[JevBrowserAgent] TikTok Post button is ready and enabled!');
@@ -1803,8 +2136,9 @@ export class JevBrowserAgent {
           console.log('[JevBrowserAgent] Video successfully posted to TikTok!');
           return {
             success: true,
+            verified: true,
             message: 'Video successfully uploaded and published to TikTok!',
-            shareUrl: 'https://www.tiktok.com/@kindred_kids/video/' + Date.now(),
+            shareUrl: 'https://www.tiktok.com/tiktokstudio/content',
           };
         } else {
           const framesDir = path.join(__dirname, '../../storage/frames');
@@ -1812,7 +2146,8 @@ export class JevBrowserAgent {
           await page.screenshot({ path: errSnap }).catch(() => { });
           console.warn('[JevBrowserAgent] TikTok post pending confirmation. Screenshot saved:', errSnap);
           return {
-            success: true, // Staged and post clicked on TikTok Studio
+            success: true, // Post was clicked, but TikTok never showed a confirmation
+            verified: false,
             message: 'Video staged and submitted on TikTok Studio (processing receipt in progress).',
             shareUrl: 'https://www.tiktok.com/tiktokstudio/content',
           };
@@ -1833,13 +2168,39 @@ export class JevBrowserAgent {
    * FULL AUTONOMOUS SEQUENCE (ChatGPT -> Grok -> Video Assembly -> QA -> TikTok)
    * Controls the browser automatically through all three steps continuously without manual intervention.
    */
-  public static async runFullAutonomousPipeline(options: {
+  private static pipelineRunning = false;
+
+  public static async runFullAutonomousPipeline(
+    options: Parameters<typeof JevBrowserAgent.runPipelineOnce>[0]
+  ): ReturnType<typeof JevBrowserAgent.runPipelineOnce> {
+    if (this.pipelineRunning) {
+      throw new Error('A video is already being produced. Wait for it to finish before starting another.');
+    }
+    this.pipelineRunning = true;
+    try {
+      const result = await this.runPipelineOnce(options);
+      if (result.tiktokVerified) {
+        // TikTok confirmed the post: close the window so the next video starts from a clean browser.
+        options.onProgress?.('Posted to TikTok. Closing the browser so it is fresh for the next video…');
+        console.log('[JevBrowserAgent] TikTok post verified — closing the browser window.');
+        await new Promise((r) => setTimeout(r, 3000));
+        await this.shutdown();
+      }
+      return result;
+    } finally {
+      this.pipelineRunning = false;
+      if (this.activeInteractiveContext) await this.saveCookies(this.activeInteractiveContext);
+    }
+  }
+
+  private static async runPipelineOnce(options: {
     format: string;
     ageBand: string;
     seriesTitle: string;
     learningGoal: string;
     creativeTopic?: string;
     targetDurationSec?: number;
+    onProgress?: (step: string, kind?: 'running' | 'waiting_login') => void;
   }): Promise<{
     success: boolean;
     jobId: string;
@@ -1850,14 +2211,22 @@ export class JevBrowserAgent {
     durationSeconds: number;
     qaPassed: boolean;
     tiktokStatus: string;
+    tiktokVerified: boolean;
     tiktokUrl?: string;
     message: string;
   }> {
     const jobId = 'job_' + crypto.randomUUID().slice(0, 10);
     console.log(`[JevBrowserAgent] Starting full autonomous pipeline for Job ${jobId}...`);
+    const say = (step: string, kind: 'running' | 'waiting_login' = 'running') => options.onProgress?.(step, kind);
+
+    // 0. Open the browser (once) and make sure ChatGPT, Grok and TikTok are signed in — waits for the operator if not.
+    const browser = await this.launchContext(false);
+    await this.ensureLoggedIn(browser, say);
+
 
     // 1. ChatGPT: Generate prompt & script
     console.log('[JevBrowserAgent] SEQUENCE STEP 1: Creating prompt and script in ChatGPT...');
+    say('Writing a new Mr. Apple prompt in ChatGPT…');
     const chatGptResult = await this.generatePromptViaChatGPT({
       format: options.format,
       ageBand: options.ageBand,
@@ -1874,59 +2243,29 @@ export class JevBrowserAgent {
     }
     console.log(`[JevBrowserAgent] SEQUENCE STEP 1 SUCCESS: "${scriptPkg.concept_title}". Copied Grok prompt (${grokPrompt.length} chars).`);
 
-    // 2. Grok: Produce video shot(s) (1 shot for 15s or 4 shots for >60s)
-    const isSingleShot = (options.targetDurationSec || 15) <= 20;
-    const shotBriefs = scriptPkg.shot_briefs || [];
-    const totalShotsToProduce = isSingleShot ? 1 : Math.min(4, Math.max(1, shotBriefs.length));
-    console.log(`[JevBrowserAgent] SEQUENCE STEP 2: Producing ${totalShotsToProduce} 15-second Grok video shot(s)...`);
+    // 2. Grok: one video from the exact ChatGPT prompt + Mr. Apple reference image
+    console.log('[JevBrowserAgent] SEQUENCE STEP 2: Generating the video in Grok Imagine...');
+    say('Generating the video in Grok (about 1–3 minutes)…');
     const series = db.prepare("SELECT * FROM series WHERE status IN ('pilot', 'active') LIMIT 1").get() as any;
-    const renderedShots: any[] = [];
-
-    for (let i = 0; i < totalShotsToProduce; i++) {
-      const shot = shotBriefs[i];
-      const shotPrompt = shot.video_prompt;
-      if (!shotPrompt || shotPrompt.length < 50) {
-        throw new Error(`Shot ${i + 1} video prompt is missing or too short. Aborting.`);
-      }
-      const shotNum = i + 1;
-      console.log(`[JevBrowserAgent] Generating Shot ${shotNum}/${totalShotsToProduce} in Grok Imagine (15s): "${shotPrompt.slice(0, 60)}..."`);
-
-      const grokRes = await this.createVideoViaGrok(shotPrompt, jobId, shotNum, false);
-      if (grokRes.videoPath && this.isValidVideoFile(grokRes.videoPath)) {
-        renderedShots.push({
-          shotNumber: shotNum,
-          filePath: grokRes.videoPath,
-          durationSeconds: 15, // Genuine 15s Grok video shot
-          costUsd: 0,
-          simulated: false,
-        });
-        console.log(`[JevBrowserAgent] Shot ${shotNum}/${totalShotsToProduce} verified MP4 saved from Grok (${fs.statSync(grokRes.videoPath).size} bytes): ${grokRes.videoPath}`);
-      } else {
-        throw new Error(
-          `Grok Imagine did not complete generation for Shot ${shotNum}/${totalShotsToProduce}. The autonomous pipeline was halted immediately to prevent creating or uploading any synthetic placeholder videos to TikTok.`
-        );
-      }
-    }
-
-    if (renderedShots.length === 0) {
-      throw new Error(
-        'Grok Imagine did not generate any video. The autonomous pipeline was halted immediately to prevent creating or uploading any synthetic placeholder videos to TikTok.'
-      );
+    const grokRes = await this.createVideoViaGrok(grokPrompt, jobId, 1, false, options.targetDurationSec || 15);
+    if (!this.isValidVideoFile(grokRes.videoPath)) {
+      throw new Error('Grok Imagine did not produce a valid video. Pipeline halted; nothing was uploaded to TikTok.');
     }
 
     const captions = scriptPkg.captions || [];
-    const rawGrokVideoPath = renderedShots[0].filePath;
     const safeSlug = scriptPkg.concept_title.replace(/[^a-zA-Z0-9]+/g, '_').slice(0, 30) || 'Episode';
-    const finalVideoPath = path.join(path.dirname(rawGrokVideoPath), `${safeSlug}.mp4`);
+    const finalVideoPath = path.join(path.dirname(grokRes.videoPath), `${safeSlug}_${jobId}.mp4`);
 
-    // Use 100% genuine Grok video directly (NO FFmpeg modification, zero robotic dubbing, original audio intact!)
-    console.log(`[JevBrowserAgent] Using raw Grok video with original audio (zero FFmpeg): ${rawGrokVideoPath}`);
-    fs.copyFileSync(rawGrokVideoPath, finalVideoPath);
+    // Raw Grok video with its original audio — no FFmpeg processing.
+    fs.renameSync(grokRes.videoPath, finalVideoPath);
+    console.log(`[JevBrowserAgent] Video ready (${grokRes.durationSec}s, original Grok audio): ${finalVideoPath}`);
 
-    const videoDuration = renderedShots[0].durationSeconds || 15;
+    const videoDuration = grokRes.durationSec;
     const framesDir = path.join(__dirname, '../../storage/frames');
+    say('Picking a cover frame…');
     const existingSnap = path.join(framesDir, `shot_${jobId}_1.png`);
-    const thumbnailPath = fs.existsSync(existingSnap) ? existingSnap : null;
+    const coverPath = await this.makeCoverImage(finalVideoPath, jobId);
+    const thumbnailPath = coverPath || (fs.existsSync(existingSnap) ? existingSnap : null);
 
     // 4. BIND TO OPEN PUBLISHING SLOT & INSERT JOB FIRST (Satisfies FOREIGN KEY constraint for qa_inspections)
     const openSlot = db.prepare("SELECT * FROM publishing_slots WHERE status = 'unassigned' LIMIT 1").get() as any;
@@ -1959,6 +2298,7 @@ export class JevBrowserAgent {
 
     // 5. Kids Safety QA Inspection (FOREIGN KEY constraint satisfied!)
     console.log('[JevBrowserAgent] Running multi-stage Kids Safety & COPPA QA Inspection...');
+    say('Running the kids-safety check…');
     const qaResult = await KidsSafetyQAInspector.inspectJob(
       jobId,
       scriptPkg.script_text,
@@ -1968,42 +2308,49 @@ export class JevBrowserAgent {
       []
     );
 
-    // 6. TikTok Upload via Browser Tab 3 & Publisher
-    console.log('[JevBrowserAgent] SEQUENCE STEP 3: Uploading finished video to TikTok with AI disclosure...');
-    let tiktokStatus = 'ready_to_publish';
+    // 6. TikTok upload — ONLY when QA passed. Browser upload first; Buffer only as a fallback (never both).
+    let tiktokStatus = 'held_for_review';
     let tiktokUrl: string | undefined;
+    let browserPosted = false; // Post was clicked in the browser — never also send through Buffer
+    let tiktokVerified = false; // TikTok showed its "published" confirmation
 
-    try {
-      const uploadRes = await this.uploadToTikTokViaBrowser(
-        finalVideoPath,
-        scriptPkg.concept_title,
-        scriptPkg.hook
-      );
-      if (uploadRes.success) {
-        tiktokStatus = 'uploaded_to_tiktok';
-        tiktokUrl = uploadRes.shareUrl;
+    if (qaResult.passed) {
+      console.log('[JevBrowserAgent] SEQUENCE STEP 3: Uploading finished video to TikTok...');
+      say('Uploading to TikTok and posting…');
+      tiktokStatus = 'ready_to_publish';
+      try {
+        const uploadRes = await this.uploadToTikTokViaBrowser(finalVideoPath, scriptPkg.concept_title, scriptPkg.hook, coverPath || undefined);
+        if (uploadRes.success) {
+          browserPosted = true;
+          tiktokVerified = !!uploadRes.verified;
+          tiktokStatus = tiktokVerified ? 'published' : 'scheduled'; // 'scheduled' = Post clicked, awaiting TikTok's receipt
+          tiktokUrl = uploadRes.shareUrl;
+        } else {
+          console.warn('[JevBrowserAgent] TikTok browser upload did not complete:', uploadRes.message);
+        }
+      } catch (ttErr: any) {
+        console.warn('[JevBrowserAgent] TikTok browser upload error:', ttErr.message);
       }
-    } catch (ttErr: any) {
-      console.warn('[JevBrowserAgent] TikTok browser upload note:', ttErr.message);
+
+      if (!browserPosted) {
+        try {
+          const pubRes = await BufferTikTokPublisher.publishVideoPost(
+            jobId, scriptPkg.concept_title, scriptPkg.hook, finalVideoPath, thumbnailPath || undefined
+          );
+          if (pubRes.status === 'published' || pubRes.status === 'scheduled') {
+            tiktokStatus = pubRes.status;
+            tiktokUrl = pubRes.shareUrl || tiktokUrl;
+          }
+        } catch { }
+      }
+    } else {
+      console.warn('[JevBrowserAgent] QA did not pass — video held for review and NOT uploaded to TikTok.');
     }
 
-    // Also dispatch through Buffer publisher for confirmed receipts if configured
-    try {
-      const pubRes = await BufferTikTokPublisher.publishVideoPost(
-        jobId,
-        scriptPkg.concept_title,
-        scriptPkg.hook,
-        finalVideoPath,
-        thumbnailPath || undefined
-      );
-      if (pubRes.status === 'published' || pubRes.status === 'scheduled') {
-        tiktokStatus = pubRes.status;
-        tiktokUrl = pubRes.shareUrl || tiktokUrl;
-      }
-    } catch { }
-
     // 7. Update Job and Slot final states in database
-    const finalState = qaResult.passed ? (tiktokStatus === 'published' ? 'published' : 'scheduled') : 'held_for_review';
+    const finalState = !qaResult.passed
+      ? 'held_for_review'
+      : tiktokStatus === 'published' ? 'published' : tiktokStatus === 'scheduled' ? 'scheduled' : 'ready_to_publish';
     db.prepare(`
       UPDATE jobs
       SET state = ?,
@@ -2034,8 +2381,9 @@ export class JevBrowserAgent {
       durationSeconds: videoDuration,
       qaPassed: qaResult.passed,
       tiktokStatus,
+      tiktokVerified,
       tiktokUrl,
-      message: `Complete autonomous chain finished: ChatGPT prompt -> Grok video (original sound, 15s) -> QA inspection -> TikTok upload!`,
+      message: `ChatGPT prompt -> Grok video (${videoDuration}s${grokRes.width && grokRes.height ? ', ' + grokRes.width + 'x' + grokRes.height : ''}, original sound) -> QA ${qaResult.passed ? 'passed' : 'held'} -> TikTok: ${tiktokStatus}`,
     };
   }
 }
