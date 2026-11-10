@@ -2076,7 +2076,7 @@ export class JevBrowserAgent {
     videoPath: string,
     title: string,
     description: string,
-    opts: { coverPath?: string; madeForKids: boolean; visibility: 'public' | 'unlisted' | 'private' }
+    opts: { coverPath?: string; madeForKids: boolean; visibility?: 'public' | 'private' } // public unless a test says otherwise
   ): Promise<{ success: boolean; verified?: boolean; shareUrl?: string; message: string }> {
     const context = await this.launchContext(false);
     const page = context.pages().find((p) => !p.isClosed() && p.url().includes('youtube.com')) || (await context.newPage());
@@ -2193,12 +2193,13 @@ export class JevBrowserAgent {
       }
 
       // 5. Visibility.
-      const visName = { public: 'PUBLIC', unlisted: 'UNLISTED', private: 'PRIVATE' }[opts.visibility];
+      const visibility = opts.visibility ?? 'public';
+      const visName = { public: 'PUBLIC', private: 'PRIVATE' }[visibility];
       const visRadio = page.locator(`[name="${visName}"]`).first();
-      const visByRole = page.getByRole('radio', { name: new RegExp(`^${opts.visibility}`, 'i') }).first();
+      const visByRole = page.getByRole('radio', { name: new RegExp(`^${visibility}`, 'i') }).first();
       if (await visible(visRadio, 8000)) await visRadio.click();
       else if (await visible(visByRole, 3000)) await visByRole.click();
-      else throw new Error('Could not find the visibility choice (Public / Unlisted / Private).');
+      else throw new Error('Could not find the visibility choice (Public / Private).');
       await snap('visibility');
 
       // 6. Publish — the button stays disabled until the upload itself has finished.
@@ -2705,7 +2706,7 @@ export class JevBrowserAgent {
             finalVideoPath,
             cleanTitle,
             `${scriptPkg.hook}\n\n#Shorts`,
-            { coverPath: coverPath || undefined, madeForKids: targets.youtubeMadeForKids, visibility: targets.youtubeVisibility }
+            { coverPath: coverPath || undefined, madeForKids: targets.youtubeMadeForKids }
           );
           if (yt.success) {
             youtubeVerified = !!yt.verified;

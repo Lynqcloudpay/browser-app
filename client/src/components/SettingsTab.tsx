@@ -473,7 +473,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <div className="space-y-1">
               <h5 className="font-bold text-slate-200">Where to post each video</h5>
               <p className="text-slate-400 leading-relaxed text-[11px]">
-                Every finished video is uploaded to each place you leave on. YouTube posts it as a Short using the same browser
+                Every finished video is uploaded to each place you leave on. YouTube posts it publicly as a Short using the same browser
                 window (your Google account must be signed in there).
               </p>
             </div>
@@ -492,18 +492,6 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               </div>
               {targets.youtube && (
                 <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pl-1 text-slate-300">
-                  <label className="flex items-center gap-2">
-                    <span className="text-[11px] text-slate-400">YouTube visibility</span>
-                    <select
-                      value={targets.youtubeVisibility}
-                      onChange={(e) => saveTargets({ youtubeVisibility: e.target.value })}
-                      className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-slate-200"
-                    >
-                      <option value="public">Public</option>
-                      <option value="unlisted">Unlisted (link only)</option>
-                      <option value="private">Private (only you) — good for a first test</option>
-                    </select>
-                  </label>
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input
                       type="checkbox"

@@ -54,7 +54,7 @@ npm run build              # builds the web page
 - **Under `tsx`**, functions passed to `page.evaluate` get an injected `__name()` helper; `window.__name` is shimmed in `launchPersistent` and `extractCoverFrame`. Keep that when adding in-page code.
 - **Tests** run against their own database (`npm test` sets `DATABASE_PATH`). Never point tests at `storage/kindred_studio.db`.
 - **No ffmpeg.** The raw Grok video (with its original audio) goes straight to TikTok.
-- **YouTube** is driven through YouTube Studio's upload dialog (`uploadToYouTubeViaBrowser`): it must answer "made for kids" (Settings; default yes — these are kids' videos), picks Public/Unlisted/Private, and saves screenshots to `storage/frames/youtube_*.png`. Studio can show an "unsupported browser" page with a "Skip to YouTube Studio" link (handled). YouTube sign-in is optional: if nobody signs in within 4 minutes the run still posts to TikTok. The browser only closes when every enabled place confirmed the post.
+- **YouTube** is driven through YouTube Studio's upload dialog (`uploadToYouTubeViaBrowser`): it must answer "made for kids" (Settings; default yes — these are kids' videos), always publishes **Public**, and saves screenshots to `storage/frames/youtube_*.png`. Studio can show an "unsupported browser" page with a "Skip to YouTube Studio" link (handled). YouTube sign-in is optional: if nobody signs in within 4 minutes the run still posts to TikTok. The browser only closes when every enabled place confirmed the post.
 - **Switching accounts** (`switchAccount` in `jevBrowserAutomation.ts`, orchestrated by `server/engine/accounts.ts`): wipes only that platform's cookies via `context.clearCookies({domain})` (YouTube also clears Google; Grok also clears X) plus site storage, and rewrites `storage/browser_cookies.json` so the old login can't be restored. ChatGPT's saved "Create Mr Apple Videos" chat URL is cleared and re-detected for the new account. It refuses while a video run is in progress, and runs refuse while an account change is in progress.
 - **File pickers:** TikTok's "Upload cover" opens a native Mac file window unless a `filechooser` listener intercepts it. Keep the listeners.
 - **Schedule** = macOS LaunchAgent `com.kindredstudio.daily` → `scripts/dailyRun.ts`. Only scheduled runs use up slots (`storage/schedule_state.json`); log in `storage/logs/daily.log`.
@@ -66,7 +66,7 @@ npm run build              # builds the web page
 | `server/engine/jevBrowserAutomation.ts` | All browser steps: login check, ChatGPT, Grok, cover frame, TikTok, cookies |
 | `server/engine/dailyRunner.ts` | One-button run + live status |
 | `server/engine/accounts.ts`, `accountStatus.ts` | Accounts card: check logins / switch a platform's account |
-| `server/engine/publishTargets.ts` | Where to post: TikTok / YouTube, YouTube visibility + kids setting |
+| `server/engine/publishTargets.ts` | Where to post: TikTok / YouTube, YouTube made-for-kids setting |
 | `server/engine/dailySchedule.ts`, `scripts/dailyRun.ts` | Daily schedule (launchd) and its job |
 | `server/routes/api.ts` | REST API (`/api/browser/run`, `/run-status`, `/skip-login`, `/schedule`) |
 | `client/src/components/SettingsTab.tsx` | The Settings page (one button, schedule card) |

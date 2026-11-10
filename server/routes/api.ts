@@ -456,7 +456,7 @@ apiRouter.post('/accounts/:site/switch', (req, res) => {
   res.status(202).json(getAccountsOverview());
 });
 
-// Where videos are posted (TikTok / YouTube) and YouTube's audience + visibility choices
+// Where videos are posted (TikTok / YouTube) and YouTube's made-for-kids answer (YouTube is always public)
 apiRouter.get('/publish-targets', (req, res) => {
   res.json(getPublishTargets());
 });
