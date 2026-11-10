@@ -15,6 +15,15 @@ import BufferTikTokPublisher from './bufferPublisher';
 import { getPublishTargets, PublishTargets } from './publishTargets';
 import { ACCOUNT_KEYS, AccountKey, recordAccountStatus } from './accountStatus';
 import { getGrokSettings } from './grokSettings';
+import { withClipboard } from './clipboardLock';
+import { withGrokSlot } from './grokSemaphore';
+import {
+  getChannel,
+  updateChannel,
+  profileDir,
+  cookiesFile,
+  referenceImagePath,
+} from './channels';
 
 export interface BrowserJobResult {
   success: boolean;
@@ -33,10 +42,39 @@ export interface GrokVideoSpec {
 }
 const GROK_DURATIONS: GrokVideoSpec['durationSec'][] = [6, 10, 15];
 
-export class JevBrowserAgent {
-  private static userProfileDir = path.join(__dirname, '../../storage/browser_profile');
-  private static activeInteractiveContext: BrowserContext | null = null;
-  private static isLaunching = false;
+export class ChannelBrowserAgent {
+  public readonly channelId: number;
+  private userProfileDir: string;
+  private cookiesFile: string;
+  private activeInteractiveContext: BrowserContext | null = null;
+  private isLaunching = false;
+  private launchPromise: Promise<BrowserContext> | null = null;
+  private tiktokDialogPages = new WeakSet<Page>();
+  private pipelineRunning = false;
+  private skipLogin = false;
+  private accountCancel = false;
+
+  constructor(channelId = 1) {
+    this.channelId = channelId;
+    this.userProfileDir = profileDir(channelId);
+    this.cookiesFile = cookiesFile(channelId);
+  }
+
+  public isValidVideoBuffer(buf: Buffer | null | undefined): boolean {
+    return ChannelBrowserAgent.isValidVideoBuffer(buf);
+  }
+
+  public isValidVideoFile(filePath: string): boolean {
+    return ChannelBrowserAgent.isValidVideoFile(filePath);
+  }
+
+  public parseVideoSpec(prompt: string, fallbackSec = 10): GrokVideoSpec {
+    return ChannelBrowserAgent.parseVideoSpec(prompt, fallbackSec);
+  }
+
+  private cleanupStaleLocks(dir: string): void {
+    ChannelBrowserAgent.cleanupStaleLocks(dir);
+  }
 
   /**
    * Remove stale Chromium lock files if a previous browser session crashed.
@@ -77,7 +115,8 @@ export class JevBrowserAgent {
   /**
    * Ensure browser profile directory exists for persistent session cookies.
    */
-  private static ensureProfileDir(): string {
+  private ensureProfileDir(): string {
+    this.userProfileDir = profileDir(this.channelId);
     if (!fs.existsSync(this.userProfileDir)) {
       fs.mkdirSync(this.userProfileDir, { recursive: true });
     }
@@ -88,10 +127,8 @@ export class JevBrowserAgent {
    * Launch a persistent browser context so logins to ChatGPT and Grok persist.
    * If an interactive window is already open on the user's desktop, reuses it seamlessly.
    */
-  private static launchPromise: Promise<BrowserContext> | null = null;
-  private static tiktokDialogPages = new WeakSet<Page>();
 
-  public static async launchContext(headless = false): Promise<BrowserContext> {
+  public async launchContext(headless = false): Promise<BrowserContext> {
     // Reuse the one open browser window for every step (ChatGPT -> Grok -> TikTok).
     if (this.activeInteractiveContext) {
       try {
@@ -118,10 +155,12 @@ export class JevBrowserAgent {
     return this.launchPromise;
   }
 
-  private static async launchPersistent(headless: boolean): Promise<BrowserContext> {
+  private async launchPersistent(headless: boolean): Promise<BrowserContext> {
     const profileDir = this.ensureProfileDir();
     this.cleanupStaleLocks(profileDir);
 
+    const xOffset = ((this.channelId - 1) % 5) * 60;
+    const yOffset = ((this.channelId - 1) % 5) * 40;
     const context = await chromium.launchPersistentContext(profileDir, {
       headless,
       viewport: { width: 1280, height: 850 },
@@ -132,6 +171,8 @@ export class JevBrowserAgent {
         '--disable-dev-shm-usage',
         '--disable-session-crashed-bubble',
         '--hide-crash-restore-bubble',
+        `--window-name=Channel ${this.channelId}`,
+        `--window-position=${xOffset},${yOffset}`,
       ],
     });
     // tsx/esbuild injects a __name() helper into in-page functions; give every page a no-op version so evaluate() never breaks.
@@ -144,7 +185,7 @@ export class JevBrowserAgent {
    * Takes a DOM snapshot using snapshot.js, feeds the indexed element table to TypeSafe Jev,
    * and executes the selected operation (CLICK or TYPE_TEXT) on the live DOM node.
    */
-  public static async executeJevUltrafastStep(
+  public async executeJevUltrafastStep(
     page: Page,
     goal: string,
     textToFill?: string
@@ -234,7 +275,7 @@ export class JevBrowserAgent {
   /**
    * Get the active or configured ChatGPT conversation URL.
    */
-  public static getConfiguredChatGptUrl(): string {
+  public getConfiguredChatGptUrl(): string {
     try {
       const row = db.prepare('SELECT chatgpt_chat_url FROM settings WHERE id = 1').get() as any;
       let url = row?.chatgpt_chat_url?.trim() || process.env.CHATGPT_MR_APPLE_URL?.trim() || '';
@@ -251,7 +292,7 @@ export class JevBrowserAgent {
   /**
    * Save a newly resolved ChatGPT conversation URL to persistent settings.
    */
-  public static saveChatGptUrl(url: string): void {
+  public saveChatGptUrl(url: string): void {
     if (!url || !url.startsWith('http')) return;
     try {
       db.prepare('UPDATE settings SET chatgpt_chat_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1').run(url);
@@ -264,7 +305,7 @@ export class JevBrowserAgent {
   /**
    * Search ChatGPT sidebar or search dialog to locate the pinned "Create Mr Apple Videos" conversation.
    */
-  public static async locateMrAppleConversation(
+  public async locateMrAppleConversation(
     page: Page
   ): Promise<{ url: string; title: string } | null> {
     try {
@@ -372,7 +413,7 @@ export class JevBrowserAgent {
    * If a stored URL exists and is valid, navigates to it.
    * If invalid (e.g. from previous account) or not configured, auto-detects from sidebar.
    */
-  public static async navigateToMrAppleConversation(
+  public async navigateToMrAppleConversation(
     page: Page,
     screenshotPath?: string
   ): Promise<string> {
@@ -493,7 +534,7 @@ export class JevBrowserAgent {
    * Actively inspect active browser or launch headless session to auto-detect and persist
    * the pinned "Create Mr Apple Videos" chat URL.
    */
-  public static async detectAndSetChatGptUrl(): Promise<{ success: boolean; url?: string; title?: string; message: string }> {
+  public async detectAndSetChatGptUrl(): Promise<{ success: boolean; url?: string; title?: string; message: string }> {
     const context = await this.launchContext(false);
     const pages = context.pages();
     let chatPage = pages.find((p) => p.url().includes('chatgpt.com'));
@@ -533,7 +574,7 @@ export class JevBrowserAgent {
    * Focus, clear, and submit a prompt strictly into ChatGPT's bottom composer chat bar.
    * Explicitly avoids any Canvas, artifact, voice/microphone buttons, or inline message boxes.
    */
-  public static async submitChatGptPrompt(page: Page, promptText: string): Promise<boolean> {
+  public async submitChatGptPrompt(page: Page, promptText: string): Promise<boolean> {
     console.log(`[JevBrowserAgent] Locating bottom chat composer to submit "${promptText}"...`);
     await page.bringToFront().catch(() => {});
     await page.waitForTimeout(300);
@@ -662,7 +703,7 @@ export class JevBrowserAgent {
    * Helper: Extract master prompt, video title, and hashtags from ChatGPT purely via DOM inspection.
    * Never clicks page buttons so microphone/voice mode or dialogs are never triggered.
    */
-  public static async extractPromptAndTitleFromChatGpt(page: Page): Promise<{
+  public async extractPromptAndTitleFromChatGpt(page: Page): Promise<{
     grokPrompt: string;
     cleanTitle: string;
     cleanHook: string;
@@ -786,7 +827,7 @@ export class JevBrowserAgent {
   /**
    * Step 1: Browse into ChatGPT, type "next" in the chat, wait for the new prompt to finish generating, and extract it.
    */
-  public static async generatePromptViaChatGPT(
+  public async generatePromptViaChatGPT(
     brief: {
       format: string;
       ageBand: string;
@@ -1036,7 +1077,7 @@ export class JevBrowserAgent {
   }
 
   /** Click a Grok composer radio (mode / resolution / duration) unless it is already selected. */
-  private static async selectGrokRadio(
+  private async selectGrokRadio(
     page: Page,
     by: { label?: string; text?: string },
     waitMs = 3000
@@ -1073,7 +1114,7 @@ export class JevBrowserAgent {
    * Signed-in Grok shows resolution and length as dropdown buttons ("Video resolution" = 480p, "Video duration" = 6s).
    * Open the dropdown, choose the option, then confirm the button now shows it.
    */
-  private static async selectGrokDropdown(page: Page, buttonLabel: string, optionText: string): Promise<boolean> {
+  private async selectGrokDropdown(page: Page, buttonLabel: string, optionText: string): Promise<boolean> {
     const btn = page.locator(`button[aria-label="${buttonLabel}"]`).filter({ visible: true }).first();
     if (!(await btn.waitFor({ state: 'visible', timeout: 3000 }).then(() => true).catch(() => false))) return false;
     const current = async () => (await btn.innerText().catch(() => '')).trim();
@@ -1099,7 +1140,7 @@ export class JevBrowserAgent {
    * Put Grok Imagine's composer into Video mode with the requested duration, resolution and aspect ratio.
    * Only touches the composer's own controls (Image/Video/Agent radios, 480p/720p, 6s/10s/15s, Aspect Ratio).
    */
-  public static async configureGrokVideoMode(page: Page, spec: GrokVideoSpec): Promise<void> {
+  public async configureGrokVideoMode(page: Page, spec: GrokVideoSpec): Promise<void> {
     if (!(await this.selectGrokRadio(page, { label: 'Video' }, 15000))) {
       const shot = path.join(__dirname, '../../storage/frames', `grok_no_video_toggle_${Date.now()}.png`);
       await page.screenshot({ path: shot }).catch(() => {});
@@ -1138,7 +1179,7 @@ export class JevBrowserAgent {
   }
 
   /** The composer <form> on grok.com/imagine (the one holding the prompt textbox). */
-  private static grokComposer(page: Page) {
+  private grokComposer(page: Page) {
     return page.locator('form').filter({ has: page.locator('[role="textbox"], [contenteditable="true"], textarea') }).first();
   }
 
@@ -1146,7 +1187,7 @@ export class JevBrowserAgent {
    * Attach the Mr. Apple reference image to the composer's OWN file input.
    * (The page has other hidden file inputs that open the image editor — never use those.)
    */
-  private static async attachGrokReferenceImage(page: Page, imagePath: string): Promise<void> {
+  private async attachGrokReferenceImage(page: Page, imagePath: string): Promise<void> {
     const composer = this.grokComposer(page);
     const countThumbs = () =>
       page.evaluate(() => {
@@ -1160,10 +1201,13 @@ export class JevBrowserAgent {
       await fileInput.setInputFiles(imagePath);
     } else {
       // Fallback (macOS): paste the image from the clipboard into the composer textbox.
-      console.warn('[JevBrowserAgent] Composer file input not found; pasting reference image from clipboard instead.');
-      await execFileAsync('osascript', ['-e', `set the clipboard to (read (POSIX file "${imagePath}") as JPEG picture)`]);
-      await composer.locator('[role="textbox"], [contenteditable="true"], textarea').first().click();
-      await page.keyboard.press('Meta+V');
+      console.warn(`[ChannelBrowserAgent-${this.channelId}] Composer file input not found; pasting reference image from clipboard instead.`);
+      await withClipboard(async () => {
+        await page.bringToFront().catch(() => {});
+        await execFileAsync('osascript', ['-e', `set the clipboard to (read (POSIX file "${imagePath}") as JPEG picture)`]);
+        await composer.locator('[role="textbox"], [contenteditable="true"], textarea').first().click();
+        await page.keyboard.press('Meta+V');
+      });
     }
 
     const deadline = Date.now() + 15000;
@@ -1184,7 +1228,7 @@ export class JevBrowserAgent {
   /**
    * Step 2: In Grok Imagine — Video mode + reference image + EXACT ChatGPT prompt → generate → download the MP4.
    */
-  public static async createVideoViaGrok(
+  public async createVideoViaGrok(
     grokPrompt: string,
     jobId: string,
     shotNumber = 1,
@@ -1209,9 +1253,9 @@ export class JevBrowserAgent {
     const outputVideoPath = path.join(storageVideos, `shot_${jobId}_${shotNumber}.mp4`);
     const outputImagePath = path.join(framesDir, `shot_${jobId}_${shotNumber}.png`);
     // The operator's requested length & quality win over what was written in the ChatGPT prompt.
-    const grokDefaults = getGrokSettings();
-    const targetDur = requestedDurationSec || grokDefaults.duration || 15;
-    const targetRes = resolutionOverride || grokDefaults.resolution || '720p';
+    const chInfo = getChannel(this.channelId);
+    const targetDur = requestedDurationSec || chInfo?.grok_duration || 15;
+    const targetRes = resolutionOverride || chInfo?.grok_resolution || '720p';
 
     const spec = this.parseVideoSpec(grokPrompt, targetDur);
     spec.resolution = targetRes;
@@ -1271,9 +1315,10 @@ export class JevBrowserAgent {
       }
     };
 
+    return withGrokSlot(async () => {
     try {
       // 1. Fresh Grok Imagine composer
-      console.log('[JevBrowserAgent] Opening fresh Grok Imagine composer (https://grok.com/imagine)...');
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Opening fresh Grok Imagine composer (https://grok.com/imagine)...`);
       await page.goto('https://grok.com/imagine', { waitUntil: 'domcontentloaded', timeout: 30000 });
       const textbox = this.grokComposer(page).locator('[role="textbox"], [contenteditable="true"], textarea').first();
       const ready = await textbox.waitFor({ state: 'visible', timeout: 20000 }).then(() => true).catch(() => false);
@@ -1303,13 +1348,13 @@ export class JevBrowserAgent {
       await this.configureGrokVideoMode(page, spec);
 
       // 3. Reference image (character lock)
-      const refImagePath = path.resolve(__dirname, '../../storage/mr_apple_reference.jpg');
-      if (fs.existsSync(refImagePath)) {
+      const refImagePath = referenceImagePath(this.channelId);
+      if (refImagePath && fs.existsSync(refImagePath)) {
         await this.attachGrokReferenceImage(page, refImagePath);
         // Attaching an image can change the composer's options — re-assert Video settings.
         await this.configureGrokVideoMode(page, spec);
       } else {
-        console.warn(`[JevBrowserAgent] Reference image missing at ${refImagePath}; generating without it.`);
+        console.warn(`[ChannelBrowserAgent-${this.channelId}] Reference image missing for channel ${this.channelId}; generating without it.`);
       }
 
       // 4. Paste the EXACT ChatGPT prompt
@@ -1478,12 +1523,13 @@ export class JevBrowserAgent {
     } finally {
       if (listening) page.off('response', onResponse);
     }
+    });
   }
 
   /**
    * Helper: Open interactive visible browser window so operator can log into ChatGPT and Grok once.
    */
-  public static async openInteractiveSession(): Promise<{ success: boolean; message: string }> {
+  public async openInteractiveSession(): Promise<{ success: boolean; message: string }> {
     if (this.isLaunching) {
       return { success: true, message: 'Browser session is already initializing...' };
     }
@@ -1526,7 +1572,7 @@ export class JevBrowserAgent {
             const pageTitle = (await chatGptPage.title().catch(() => '')).toLowerCase();
             if (pageTitle.includes('apple') || pageTitle.includes('video') || pageTitle.includes('create')) {
               console.log(`[JevBrowserAgent] Auto-learned Mr Apple chat URL from operator navigation: ${currentUrl}`);
-              JevBrowserAgent.saveChatGptUrl(currentUrl);
+              this.saveChatGptUrl(currentUrl);
             }
           }
         }
@@ -1563,7 +1609,7 @@ export class JevBrowserAgent {
   /**
    * Diagnostic inspector: inspects open pages and key element selectors.
    */
-  public static async inspectSession(): Promise<any> {
+  public async inspectSession(): Promise<any> {
     const context = await this.launchContext(false);
     const pages = context.pages();
     const result: any = { pages: [] };
@@ -1631,14 +1677,13 @@ export class JevBrowserAgent {
 
   // ───────────────────────── Logins: saved cookies + "sign in only if needed" ─────────────────────────
 
-  private static cookiesFile = path.join(__dirname, '../../storage/browser_cookies.json');
 
   /**
    * Chromium drops "session" cookies (which most sites use for the login) when the browser closes.
    * We save every cookie after a successful login check / run and put the missing ones back on the next launch,
    * so unattended daily runs stay signed in. The file is private to this user (chmod 600) and git-ignored.
    */
-  public static async saveCookies(context: BrowserContext, allowEmpty = false): Promise<void> {
+  public async saveCookies(context: BrowserContext, allowEmpty = false): Promise<void> {
     try {
       const cookies = await context.cookies();
       if (cookies.length === 0 && !allowEmpty) return;
@@ -1649,7 +1694,7 @@ export class JevBrowserAgent {
     }
   }
 
-  private static async restoreCookies(context: BrowserContext): Promise<void> {
+  private async restoreCookies(context: BrowserContext): Promise<void> {
     try {
       if (!fs.existsSync(this.cookiesFile)) return;
       const saved: any[] = JSON.parse(fs.readFileSync(this.cookiesFile, 'utf8'));
@@ -1671,7 +1716,7 @@ export class JevBrowserAgent {
   }
 
   /** Save logins and close the browser (used by the scheduled job, which should not leave a window behind). */
-  public static async shutdown(): Promise<void> {
+  public async shutdown(): Promise<void> {
     const ctx = this.activeInteractiveContext;
     if (!ctx) return;
     await this.saveCookies(ctx);
@@ -1683,7 +1728,7 @@ export class JevBrowserAgent {
    * Decide whether a site is signed in. We only say "out" on an EXPLICIT signed-out signal (a Log in / Sign in button
    * with exactly that name, a login URL). "Not sure" never blocks the run — the steps themselves report a real login problem.
    */
-  private static async siteLoginState(
+  private async siteLoginState(
     page: Page,
     site: 'chatgpt' | 'grok' | 'tiktok' | 'youtube'
   ): Promise<{ state: 'in' | 'out' | 'unknown'; why: string }> {
@@ -1733,10 +1778,9 @@ export class JevBrowserAgent {
     }
   }
 
-  private static skipLogin = false;
 
   /** Called by the "I'm already signed in — continue" button. */
-  public static skipLoginWait(): void {
+  public skipLoginWait(): void {
     this.skipLogin = true;
   }
 
@@ -1744,7 +1788,7 @@ export class JevBrowserAgent {
    * Open ChatGPT, Grok and TikTok (all three tabs, right away) and make sure each is signed in. Only a site that is
    * clearly signed OUT makes us wait — the operator signs in and the run continues by itself.
    */
-  public static async ensureLoggedIn(
+  public async ensureLoggedIn(
     context: BrowserContext,
     say: (step: string, kind?: 'running' | 'waiting_login') => void,
     targets: PublishTargets,
@@ -1870,19 +1914,19 @@ export class JevBrowserAgent {
       cookieDomains: /(^|\.)(youtube\.com|google\.com|googleusercontent\.com|ggpht\.com)$/i,
     },
   };
+  public readonly ACCOUNT_SITES = ChannelBrowserAgent.ACCOUNT_SITES;
 
-  public static isPipelineRunning(): boolean {
+  public isPipelineRunning(): boolean {
     return this.pipelineRunning;
   }
 
-  private static accountCancel = false;
 
   /** "Cancel" while waiting for a new sign-in. */
-  public static cancelAccountWait(): void {
+  public cancelAccountWait(): void {
     this.accountCancel = true;
   }
 
-  private static async pageForSite(context: BrowserContext, key: AccountKey): Promise<Page> {
+  private async pageForSite(context: BrowserContext, key: AccountKey): Promise<Page> {
     const host = this.ACCOUNT_SITES[key].host;
     return (
       context.pages().find((p) => !p.isClosed() && p.url().includes(host)) ||
@@ -1892,7 +1936,7 @@ export class JevBrowserAgent {
   }
 
   /** Read-only: open each platform, record whether it is signed in, then close the browser window. */
-  public static async checkAccounts(say: (step: string) => void): Promise<void> {
+  public async checkAccounts(say: (step: string) => void): Promise<void> {
     if (this.pipelineRunning) throw new Error('A video is being made right now. Wait for it to finish first.');
     const context = await this.launchContext(false);
     for (const key of ACCOUNT_KEYS) {
@@ -1918,7 +1962,7 @@ export class JevBrowserAgent {
    * 2. show its sign-in page and wait until the new account is signed in
    * 3. save the new login and close the browser window
    */
-  public static async switchAccount(key: AccountKey, say: (step: string, kind?: 'running' | 'waiting_login') => void): Promise<string> {
+  public async switchAccount(key: AccountKey, say: (step: string, kind?: 'running' | 'waiting_login') => void): Promise<string> {
     if (this.pipelineRunning) throw new Error('A video is being made right now. Wait for it to finish, then switch accounts.');
     const cfg = this.ACCOUNT_SITES[key];
     this.accountCancel = false;
@@ -1937,7 +1981,7 @@ export class JevBrowserAgent {
       .catch(() => {});
     await context.clearCookies({ domain: cfg.cookieDomains });
     await this.saveCookies(context, true);
-    recordAccountStatus(key, 'out');
+    recordAccountStatus(key, 'out', this.channelId);
     if (key === 'chatgpt') {
       // The "Create Mr Apple Videos" chat belongs to the OLD account; it is re-detected for the new one below.
       db.prepare("UPDATE settings SET chatgpt_chat_url = '', updated_at = CURRENT_TIMESTAMP WHERE id = 1").run();
@@ -1966,7 +2010,7 @@ export class JevBrowserAgent {
     // 3. Save the new login.
     await page.waitForTimeout(2500);
     await this.saveCookies(context);
-    recordAccountStatus(key, 'in');
+    recordAccountStatus(key, 'in', this.channelId);
 
     let note = '';
     if (key === 'chatgpt') {
@@ -1991,7 +2035,7 @@ export class JevBrowserAgent {
    * Pick the frame (25%–75% into the video) that differs MOST from the first frame — that is where the guest animal and
    * the scene appear — and save it as a JPEG. Decoding happens in a blank browser tab; no ffmpeg involved.
    */
-  public static async extractCoverFrame(
+  public async extractCoverFrame(
     page: Page,
     videoPath: string,
     outPath: string
@@ -2051,7 +2095,7 @@ export class JevBrowserAgent {
     return { timeSec: res.t, durationSec: res.d };
   }
 
-  private static async makeCoverImage(videoPath: string, jobId: string): Promise<string | null> {
+  private async makeCoverImage(videoPath: string, jobId: string): Promise<string | null> {
     const outPath = path.join(__dirname, '../../storage/thumbnails', `thumb_${jobId}.jpg`);
     let page: Page | null = null;
     try {
@@ -2072,7 +2116,7 @@ export class JevBrowserAgent {
    * On TikTok Studio's upload form: Edit cover → Upload cover → pick our JPEG → Confirm.
    * Best effort: if TikTok's layout differs, we save screenshots for debugging, back out, and post with the automatic cover.
    */
-  private static async setTikTokCover(page: Page, coverPath: string): Promise<boolean> {
+  private async setTikTokCover(page: Page, coverPath: string): Promise<boolean> {
     const framesDir = path.join(__dirname, '../../storage/frames');
     const snap = (tag: string) => page.screenshot({ path: path.join(framesDir, `tiktok_cover_${tag}_${Date.now()}.png`) }).catch(() => {});
     let chooserHandled = false;
@@ -2139,7 +2183,7 @@ export class JevBrowserAgent {
    * thumbnail → Next ×3 → visibility → Publish → read the video link from the "Video published" dialog.
    * Screenshots of each stage go to storage/frames/youtube_*.png so a Studio layout change is easy to diagnose.
    */
-  public static async uploadToYouTubeViaBrowser(
+  public async uploadToYouTubeViaBrowser(
     videoPath: string,
     title: string,
     description: string,
@@ -2305,7 +2349,7 @@ export class JevBrowserAgent {
   /**
    * Step 3: Browse into TikTok Upload, upload the video, set caption & AIGC disclosure, and stage/publish.
    */
-  public static async uploadToTikTokViaBrowser(
+  public async uploadToTikTokViaBrowser(
     videoPath: string,
     title: string,
     hook: string,
@@ -2576,11 +2620,10 @@ export class JevBrowserAgent {
    * FULL AUTONOMOUS SEQUENCE (ChatGPT -> Grok -> Video Assembly -> QA -> TikTok)
    * Controls the browser automatically through all three steps continuously without manual intervention.
    */
-  private static pipelineRunning = false;
 
-  public static async runFullAutonomousPipeline(
-    options: Parameters<typeof JevBrowserAgent.runPipelineOnce>[0]
-  ): ReturnType<typeof JevBrowserAgent.runPipelineOnce> {
+  public async runFullAutonomousPipeline(
+    options: Parameters<typeof ChannelBrowserAgent.prototype.runPipelineOnce>[0]
+  ): ReturnType<typeof ChannelBrowserAgent.prototype.runPipelineOnce> {
     if (this.pipelineRunning) {
       throw new Error('A video is already being produced. Wait for it to finish before starting another.');
     }
@@ -2601,7 +2644,7 @@ export class JevBrowserAgent {
     }
   }
 
-  private static async runPipelineOnce(options: {
+  private async runPipelineOnce(options: {
     format: string;
     ageBand: string;
     seriesTitle: string;
@@ -2634,7 +2677,12 @@ export class JevBrowserAgent {
 
     // 0. Open the browser (once) and make sure ChatGPT, Grok and TikTok are signed in — waits for the operator if not.
     const browser = await this.launchContext(false);
-    const targets = getPublishTargets();
+    const ch = getChannel(this.channelId);
+    const targets = {
+      tiktok: ch ? ch.post_tiktok : true,
+      youtube: ch ? ch.post_youtube : true,
+      youtubeMadeForKids: ch ? ch.youtube_made_for_kids : true,
+    };
     const login = await this.ensureLoggedIn(browser, say, targets);
     const youtubeOn = targets.youtube && !login.skipped.includes('youtube');
 
@@ -2664,11 +2712,11 @@ export class JevBrowserAgent {
     const series = db.prepare("SELECT * FROM series WHERE status IN ('pilot', 'active') LIMIT 1").get() as any;
     // If Grok's server fails ("Server failed to respond"), stop and say so. No automatic retry: it fails the same way at
     // 480p and 720p, and every attempt may use Grok credits.
-    const grokDefaults = getGrokSettings();
-    const effDuration = options.targetDurationSec || grokDefaults.duration || 15;
-    const effResolution = options.targetResolution || grokDefaults.resolution || '720p';
+    const chInfo = getChannel(this.channelId);
+    const effDuration = options.targetDurationSec || chInfo?.grok_duration || 15;
+    const effResolution = options.targetResolution || chInfo?.grok_resolution || '720p';
 
-    let grokRes: Awaited<ReturnType<typeof JevBrowserAgent.createVideoViaGrok>>;
+    let grokRes: Awaited<ReturnType<typeof ChannelBrowserAgent.prototype.createVideoViaGrok>>;
     try {
       grokRes = await this.createVideoViaGrok(grokPrompt, jobId, 1, false, effDuration, effResolution);
     } catch (err: any) {
@@ -2862,5 +2910,57 @@ export class JevBrowserAgent {
   }
 }
 
-export default JevBrowserAgent;
+// Backward-compatibility facade that delegates to Channel 1 (Mr. Apple)
+import { getAgent } from './agentRegistry';
 
+export class JevBrowserAgent {
+  public static readonly ACCOUNT_SITES = ChannelBrowserAgent.ACCOUNT_SITES;
+  public static isValidVideoBuffer = ChannelBrowserAgent.isValidVideoBuffer;
+  public static isValidVideoFile = ChannelBrowserAgent.isValidVideoFile;
+  public static parseVideoSpec = ChannelBrowserAgent.parseVideoSpec;
+  public static async extractCoverFrame(page: Page, videoPath: string, outPath: string) {
+    return getAgent(1).extractCoverFrame(page, videoPath, outPath);
+  }
+
+  public static isPipelineRunning(): boolean {
+    return getAgent(1).isPipelineRunning();
+  }
+  public static skipLoginWait(): void {
+    getAgent(1).skipLoginWait();
+  }
+  public static cancelAccountWait(): void {
+    getAgent(1).cancelAccountWait();
+  }
+  public static async shutdown(): Promise<void> {
+    return getAgent(1).shutdown();
+  }
+  public static async checkAccounts(say: (step: string) => void): Promise<void> {
+    return getAgent(1).checkAccounts(say);
+  }
+  public static async switchAccount(key: AccountKey, say: (step: string, kind?: 'running' | 'waiting_login') => void): Promise<string> {
+    return getAgent(1).switchAccount(key, say);
+  }
+  public static async openInteractiveSession(): Promise<{ success: boolean; message: string }> {
+    return getAgent(1).openInteractiveSession();
+  }
+  public static async inspectSession(): Promise<any> {
+    return getAgent(1).inspectSession();
+  }
+  public static async detectAndSetChatGptUrl(): Promise<{ success: boolean; url?: string; title?: string; message: string }> {
+    return getAgent(1).detectAndSetChatGptUrl();
+  }
+  public static saveChatGptUrl(url: string): void {
+    getAgent(1).saveChatGptUrl(url);
+  }
+  public static async runFullAutonomousPipeline(options: any): Promise<any> {
+    return getAgent(1).runFullAutonomousPipeline(options);
+  }
+  public static async uploadToYouTubeViaBrowser(videoPath: string, title: string, description: string, options?: any) {
+    return getAgent(1).uploadToYouTubeViaBrowser(videoPath, title, description, options);
+  }
+  public static async uploadToTikTokViaBrowser(videoPath: string, title: string, hook: string, options?: any) {
+    return getAgent(1).uploadToTikTokViaBrowser(videoPath, title, hook, options);
+  }
+}
+
+export default JevBrowserAgent;

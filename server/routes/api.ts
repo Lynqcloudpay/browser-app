@@ -1,15 +1,30 @@
-import { Router } from 'express';
+import { Router, raw } from 'express';
 import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import { exec } from 'child_process';
 import db, { resetContentCatalog } from '../db/database';
 import { startRun, getRunStatus } from '../engine/dailyRunner';
-import { getSchedule, setSchedule } from '../engine/dailySchedule';
+import {
+  getSchedule,
+  setSchedule,
+  getChannelSchedule,
+  setChannelSchedule,
+  syncChannelLaunchAgent,
+} from '../engine/dailySchedule';
 import { getPublishTargets, setPublishTargets } from '../engine/publishTargets';
 import { getGrokSettings, setGrokSettings } from '../engine/grokSettings';
 import { getAccountsOverview, startCheck, startSwitch, cancelAccountOp } from '../engine/accounts';
 import { AccountKey } from '../engine/accountStatus';
+import {
+  listChannels,
+  getChannel,
+  createChannel,
+  updateChannel,
+  deleteChannel,
+  referenceImagePath,
+  channelDir,
+} from '../engine/channels';
 import ProductionWorker from '../engine/worker';
 import MonetizationEngine from '../engine/monetizationEngine';
 import Scheduler from '../engine/scheduler';
@@ -18,6 +33,7 @@ import OpenAIWriter from '../engine/openaiWriter';
 import GrokVideoGenerator from '../engine/xaiVideoGenerator';
 import KidsSafetyQAInspector from '../engine/qaInspector';
 import JevBrowserAgent from '../engine/jevBrowserAutomation';
+import { getAgent } from '../engine/agentRegistry';
 
 export const apiRouter = Router();
 
@@ -253,14 +269,22 @@ Format: ${series.format}. Multi-step progression with 4 distinct scenes.`;
 
 // GET /api/jobs - Production jobs list
 apiRouter.get('/jobs', (req, res) => {
-  const { state } = req.query;
-  let query = 'SELECT * FROM jobs';
+  const { state, channel_id } = req.query;
+  let query = 'SELECT j.*, c.name as channel_name FROM jobs j LEFT JOIN channels c ON j.channel_id = c.id';
+  const conditions: string[] = [];
   const params: any[] = [];
   if (state) {
-    query += ' WHERE state = ?';
+    conditions.push('j.state = ?');
     params.push(state);
   }
-  query += ' ORDER BY created_at DESC LIMIT 50';
+  if (channel_id) {
+    conditions.push('j.channel_id = ?');
+    params.push(Number(channel_id));
+  }
+  if (conditions.length > 0) {
+    query += ' WHERE ' + conditions.join(' AND ');
+  }
+  query += ' ORDER BY j.created_at DESC LIMIT 50';
   const jobs = db.prepare(query).all(...params);
   res.json({ jobs });
 });
@@ -422,9 +446,9 @@ apiRouter.post('/browser/run', (req, res) => {
   const trigger = req.body?.trigger === 'schedule' ? 'schedule' : 'button';
   const targetDurationSec = req.body?.targetDurationSec !== undefined ? Number(req.body.targetDurationSec) : undefined;
   const targetResolution = req.body?.targetResolution === '480p' || req.body?.targetResolution === '720p' ? req.body.targetResolution : undefined;
-  const result = startRun(trigger, targetDurationSec, targetResolution);
-  if (!result.started) return res.status(409).json({ error: result.reason, ...getRunStatus() });
-  res.status(202).json({ started: true, ...getRunStatus() });
+  const result = startRun(trigger, 1, targetDurationSec, targetResolution);
+  if (!result.started) return res.status(409).json({ error: result.reason, ...getRunStatus(1) });
+  res.status(202).json({ started: true, ...getRunStatus(1) });
 });
 
 // Grok video settings: quality (480p/720p) and duration (6s/10s/15s)
@@ -497,6 +521,190 @@ apiRouter.post('/schedule', async (req, res) => {
     res.json(await setSchedule(enabled, times));
   } catch (err: any) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// Channels CRUD & reference picture management
+apiRouter.get('/channels', (req, res) => {
+  const channels = listChannels().map((c) => ({
+    ...c,
+    hasReferenceImage: Boolean(referenceImagePath(c.id)),
+    runStatus: getRunStatus(c.id),
+    accounts: getAccountsOverview(c.id),
+  }));
+  res.json({ channels });
+});
+
+apiRouter.post('/channels', (req, res) => {
+  try {
+    const c = createChannel(req.body?.name);
+    res.status(201).json(c);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+apiRouter.get('/channels/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const c = getChannel(id);
+  if (!c) return res.status(404).json({ error: 'Channel not found' });
+  res.json({
+    ...c,
+    hasReferenceImage: Boolean(referenceImagePath(c.id)),
+    runStatus: getRunStatus(id),
+    accounts: getAccountsOverview(id),
+  });
+});
+
+apiRouter.patch('/channels/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const updated = updateChannel(id, req.body || {});
+    if (req.body?.schedule_enabled !== undefined || req.body?.schedule_times !== undefined) {
+      await syncChannelLaunchAgent(id, updated.schedule_enabled, updated.schedule_times).catch((e) => {
+        console.warn(`[api] Could not sync LaunchAgent for channel ${id}:`, e.message);
+      });
+    }
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+apiRouter.get('/channels/:id/schedule', (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    res.json(getChannelSchedule(id));
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+apiRouter.post('/channels/:id/schedule', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const enabled = !!req.body?.enabled;
+    const times: string[] = Array.isArray(req.body?.times)
+      ? req.body.times.map(String)
+      : [String(req.body?.time || '10:00')];
+    res.json(await setChannelSchedule(id, enabled, times));
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+apiRouter.delete('/channels/:id', (req, res) => {
+  try {
+    deleteChannel(Number(req.params.id));
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+apiRouter.get('/channels/:id/reference-image', (req, res) => {
+  const img = referenceImagePath(Number(req.params.id));
+  if (!img || !fs.existsSync(img)) return res.status(404).json({ error: 'No reference image found' });
+  res.setHeader('Cache-Control', 'no-store');
+  res.sendFile(path.resolve(img));
+});
+
+apiRouter.post('/channels/:id/reference-image', raw({ type: ['image/*', 'application/octet-stream'], limit: '15mb' }), (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const channel = getChannel(id);
+    if (!channel) return res.status(404).json({ error: 'Channel not found' });
+
+    const buf = req.body;
+    if (!buf || !Buffer.isBuffer(buf) || buf.length < 100) {
+      return res.status(400).json({ error: 'Invalid image data' });
+    }
+
+    const ct = (req.headers['content-type'] || '').toLowerCase();
+    let ext = '.jpg';
+    if (ct.includes('png')) ext = '.png';
+    else if (ct.includes('webp')) ext = '.webp';
+
+    const dir = channelDir(id);
+    // Remove existing reference files
+    ['.jpg', '.jpeg', '.png', '.webp'].forEach((e) => {
+      const old = path.join(dir, `reference${e}`);
+      if (fs.existsSync(old)) {
+        try { fs.unlinkSync(old); } catch {}
+      }
+    });
+
+    const target = path.join(dir, `reference${ext}`);
+    const tmp = target + '.tmp_' + Date.now();
+    fs.writeFileSync(tmp, buf);
+    fs.renameSync(tmp, target);
+
+    res.json({ success: true, path: target });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Channel-specific run and status
+apiRouter.post('/channels/:id/run', (req, res) => {
+  const id = Number(req.params.id);
+  const trigger = req.body?.trigger === 'schedule' ? 'schedule' : 'button';
+  const targetDurationSec = req.body?.targetDurationSec !== undefined ? Number(req.body.targetDurationSec) : undefined;
+  const targetResolution = req.body?.targetResolution === '480p' || req.body?.targetResolution === '720p' ? req.body.targetResolution : undefined;
+  const result = startRun(trigger, id, targetDurationSec, targetResolution);
+  if (!result.started) return res.status(409).json({ error: result.reason, ...getRunStatus(id) });
+  res.status(202).json({ started: true, ...getRunStatus(id) });
+});
+
+apiRouter.get('/channels/:id/run-status', (req, res) => {
+  res.json(getRunStatus(Number(req.params.id)));
+});
+
+apiRouter.post('/channels/:id/skip-login', (req, res) => {
+  getAgent(Number(req.params.id)).skipLoginWait();
+  res.json({ success: true });
+});
+
+apiRouter.get('/channels/:id/accounts', (req, res) => {
+  res.json(getAccountsOverview(Number(req.params.id)));
+});
+
+apiRouter.post('/channels/:id/accounts/check', (req, res) => {
+  const id = Number(req.params.id);
+  const r = startCheck(id);
+  if (!r.started) return res.status(409).json({ error: r.reason, ...getAccountsOverview(id) });
+  res.status(202).json(getAccountsOverview(id));
+});
+
+apiRouter.post('/channels/:id/accounts/cancel', (req, res) => {
+  cancelAccountOp(Number(req.params.id));
+  res.json({ success: true });
+});
+
+apiRouter.post('/channels/:id/accounts/:site/switch', (req, res) => {
+  const id = Number(req.params.id);
+  const r = startSwitch(req.params.site as AccountKey, id);
+  if (!r.started) return res.status(409).json({ error: r.reason, ...getAccountsOverview(id) });
+  res.status(202).json(getAccountsOverview(id));
+});
+
+apiRouter.post('/channels/:id/open-browser', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const result = await getAgent(id).openInteractiveSession();
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+apiRouter.post('/channels/:id/detect-chatgpt-url', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const result = await getAgent(id).detectAndSetChatGptUrl();
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
 });
 

@@ -126,10 +126,33 @@ if (fs.existsSync(envPath)) {
 }
 
 // 6. Storage folders
-for (const sub of ['videos', 'frames', 'thumbnails', 'logs']) {
+for (const sub of ['videos', 'frames', 'thumbnails', 'logs', 'channels']) {
   const dir = path.join(root, 'storage', sub);
   if (!fs.existsSync(dir) && !CHECK_ONLY) fs.mkdirSync(dir, { recursive: true });
 }
+
+// 6b. Studio channels check (read-only)
+try {
+  const dbPath = path.join(root, 'storage', 'kindred_studio.db');
+  if (fs.existsSync(dbPath)) {
+    const Database = require('better-sqlite3');
+    const sdb = new Database(dbPath, { readonly: true });
+    const tables = sdb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='channels'").all();
+    if (tables.length > 0) {
+      const rows = sdb.prepare('SELECT id, name FROM channels').all();
+      say(`\n▶ Studio Channels (${rows.length})`);
+      for (const ch of rows) {
+        const chDir = path.join(root, 'storage', 'channels', String(ch.id));
+        const hasImg = ['reference.jpg', 'reference.png', 'reference.webp'].some((f) => fs.existsSync(path.join(chDir, f)));
+        if (!hasImg) {
+          warnings.push(`Channel "${ch.name}" (ID ${ch.id}) has no reference image yet. Upload one via the Studio tab.`);
+        }
+      }
+      say(`✔ ${rows.length} channel(s) in studio catalog`);
+    }
+    sdb.close();
+  }
+} catch {}
 
 // 7. Verification (skipped in --check mode)
 if (!CHECK_ONLY) {

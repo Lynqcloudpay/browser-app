@@ -19,6 +19,10 @@ app.use(express.json());
 // Initialize SQLite database
 initDatabase();
 
+// Migrate legacy LaunchAgent schedule to Channel 1 if present
+import { migrateLegacySchedule } from './engine/dailySchedule';
+migrateLegacySchedule().catch((e) => console.warn('[Schedule] Migration check error:', e.message));
+
 // Ensure storage subfolders exist
 const storageRoot = path.join(__dirname, '../storage');
 ['videos', 'thumbnails', 'frames'].forEach((sub) => {

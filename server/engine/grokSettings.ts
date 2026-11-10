@@ -46,3 +46,4 @@ export function setGrokSettings(input: Partial<GrokSettings>): GrokSettings {
   fs.writeFileSync(FILE, JSON.stringify(next, null, 2));
   return next;
 }
+

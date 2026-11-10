@@ -6,12 +6,15 @@ import JevInspectorTab from './components/JevInspectorTab';
 import VideoGalleryTab from './components/VideoGalleryTab';
 import EconomicsTab from './components/EconomicsTab';
 import SettingsTab from './components/SettingsTab';
+import StudioTab from './components/StudioTab';
+import ChannelPage from './components/ChannelPage';
 import QAReviewModal from './components/QAReviewModal';
 import VideoPlayerModal from './components/VideoPlayerModal';
-import { LayoutDashboard, Layers, Cpu, Film, DollarSign, Settings } from 'lucide-react';
+import { LayoutDashboard, Layers, Cpu, Film, DollarSign, Settings, Tv } from 'lucide-react';
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'series' | 'jev' | 'gallery' | 'economics' | 'settings'>('overview');
+  const [activeTab, setActiveTab] = useState<'studio' | 'channel' | 'overview' | 'series' | 'jev' | 'gallery' | 'economics' | 'settings'>('studio');
+  const [selectedChannelId, setSelectedChannelId] = useState<number>(1);
   const [status, setStatus] = useState<any>({
     settings: {},
     connections: [],
@@ -147,8 +150,20 @@ export function App() {
       <div className="border-b border-slate-800 bg-slate-900/50 px-4 sm:px-6">
         <div className="max-w-7xl mx-auto flex items-center gap-1 sm:gap-2 overflow-x-auto py-2">
           <button
+            onClick={() => setActiveTab('studio')}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
+              activeTab === 'studio' || activeTab === 'channel'
+                ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+            }`}
+          >
+            <Tv className="w-4 h-4" />
+            <span>Studio</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('overview')}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition whitespace-nowrap ${
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition whitespace-nowrap cursor-pointer ${
               activeTab === 'overview'
                 ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
@@ -231,6 +246,22 @@ export function App() {
 
       {/* Main Content Body */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">
+        {activeTab === 'studio' && (
+          <StudioTab
+            onSelectChannel={(chId) => {
+              setSelectedChannelId(chId);
+              setActiveTab('channel');
+            }}
+          />
+        )}
+
+        {activeTab === 'channel' && (
+          <ChannelPage
+            channelId={selectedChannelId}
+            onBack={() => setActiveTab('studio')}
+          />
+        )}
+
         {activeTab === 'overview' && (
           <OverviewTab
             status={status}

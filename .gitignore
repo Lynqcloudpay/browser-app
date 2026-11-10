@@ -7,6 +7,8 @@ storage/schedule.json
 storage/schedule_state.json
 storage/publish_targets.json
 storage/grok_settings.json
+storage/channels/
+storage/logs/
 storage/account_status.json
 storage/test_interactive/
 storage/test_profile/

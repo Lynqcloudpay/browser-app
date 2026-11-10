@@ -10,6 +10,7 @@
     "build": "vite build",
     "start": "tsx server/index.ts",
     "test": "DATABASE_PATH=./storage/test_kindred_studio.db tsx tests/safety_and_loop.test.ts",
+    "test:channels": "DATABASE_PATH=./storage/test_kindred_studio.db tsx tests/channels.test.ts",
     "demo": "tsx scripts/demo.ts",
     "smoke": "tsx scripts/smoke.ts",
     "daily": "tsx scripts/dailyRun.ts",

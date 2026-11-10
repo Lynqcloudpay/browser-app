@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import dotenv from 'dotenv';
 import { SCHEMA_SQL } from './schema';
+import { seedDefaultChannelIfNeeded } from '../engine/channels';
 
 dotenv.config();
 
@@ -31,6 +32,12 @@ export function initDatabase() {
 
   try {
     db.exec(`ALTER TABLE jobs ADD COLUMN youtube_share_url TEXT`);
+  } catch {
+    // Column already exists
+  }
+
+  try {
+    db.exec(`ALTER TABLE jobs ADD COLUMN channel_id INTEGER`);
   } catch {
     // Column already exists
   }
@@ -151,6 +158,12 @@ export function initDatabase() {
         8.20
       )
     `).run();
+  }
+
+  try {
+    seedDefaultChannelIfNeeded();
+  } catch (err: any) {
+    console.warn('[Database] Could not seed default channel:', err.message);
   }
 }
 

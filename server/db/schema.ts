@@ -62,8 +62,26 @@ CREATE TABLE IF NOT EXISTS publishing_slots (
   published_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS channels (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  chatgpt_chat_url TEXT NOT NULL DEFAULT '',
+  chatgpt_chat_name TEXT NOT NULL DEFAULT '',
+  grok_resolution TEXT NOT NULL DEFAULT '720p',
+  grok_duration INTEGER NOT NULL DEFAULT 15,
+  post_tiktok INTEGER NOT NULL DEFAULT 1,
+  post_youtube INTEGER NOT NULL DEFAULT 1,
+  youtube_made_for_kids INTEGER NOT NULL DEFAULT 1,
+  hashtag_hint TEXT NOT NULL DEFAULT '',
+  schedule_enabled INTEGER NOT NULL DEFAULT 0,
+  schedule_times TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,
+  channel_id INTEGER,
   series_id TEXT,
   slot_id TEXT,
   concept_title TEXT NOT NULL,

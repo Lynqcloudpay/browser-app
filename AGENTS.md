@@ -48,34 +48,41 @@ npm run build              # builds the web page
 ```
 
 ## Gotchas (each of these cost real debugging time)
-- **Never open a second browser on `storage/browser_profile`** while the app's window may be open — it wiped the saved logins once. To inspect a site, use a throw-away `chromium.launch()` context and load cookies from `storage/browser_cookies.json`.
+- **Never open a second browser on `storage/browser_profile` or any `storage/channels/*/browser_profile`** while the app's window may be open — it wiped the saved logins once. To inspect a site, use a throw-away `chromium.launch()` context and load cookies from `storage/browser_cookies.json` or channel cookies.
 - **Ports:** the backend reads `SERVER_PORT` (default 3000), *not* `PORT` (launchers set `PORT=5173` for Vite → 502 errors).
-- **Grok (signed in)** shows resolution and length as dropdown buttons (`aria-label="Video resolution"` / `"Video duration"`, items are `menuitemradio`), not radio toggles. The app asks for 720p and 15s. If Grok's server fails ("Server failed to respond" toast, back to the still image) the run stops with that message; there is no automatic retry because it happened at 480p and 720p alike and attempts may use credits. Never treat "progress shown, then no video" as "never started". The first video frame is the reference image, so covers are picked from a mid-video frame.
+- **Grok (signed in)** shows resolution and length as dropdown buttons (`aria-label="Video resolution"` / `"Video duration"`, items are `menuitemradio`), not radio toggles. The app asks for 720p and 15s (or channel settings). If Grok's server fails ("Server failed to respond" toast, back to the still image) the run stops with that message; there is no automatic retry because it happened at 480p and 720p alike and attempts may use credits. Never treat "progress shown, then no video" as "never started". The first video frame is the reference image, so covers are picked from a mid-video frame.
 - **Under `tsx`**, functions passed to `page.evaluate` get an injected `__name()` helper; `window.__name` is shimmed in `launchPersistent` and `extractCoverFrame`. Keep that when adding in-page code.
 - **Tests** run against their own database (`npm test` sets `DATABASE_PATH`). Never point tests at `storage/kindred_studio.db`.
 - **No ffmpeg.** The raw Grok video (with its original audio) goes straight to TikTok.
-- **YouTube** is driven through YouTube Studio's upload dialog (`uploadToYouTubeViaBrowser`): it must answer "made for kids" (Settings; default yes — these are kids' videos), always publishes **Public**, and saves screenshots to `storage/frames/youtube_*.png`. Studio can show an "unsupported browser" page with a "Skip to YouTube Studio" link (handled). YouTube sign-in is optional: if nobody signs in within 4 minutes the run still posts to TikTok. The browser only closes when every enabled place confirmed the post.
-- **Switching accounts** (`switchAccount` in `jevBrowserAutomation.ts`, orchestrated by `server/engine/accounts.ts`): wipes only that platform's cookies via `context.clearCookies({domain})` (YouTube also clears Google; Grok also clears X) plus site storage, and rewrites `storage/browser_cookies.json` so the old login can't be restored. ChatGPT's saved "Create Mr Apple Videos" chat URL is cleared and re-detected for the new account. It refuses while a video run is in progress, and runs refuse while an account change is in progress.
+- **YouTube** is driven through YouTube Studio's upload dialog (`uploadToYouTubeViaBrowser`): it must answer "made for kids" (Settings/Channel; default yes — these are kids' videos), always publishes **Public**, and saves screenshots to `storage/frames/youtube_*.png`. Studio can show an "unsupported browser" page with a "Skip to YouTube Studio" link (handled). YouTube sign-in is optional: if nobody signs in within 4 minutes the run still posts to TikTok. The browser only closes when every enabled place confirmed the post.
+- **Switching accounts** (`switchAccount` in `jevBrowserAutomation.ts`, orchestrated by `server/engine/accounts.ts`): wipes only that platform's cookies via `context.clearCookies({domain})` (YouTube also clears Google; Grok also clears X) plus site storage, and rewrites cookies file so the old login can't be restored. ChatGPT's saved chat URL is cleared and re-detected for the new account. It refuses while a video run is in progress, and runs refuse while an account change is in progress.
 - **File pickers:** TikTok's "Upload cover" opens a native Mac file window unless a `filechooser` listener intercepts it. Keep the listeners.
-- **Schedule** = macOS LaunchAgent `com.kindredstudio.daily` → `scripts/dailyRun.ts`. Each scheduled time is a slot, and a slot is done only when ITS video was made (`storage/schedule_state.json` → `doneSlots`; manual runs don't count; a missed slot is caught up once). Skips are logged and shown as a notification; log in `storage/logs/daily.log`.
-- The browser window closes by itself after TikTok confirms a post; the next run reopens it and restores saved login cookies.
+- **Multi-channel Studio:** Each channel has its own independent browser context, character reference picture, ChatGPT conversation, Grok settings, where-to-post destinations, and LaunchAgent daily schedule (`com.kindredstudio.channel.<id>`). Parallel channels run in their own staggered Chrome windows without overlapping state. Grok generations are throttled via `withGrokSlot` to prevent rate limit collisions on shared accounts. macOS clipboard operations are synchronized via `withClipboard`.
+- **Schedule** = macOS LaunchAgent `com.kindredstudio.channel.<id>` → `scripts/dailyRun.ts --channel <id>`. Each scheduled time is a slot, and a slot is done only when ITS video was made (`storage/channels/<id>/schedule_state.json` → `doneSlots`; manual runs don't count; a missed slot is caught up once). Skips are logged and shown as a notification; log in `storage/logs/channel_<id>.log`.
+- The browser window closes by itself after TikTok/YouTube confirms a post; the next run reopens it and restores saved login cookies.
 
 ## Where things are
 | File | Purpose |
 |---|---|
-| `server/engine/jevBrowserAutomation.ts` | All browser steps: login check, ChatGPT, Grok, cover frame, TikTok, cookies |
-| `server/engine/dailyRunner.ts` | One-button run + live status |
-| `server/engine/accounts.ts`, `accountStatus.ts` | Accounts card: check logins / switch a platform's account |
+| `server/engine/channels.ts` | Multi-channel CRUD, channel directory paths, DB operations |
+| `server/engine/agentRegistry.ts` | Channel browser agent registry, lifecycle management & concurrency checks |
+| `server/engine/clipboardLock.ts` | Async mutex serializing macOS system clipboard access across parallel channels |
+| `server/engine/grokSemaphore.ts` | Concurrency limiter throttling Grok generations (max 2 parallel) |
+| `server/engine/jevBrowserAutomation.ts` | Instance-based `ChannelBrowserAgent` handling browser steps for each channel |
+| `server/engine/dailyRunner.ts` | One-button run + live per-channel status |
+| `server/engine/accounts.ts`, `accountStatus.ts` | Accounts overview: check logins / switch a platform's account per channel |
 | `server/engine/publishTargets.ts` | Where to post: TikTok / YouTube, YouTube made-for-kids setting |
 | `server/engine/grokSettings.ts` | Grok video quality (480p/720p) and duration (6s/10s/15s) settings |
-| `server/engine/dailySchedule.ts`, `scripts/dailyRun.ts` | Daily schedule (launchd) and its job |
-| `server/routes/api.ts` | REST API (`/api/browser/run`, `/run-status`, `/skip-login`, `/schedule`) |
-| `client/src/components/SettingsTab.tsx` | The Settings page (one button, schedule card) |
+| `server/engine/dailySchedule.ts`, `scripts/dailyRun.ts` | Per-channel daily schedule (launchd plists) and runner job |
+| `server/routes/api.ts` | REST API (`/api/channels`, `/api/channels/:id/*`, plus legacy routes) |
+| `client/src/components/StudioTab.tsx` | Studio overview: channel cards grid, '+' new channel, channel deletion |
+| `client/src/components/ChannelPage.tsx` | Dedicated channel management: character image upload, accounts, Grok, schedule |
+| `client/src/components/SettingsTab.tsx` | Global operator settings & connections |
 | `scripts/setup.mjs` | One-command setup / check |
 
 ## Git rules (standing instruction from the owner)
 - **After every change: commit and push to `main`** (repo `Lynqcloudpay/browser-app`) in the same turn, once verification passes.
-- **Never commit private files:** `.env`, `storage/browser_profile/`, `storage/browser_cookies.json` (saved logins), `storage/*.db*`, `storage/schedule*.json`, `storage/publish_targets.json`, `storage/grok_settings.json`, `storage/account_status.json`, `storage/logs/`, `.claude/settings.local.json`. They are git-ignored — keep it that way, and scan the diff for keys/tokens before committing.
+- **Never commit private files:** `.env`, `storage/browser_profile/`, `storage/channels/`, `storage/browser_cookies.json` (saved logins), `storage/*.db*`, `storage/schedule*.json`, `storage/publish_targets.json`, `storage/grok_settings.json`, `storage/account_status.json`, `storage/logs/`, `.claude/settings.local.json`. They are git-ignored — keep it that way, and scan the diff for keys/tokens before committing.
 - Write a clear message explaining *why*. End it with the attribution line your tool requires.
 
 ## Troubleshooting

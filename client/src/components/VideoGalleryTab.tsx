@@ -14,8 +14,15 @@ export const VideoGalleryTab: React.FC<VideoGalleryTabProps> = ({
 }) => {
   const [cleaning, setCleaning] = useState(false);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const [selectedChannel, setSelectedChannel] = useState<string>('all');
 
-  const videoJobs = jobs.filter((j) => j.video_path || ['published', 'scheduled', 'ready_to_publish', 'awaiting_action'].includes(j.state));
+  const channelsList = Array.from(
+    new Set(jobs.map((j) => j.channel_name).filter(Boolean))
+  ) as string[];
+
+  const videoJobs = jobs
+    .filter((j) => j.video_path || ['published', 'scheduled', 'ready_to_publish', 'awaiting_action'].includes(j.state))
+    .filter((j) => selectedChannel === 'all' || j.channel_name === selectedChannel);
 
   const getMediaUrl = (filePath: string) => {
     if (!filePath) return '';
@@ -83,6 +90,20 @@ export const VideoGalleryTab: React.FC<VideoGalleryTabProps> = ({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {channelsList.length > 0 && (
+            <select
+              value={selectedChannel}
+              onChange={(e) => setSelectedChannel(e.target.value)}
+              className="text-xs font-semibold text-slate-300 bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-1.5 focus:outline-none focus:border-amber-500"
+            >
+              <option value="all">All Channels ({jobs.length})</option>
+              {channelsList.map((ch) => (
+                <option key={ch} value={ch}>
+                  {ch}
+                </option>
+              ))}
+            </select>
+          )}
           <button
             onClick={handleOpenFolder}
             className="text-xs font-semibold text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition"
@@ -187,7 +208,14 @@ export const VideoGalleryTab: React.FC<VideoGalleryTabProps> = ({
 
                   {/* Video Meta Info */}
                   <div className="p-4 space-y-2">
-                    <h4 className="text-sm font-bold text-white line-clamp-1">{job.concept_title}</h4>
+                    <div className="flex items-center justify-between gap-2">
+                      <h4 className="text-sm font-bold text-white line-clamp-1">{job.concept_title}</h4>
+                      {job.channel_name && (
+                        <span className="shrink-0 px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700/60 text-amber-300 font-medium text-[10px]">
+                          {job.channel_name}
+                        </span>
+                      )}
+                    </div>
                     <p className="text-xs text-slate-400 line-clamp-2 italic">
                       "{job.hook}"
                     </p>
