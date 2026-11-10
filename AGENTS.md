@@ -67,6 +67,7 @@ npm run build              # builds the web page
 | `server/engine/dailyRunner.ts` | One-button run + live status |
 | `server/engine/accounts.ts`, `accountStatus.ts` | Accounts card: check logins / switch a platform's account |
 | `server/engine/publishTargets.ts` | Where to post: TikTok / YouTube, YouTube made-for-kids setting |
+| `server/engine/grokSettings.ts` | Grok video quality (480p/720p) and duration (6s/10s/15s) settings |
 | `server/engine/dailySchedule.ts`, `scripts/dailyRun.ts` | Daily schedule (launchd) and its job |
 | `server/routes/api.ts` | REST API (`/api/browser/run`, `/run-status`, `/skip-login`, `/schedule`) |
 | `client/src/components/SettingsTab.tsx` | The Settings page (one button, schedule card) |
@@ -74,7 +75,7 @@ npm run build              # builds the web page
 
 ## Git rules (standing instruction from the owner)
 - **After every change: commit and push to `main`** (repo `Lynqcloudpay/browser-app`) in the same turn, once verification passes.
-- **Never commit private files:** `.env`, `storage/browser_profile/`, `storage/browser_cookies.json` (saved logins), `storage/*.db*`, `storage/schedule*.json`, `storage/publish_targets.json`, `storage/account_status.json`, `storage/logs/`, `.claude/settings.local.json`. They are git-ignored — keep it that way, and scan the diff for keys/tokens before committing.
+- **Never commit private files:** `.env`, `storage/browser_profile/`, `storage/browser_cookies.json` (saved logins), `storage/*.db*`, `storage/schedule*.json`, `storage/publish_targets.json`, `storage/grok_settings.json`, `storage/account_status.json`, `storage/logs/`, `.claude/settings.local.json`. They are git-ignored — keep it that way, and scan the diff for keys/tokens before committing.
 - Write a clear message explaining *why*. End it with the attribution line your tool requires.
 
 ## Troubleshooting

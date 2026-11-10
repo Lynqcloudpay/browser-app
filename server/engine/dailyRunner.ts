@@ -1,6 +1,7 @@
 import db from '../db/database';
 import JevBrowserAgent from './jevBrowserAutomation';
 import { isAccountOpBusy } from './accounts';
+import { getGrokSettings, GrokResolution } from './grokSettings';
 
 /**
  * One entry point for "make and post a video", used by the Run button, the /api, and the daily scheduled job.
@@ -89,7 +90,8 @@ function stageFromStep(step: string): RunStage {
 
 export function startRun(
   trigger: 'button' | 'schedule',
-  targetDurationSec = 15
+  targetDurationSec?: number,
+  targetResolution?: GrokResolution
 ): { started: boolean; reason?: string } {
   if (status.state === 'running' || status.state === 'waiting_login') {
     return { started: false, reason: 'A video is already being produced. Wait for it to finish.' };
@@ -98,6 +100,10 @@ export function startRun(
   if (isAccountOpBusy()) {
     return { started: false, reason: 'An account change is in progress. Finish it first (Settings → Accounts).' };
   }
+
+  const grok = getGrokSettings();
+  const effDuration = targetDurationSec || grok.duration || 15;
+  const effResolution = targetResolution || grok.resolution || '720p';
 
   const settings = db.prepare('SELECT * FROM settings WHERE id = 1').get() as any;
   const jobsSoFar = (db.prepare('SELECT COUNT(*) AS n FROM jobs').get() as any)?.n || 0;
@@ -117,7 +123,8 @@ export function startRun(
     seriesTitle: theme.seriesTitle,
     creativeTopic: theme.topic,
     learningGoal: theme.goal,
-    targetDurationSec,
+    targetDurationSec: effDuration,
+    targetResolution: effResolution,
     onProgress: (step, kind) => {
       status = {
         ...status,

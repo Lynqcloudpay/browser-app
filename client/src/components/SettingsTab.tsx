@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Settings, Key, DollarSign, CheckCircle2, Shield, Globe, Clock, Sparkles, MessageSquare, Search, ExternalLink } from 'lucide-react';
+import { Settings, Key, DollarSign, CheckCircle2, Shield, Globe, Clock, Sparkles, MessageSquare, Search, ExternalLink, Sliders } from 'lucide-react';
 import { safeFetchJson } from '../utils/api';
 
 interface SettingsTabProps {
@@ -139,9 +139,56 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     }
   };
 
+  const [grokSettings, setGrokSettings] = useState<{ resolution: '480p' | '720p'; duration: 6 | 10 | 15 }>({
+    resolution: '720p',
+    duration: 15,
+  });
+  const [grokSavedMsg, setGrokSavedMsg] = useState('');
+  const [savingGrokSettings, setSavingGrokSettings] = useState(false);
+
+  useEffect(() => {
+    safeFetchJson('/api/grok/settings')
+      .then((gs) => {
+        if (gs && gs.resolution && gs.duration) setGrokSettings(gs);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (accounts?.grokSettings && !savingGrokSettings) {
+      setGrokSettings(accounts.grokSettings);
+    }
+  }, [accounts?.grokSettings, savingGrokSettings]);
+
+  const handleGrokSettingsChange = async (patch: Partial<{ resolution: '480p' | '720p'; duration: 6 | 10 | 15 }>) => {
+    const next = { ...grokSettings, ...patch };
+    setGrokSettings(next);
+    setSavingGrokSettings(true);
+    setGrokSavedMsg('');
+    try {
+      const res = await safeFetchJson('/api/grok/settings', {
+        method: 'POST',
+        body: JSON.stringify(patch),
+      });
+      if (res && res.resolution && res.duration) setGrokSettings(res);
+      setGrokSavedMsg('Saved');
+      setTimeout(() => setGrokSavedMsg(''), 2500);
+    } catch {
+      setGrokSavedMsg('Failed to save');
+    } finally {
+      setSavingGrokSettings(false);
+    }
+  };
+
   const handleRunClick = async () => {
     try {
-      const data = await safeFetchJson('/api/browser/run', { method: 'POST', body: JSON.stringify({}) });
+      const data = await safeFetchJson('/api/browser/run', {
+        method: 'POST',
+        body: JSON.stringify({
+          targetDurationSec: grokSettings.duration,
+          targetResolution: grokSettings.resolution,
+        }),
+      });
       if (data.state) setRunStatus(data);
       else setRunStatus({ state: 'error', step: data.error || 'Could not start.', error: data.error });
     } catch (e: any) {
@@ -396,42 +443,92 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
           <div className="pt-2 border-t border-slate-800/80 space-y-2">
             {(accounts?.sites || []).map((site: any) => (
-              <div key={site.key} className="flex flex-wrap items-center justify-between gap-2 bg-slate-900/60 border border-slate-800 rounded-lg px-3 py-2">
-                <div className="flex items-center gap-3">
-                  <span className="font-semibold text-slate-200 w-20">{site.name}</span>
-                  <span
-                    className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
-                      site.state === 'in'
-                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                        : site.state === 'out'
-                        ? 'bg-rose-500/15 text-rose-300 border-rose-500/30'
-                        : 'bg-slate-700/40 text-slate-400 border-slate-600/50'
-                    }`}
+              <div
+                key={site.key}
+                className={`bg-slate-900/60 border border-slate-800 rounded-lg ${
+                  site.key === 'grok' ? 'p-3 space-y-2.5' : 'px-3 py-2'
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-3">
+                    <span className="font-semibold text-slate-200 w-20">{site.name}</span>
+                    <span
+                      className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
+                        site.state === 'in'
+                          ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                          : site.state === 'out'
+                          ? 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                          : 'bg-slate-700/40 text-slate-400 border-slate-600/50'
+                      }`}
+                    >
+                      {site.state === 'in' ? 'Signed in' : site.state === 'out' ? 'Signed out' : 'Not checked'}
+                    </span>
+                    {site.checkedAt && (
+                      <span className="text-[10px] text-slate-500">{new Date(site.checkedAt).toLocaleString()}</span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={accountBusy || runBusy}
+                    onClick={() => {
+                      const extra =
+                        site.key === 'youtube'
+                          ? ' This also signs the browser out of Google.'
+                          : site.key === 'chatgpt'
+                          ? ' Your "Create Mr Apple Videos" chat is re-detected for the new account.'
+                          : '';
+                      if (window.confirm(`Switch the ${site.name} account? It will be signed out, then you sign in with the other account.${extra}`)) {
+                        startAccountOp(`/api/accounts/${site.key}/switch`);
+                      }
+                    }}
+                    className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-[11px] font-bold rounded-lg transition cursor-pointer disabled:cursor-not-allowed"
                   >
-                    {site.state === 'in' ? 'Signed in' : site.state === 'out' ? 'Signed out' : 'Not checked'}
-                  </span>
-                  {site.checkedAt && (
-                    <span className="text-[10px] text-slate-500">{new Date(site.checkedAt).toLocaleString()}</span>
-                  )}
+                    Switch account
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  disabled={accountBusy || runBusy}
-                  onClick={() => {
-                    const extra =
-                      site.key === 'youtube'
-                        ? ' This also signs the browser out of Google.'
-                        : site.key === 'chatgpt'
-                        ? ' Your "Create Mr Apple Videos" chat is re-detected for the new account.'
-                        : '';
-                    if (window.confirm(`Switch the ${site.name} account? It will be signed out, then you sign in with the other account.${extra}`)) {
-                      startAccountOp(`/api/accounts/${site.key}/switch`);
-                    }
-                  }}
-                  className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-[11px] font-bold rounded-lg transition cursor-pointer disabled:cursor-not-allowed"
-                >
-                  Switch account
-                </button>
+
+                {site.key === 'grok' && (
+                  <div className="pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-3 text-xs bg-slate-950/40 p-2.5 rounded-md border border-slate-800/50">
+                    <div className="flex items-center gap-2">
+                      <Sliders className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      <div>
+                        <span className="font-semibold text-slate-200">Video Quality & Length</span>
+                        <p className="text-[10px] text-slate-400">Set default quality and duration for Grok video generation</p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <label className="flex items-center gap-1.5 text-slate-400 text-[11px]">
+                        <span className="font-medium text-slate-300">Quality:</span>
+                        <select
+                          value={grokSettings.resolution}
+                          onChange={(e) => handleGrokSettingsChange({ resolution: e.target.value as '480p' | '720p' })}
+                          className="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-2.5 py-1 focus:border-amber-400 focus:outline-none cursor-pointer"
+                        >
+                          <option value="720p">720p (HD)</option>
+                          <option value="480p">480p (SD)</option>
+                        </select>
+                      </label>
+                      <label className="flex items-center gap-1.5 text-slate-400 text-[11px]">
+                        <span className="font-medium text-slate-300">Length:</span>
+                        <select
+                          value={grokSettings.duration}
+                          onChange={(e) => handleGrokSettingsChange({ duration: Number(e.target.value) as 6 | 10 | 15 })}
+                          className="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-2.5 py-1 focus:border-amber-400 focus:outline-none cursor-pointer"
+                        >
+                          <option value={15}>15s (Long)</option>
+                          <option value={10}>10s (Medium)</option>
+                          <option value={6}>6s (Short)</option>
+                        </select>
+                      </label>
+                      {grokSavedMsg && (
+                        <span className="text-[11px] text-emerald-400 font-medium flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" />
+                          {grokSavedMsg}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>

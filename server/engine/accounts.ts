@@ -1,5 +1,6 @@
 import JevBrowserAgent from './jevBrowserAutomation';
 import { ACCOUNT_KEYS, AccountKey, getAccountStatuses } from './accountStatus';
+import { getGrokSettings } from './grokSettings';
 
 /**
  * "Change the account" for each platform. One operation at a time, run in the background; the page polls getAccountsOverview().
@@ -28,6 +29,7 @@ export function getAccountsOverview() {
   const statuses = getAccountStatuses();
   return {
     sites: ACCOUNT_KEYS.map((key) => ({ key, name: JevBrowserAgent.ACCOUNT_SITES[key].name, ...statuses[key] })),
+    grokSettings: getGrokSettings(),
     op: { ...op },
   };
 }

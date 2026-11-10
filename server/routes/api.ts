@@ -7,6 +7,7 @@ import db, { resetContentCatalog } from '../db/database';
 import { startRun, getRunStatus } from '../engine/dailyRunner';
 import { getSchedule, setSchedule } from '../engine/dailySchedule';
 import { getPublishTargets, setPublishTargets } from '../engine/publishTargets';
+import { getGrokSettings, setGrokSettings } from '../engine/grokSettings';
 import { getAccountsOverview, startCheck, startSwitch, cancelAccountOp } from '../engine/accounts';
 import { AccountKey } from '../engine/accountStatus';
 import ProductionWorker from '../engine/worker';
@@ -419,9 +420,24 @@ apiRouter.post('/browser/set-chatgpt-url', (req, res) => {
 // Runs in the background; poll GET /browser/run-status.
 apiRouter.post('/browser/run', (req, res) => {
   const trigger = req.body?.trigger === 'schedule' ? 'schedule' : 'button';
-  const result = startRun(trigger, Number(req.body?.targetDurationSec) || 15);
+  const targetDurationSec = req.body?.targetDurationSec !== undefined ? Number(req.body.targetDurationSec) : undefined;
+  const targetResolution = req.body?.targetResolution === '480p' || req.body?.targetResolution === '720p' ? req.body.targetResolution : undefined;
+  const result = startRun(trigger, targetDurationSec, targetResolution);
   if (!result.started) return res.status(409).json({ error: result.reason, ...getRunStatus() });
   res.status(202).json({ started: true, ...getRunStatus() });
+});
+
+// Grok video settings: quality (480p/720p) and duration (6s/10s/15s)
+apiRouter.get('/grok/settings', (req, res) => {
+  res.json(getGrokSettings());
+});
+
+apiRouter.post('/grok/settings', (req, res) => {
+  try {
+    res.json(setGrokSettings(req.body || {}));
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // "I'm already signed in — continue": stops the run from waiting on a sign-in it wrongly thinks is needed.

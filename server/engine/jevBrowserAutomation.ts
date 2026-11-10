@@ -14,6 +14,7 @@ import KidsSafetyQAInspector from './qaInspector';
 import BufferTikTokPublisher from './bufferPublisher';
 import { getPublishTargets, PublishTargets } from './publishTargets';
 import { ACCOUNT_KEYS, AccountKey, recordAccountStatus } from './accountStatus';
+import { getGrokSettings } from './grokSettings';
 
 export interface BrowserJobResult {
   success: boolean;
@@ -1207,13 +1208,25 @@ export class JevBrowserAgent {
     const screenshotPath = path.join(framesDir, `grok_state_${jobId}_shot${shotNumber}_${Date.now()}.png`);
     const outputVideoPath = path.join(storageVideos, `shot_${jobId}_${shotNumber}.mp4`);
     const outputImagePath = path.join(framesDir, `shot_${jobId}_${shotNumber}.png`);
-    // The operator's requested length (default 15s) wins over the length written in the ChatGPT prompt.
-    const spec = this.parseVideoSpec(grokPrompt, requestedDurationSec || 15);
-    spec.resolution = resolutionOverride || '720p'; // 720p, whatever the ChatGPT prompt says (480p only as a fallback)
-    if (requestedDurationSec) {
-      spec.durationSec = GROK_DURATIONS.reduce((best, d) =>
-        Math.abs(d - requestedDurationSec) < Math.abs(best - requestedDurationSec) ? d : best
-      );
+    // The operator's requested length & quality win over what was written in the ChatGPT prompt.
+    const grokDefaults = getGrokSettings();
+    const targetDur = requestedDurationSec || grokDefaults.duration || 15;
+    const targetRes = resolutionOverride || grokDefaults.resolution || '720p';
+
+    const spec = this.parseVideoSpec(grokPrompt, targetDur);
+    spec.resolution = targetRes;
+    spec.durationSec = GROK_DURATIONS.reduce((best, d) =>
+      Math.abs(d - targetDur) < Math.abs(best - targetDur) ? d : best
+    );
+
+    // If ChatGPT included a spec line at the end, align it with the operator's settings
+    const promptLines = grokPrompt.split('\n');
+    const specIdx = [...promptLines].map((l, i) => ({ l: l.trim(), i })).reverse().find(
+      (item) => /\b\d{1,2}\s*seconds?\b/i.test(item.l) && /(\d{3,4}p|\d+\s*:\s*\d+|sound|vertical)/i.test(item.l)
+    )?.i;
+    if (specIdx !== undefined) {
+      promptLines[specIdx] = `${spec.durationSec} seconds • Vertical ${spec.aspect} • ${spec.resolution} • Sound enabled`;
+      grokPrompt = promptLines.join('\n');
     }
 
     // Full (HTTP 200) video bodies seen after submit, keyed by URL. 206 range chunks are ignored — they are partial files.
@@ -1418,7 +1431,7 @@ export class JevBrowserAgent {
       if (!main) await fail(`Grok did not finish a ${spec.durationSec}s video for Shot ${shotNumber} within 6 minutes.`);
       const sizeNote = main!.w && main!.h ? `${main!.w}x${main!.h}` : 'size unknown';
       console.log(`[JevBrowserAgent] Grok video ready (${main!.duration.toFixed(1)}s, ${sizeNote}): ${main!.src.slice(0, 90)}`);
-      if (main!.h && Math.min(main!.w || 0, main!.h) < 700) {
+      if (spec.resolution === '720p' && main!.h && Math.min(main!.w || 0, main!.h) < 700) {
         console.warn(`[JevBrowserAgent] WARNING: this video is ${sizeNote} — lower than 720p. Grok did not apply the 720p setting.`);
       }
 
@@ -2595,6 +2608,7 @@ export class JevBrowserAgent {
     learningGoal: string;
     creativeTopic?: string;
     targetDurationSec?: number;
+    targetResolution?: '480p' | '720p';
     onProgress?: (step: string, kind?: 'running' | 'waiting_login') => void;
   }): Promise<{
     success: boolean;
@@ -2650,9 +2664,13 @@ export class JevBrowserAgent {
     const series = db.prepare("SELECT * FROM series WHERE status IN ('pilot', 'active') LIMIT 1").get() as any;
     // If Grok's server fails ("Server failed to respond"), stop and say so. No automatic retry: it fails the same way at
     // 480p and 720p, and every attempt may use Grok credits.
+    const grokDefaults = getGrokSettings();
+    const effDuration = options.targetDurationSec || grokDefaults.duration || 15;
+    const effResolution = options.targetResolution || grokDefaults.resolution || '720p';
+
     let grokRes: Awaited<ReturnType<typeof JevBrowserAgent.createVideoViaGrok>>;
     try {
-      grokRes = await this.createVideoViaGrok(grokPrompt, jobId, 1, false, options.targetDurationSec || 15);
+      grokRes = await this.createVideoViaGrok(grokPrompt, jobId, 1, false, effDuration, effResolution);
     } catch (err: any) {
       if (err?.code === 'GROK_SERVER_FAILED') {
         throw new Error(
