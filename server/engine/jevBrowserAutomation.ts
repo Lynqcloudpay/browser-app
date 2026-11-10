@@ -745,14 +745,17 @@ export class ChannelBrowserAgent {
         if (el.tagName === 'CODE' && el.parentElement?.tagName === 'PRE') continue;
         const t = ((el as HTMLElement).innerText || '').trim();
         if (
-          t.includes('CRITICAL: EXACTLY TWO CHARACTERS') ||
-          (t.includes('0-2 SECONDS') ||
-            t.includes('0–2 SECONDS') ||
-            t.includes('15 seconds') ||
-            t.includes('10 seconds') ||
-            t.includes('FINAL RULE') ||
-            t.includes('CHOREOGRAPHY') ||
-            t.includes('MAIN CHARACTER'))
+          t.includes('CRITICAL:') ||
+          t.includes('STRICT CHARACTER COUNT') ||
+          t.includes('EXACTLY TWO') ||
+          t.includes('0-2 SECONDS') ||
+          t.includes('0–2 SECONDS') ||
+          t.includes('15 seconds') ||
+          t.includes('10 seconds') ||
+          t.includes('FINAL RULE') ||
+          t.includes('CHOREOGRAPHY') ||
+          t.includes('MAIN CHARACTER') ||
+          (t.includes('seconds') && t.includes('9:16'))
         ) {
           matchingPrompts.push(t);
         }
@@ -760,16 +763,20 @@ export class ChannelBrowserAgent {
 
       // Fallback if not in <pre>/<code>
       if (matchingPrompts.length === 0) {
-        const containers = Array.from(document.querySelectorAll('[data-testid*="canvas"], article, [data-message-author-role="assistant"]'));
+        const containers = Array.from(document.querySelectorAll('[data-testid*="canvas"], article, [data-message-author-role="assistant"], div'));
         for (const c of containers) {
           const t = ((c as HTMLElement).innerText || '').trim();
-          if ((t.includes('0-2 SECONDS') || t.includes('0–2 SECONDS') || t.includes('FINAL RULE')) && t.length > 200) {
+          if (
+            (t.includes('STRICT CHARACTER COUNT') || t.includes('EXACTLY TWO') || t.includes('0-2 SECONDS') || t.includes('FINAL RULE') || (t.includes('seconds') && t.includes('9:16'))) &&
+            t.length > 100 &&
+            t.length < 3000
+          ) {
             matchingPrompts.push(t);
           }
         }
       }
 
-      // Preferred: the longest code block in the LATEST assistant reply (independent of prompt wording)
+      // Preferred: the longest code block or prompt container in the LATEST assistant reply
       const assistantTurns = document.querySelectorAll('[data-message-author-role="assistant"]');
       const assistantCount = assistantTurns.length;
       const lastTurn = assistantTurns[assistantCount - 1] as HTMLElement | undefined;
@@ -777,7 +784,26 @@ export class ChannelBrowserAgent {
       if (lastTurn) {
         for (const pre of Array.from(lastTurn.querySelectorAll('pre'))) {
           const t = ((pre as HTMLElement).innerText || '').trim();
-          if (t.length > 200 && t.length > latestReplyPrompt.length) latestReplyPrompt = t;
+          if (t.length > 100 && t.length > latestReplyPrompt.length) latestReplyPrompt = t;
+        }
+
+        // Look for copy containers or artifact boxes
+        if (!latestReplyPrompt) {
+          const copyContainers = Array.from(lastTurn.querySelectorAll('div, section')).filter((d) =>
+            d.querySelector('button[aria-label*="copy" i], button[data-testid*="copy" i], svg')
+          );
+          for (const c of copyContainers) {
+            const t = ((c as HTMLElement).innerText || '').trim();
+            if (t.length > 100 && t.length > latestReplyPrompt.length) latestReplyPrompt = t;
+          }
+        }
+
+        // Fallback: entire text of the assistant turn if it contains prompt markers
+        if (!latestReplyPrompt) {
+          const fullText = ((lastTurn as HTMLElement).innerText || '').trim();
+          if (fullText.length > 100 && (fullText.includes('9:16') || fullText.includes('seconds') || fullText.includes('CHARACTER') || fullText.includes('Dance'))) {
+            latestReplyPrompt = fullText.replace(/^ChatGPT said:\s*/i, '').trim();
+          }
         }
       }
 
@@ -786,7 +812,7 @@ export class ChannelBrowserAgent {
       const domPrompt = lastTurn ? latestReplyPrompt : fallbackPrompt;
       const promptCount = lastTurn ? assistantCount : matchingPrompts.length;
 
-      // 2. Extract Title & Hashtags from the latest TikTok Title block at the bottom of the page
+      // 2. Extract Title & Hashtags from the latest block at the bottom of the page
       let title = '';
       let hook = '';
       const allNodes = Array.from(document.querySelectorAll('pre, code, [contenteditable="true"], p, div, h1, h2, h3, h4'));
@@ -816,11 +842,18 @@ export class ChannelBrowserAgent {
         }
       }
 
-      // Fallback for title: check headings with vs. or any short heading
+      // Fallback for title: check prompt first line or headings with "—" or "vs."
+      if (!title && domPrompt) {
+        const firstLine = domPrompt.split('\n')[0].replace(/^[🍎🎬"'#\s]+|["'\s]+$/g, '').trim();
+        if (firstLine.length > 5 && firstLine.length < 100 && (firstLine.includes('—') || firstLine.includes(':') || firstLine.includes('vs.') || firstLine.includes('Dance'))) {
+          title = firstLine;
+        }
+      }
+
       if (!title) {
         for (let i = allNodes.length - 1; i >= 0; i--) {
           const text = ((allNodes[i] as HTMLElement).innerText || '').trim();
-          if ((text.includes('vs.') || text.includes('Challenge') || text.includes('#')) && text.length < 200) {
+          if ((text.includes('vs.') || text.includes('Challenge') || text.includes('Battle') || text.includes('—')) && text.length < 200) {
             const firstLine = text.split('\n')[0].replace(/^[🍎🎬"'#\s]+|["'\s]+$/g, '').trim();
             if (firstLine.length > 5 && firstLine.length < 140 && !firstLine.startsWith('#')) {
               title = firstLine;
@@ -841,8 +874,9 @@ export class ChannelBrowserAgent {
       grokPrompt = grokPrompt.replace(/```/g, '').trim();
     }
 
-    const cleanTitle = domData.title || 'Mr. Apple & Friends Dance Battle';
-    const cleanHook = domData.hook || '#MrApple #FunnyDance #CuteAnimals #DanceChallenge';
+    const channelName = ch?.name || 'Dance Video';
+    const cleanTitle = domData.title || (this.channelId === 1 ? 'Mr. Apple & Friends Dance Battle' : `${channelName} Video`);
+    const cleanHook = domData.hook || (hashtagHint !== '#' ? hashtagHint : `#${channelName.replace(/\s+/g, '')} #DanceChallenge #Viral`);
 
     return {
       grokPrompt,
@@ -937,16 +971,11 @@ export class ChannelBrowserAgent {
 
         const currentData = await this.extractPromptAndTitleFromChatGpt(page);
         const isBrandNewPrompt =
-          currentData.grokPrompt.length > 300 &&
+          currentData.grokPrompt.length > 80 &&
           (currentData.promptCount > priorData.promptCount || currentData.grokPrompt !== priorData.grokPrompt);
 
         if (isBrandNewPrompt) {
-          if (
-            currentData.grokPrompt.length === lastObservedPromptLen &&
-            (currentData.grokPrompt.includes('FINAL RULE') ||
-              currentData.grokPrompt.includes('Sound enabled') ||
-              currentData.grokPrompt.length > 800)
-          ) {
+          if (currentData.grokPrompt.length === lastObservedPromptLen) {
             stableTicks++;
           } else {
             lastObservedPromptLen = currentData.grokPrompt.length;
@@ -954,8 +983,7 @@ export class ChannelBrowserAgent {
           }
 
           if (stableTicks >= 2) {
-            // Wait an extra 3 seconds and scroll down so the "TikTok Title" box below the prompt finishes rendering
-            await page.waitForTimeout(3000);
+            await page.waitForTimeout(1500);
             await page.evaluate(() => {
               window.scrollTo(0, document.body.scrollHeight);
               const scrollables = Array.from(document.querySelectorAll('main, [class*="scroll" i], [role="presentation"]'));
@@ -963,7 +991,7 @@ export class ChannelBrowserAgent {
                 if (s.scrollHeight > s.clientHeight) s.scrollTop = s.scrollHeight;
               }
             }).catch(() => {});
-            await page.waitForTimeout(1000);
+            await page.waitForTimeout(800);
 
             const finalData = await this.extractPromptAndTitleFromChatGpt(page);
             grokPrompt = finalData.grokPrompt;
@@ -971,7 +999,7 @@ export class ChannelBrowserAgent {
             cleanHook = finalData.cleanHook;
             rawCopiedText = finalData.rawText;
             console.log(
-              `[JevBrowserAgent] Brand new ChatGPT prompt finished streaming (${grokPrompt.length} chars)! Title: "${cleanTitle}"`
+              `[ChannelBrowserAgent-${this.channelId}] Brand new ChatGPT prompt finished streaming (${grokPrompt.length} chars)! Title: "${cleanTitle}"`
             );
             break;
           }
