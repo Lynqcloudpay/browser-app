@@ -1234,6 +1234,29 @@ export class JevBrowserAgent {
       throw new Error(`${message} Screenshot: ${screenshotPath}`);
     };
 
+    /** Grok's usage meter ("92% of weekly limit used — resets Thu 5:37 AM"), read from the credits button's popover. */
+    const grokUsageNote = async (): Promise<string> => {
+      try {
+        const btn = page.locator('button[aria-label*="credits" i]').first();
+        if (!(await btn.isVisible().catch(() => false))) return '';
+        const label = (await btn.getAttribute('aria-label')) || '';
+        await btn.click({ timeout: 2000 }).catch(() => {});
+        await page.waitForTimeout(800);
+        const text: string = await page
+          .evaluate(() =>
+            Array.from(document.querySelectorAll('[role="dialog"], [role="menu"], [data-radix-popper-content-wrapper]'))
+              .map((e) => ((e as HTMLElement).innerText || '').replace(/\s+/g, ' '))
+              .find((t) => /weekly limit/i.test(t)) || ''
+          )
+          .catch(() => '');
+        await page.keyboard.press('Escape').catch(() => {});
+        const m = text.match(/\d+% of weekly limit used.*?Resets [^.]*?(AM|PM)/i);
+        return (m ? m[0] : label).trim();
+      } catch {
+        return '';
+      }
+    };
+
     try {
       // 1. Fresh Grok Imagine composer
       console.log('[JevBrowserAgent] Opening fresh Grok Imagine composer (https://grok.com/imagine)...');
@@ -1340,13 +1363,28 @@ export class JevBrowserAgent {
               video = { src, duration: best.duration, w: best.videoWidth, h: best.videoHeight };
             }
           }
-          return { url: location.href, error: errorMatch ? errorMatch[0] : null, progress, makeVideo, video };
+          const notice = Array.from(document.querySelectorAll('[role="alert"], [role="status"], [data-sonner-toast], #dialog-portal'))
+            .map((e) => ((e as HTMLElement).innerText || '').replace(/\s+/g, ' ').trim())
+            .filter(Boolean)
+            .join(' | ')
+            .slice(0, 300);
+          return { url: location.href, error: errorMatch ? errorMatch[0] : null, progress, makeVideo, video, notice };
         }, { initial: initialSrcs, minDur: minDuration }).catch(() => null);
 
         if (!state) continue;
         if (state.error) await fail(`Grok reported: "${state.error}".`);
-        if (state.makeVideo && !state.video && !state.progress && Date.now() - start > 20000) {
-          await fail('Grok produced an IMAGE instead of a video (Video mode was not active). Not posting anything.');
+        if (state.notice && /limit|credit|upgrade|quota|usage|unable|moderat/i.test(state.notice) && !state.progress && !state.video) {
+          const usage = await grokUsageNote();
+          await fail(`Grok did not start the video and said: "${state.notice}".${usage ? ` Grok usage: ${usage}.` : ''} Nothing was posted.`);
+        }
+        // 720p / 15s jobs can take a while to start, so give Grok a full minute before deciding it never began.
+        if (state.makeVideo && !state.video && !state.progress && Date.now() - start > 60000) {
+          const usage = await grokUsageNote();
+          await fail(
+            'Grok never started the video — it only shows the still image page (no progress after 60 seconds).' +
+              (usage ? ` Grok usage: ${usage}. A used-up weekly limit is the most likely cause.` : ' Check your Grok usage limit and that Video mode is on.') +
+              ' Nothing was posted.'
+          );
         }
         if (Date.now() - lastLog > 10000) {
           lastLog = Date.now();
