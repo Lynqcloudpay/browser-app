@@ -1,7 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { execFile } from 'child_process';
+import { execFile, execSync } from 'child_process';
 import { promisify } from 'util';
 import { chromium, BrowserContext, Page, FileChooser } from 'playwright';
 
@@ -738,86 +738,121 @@ export class ChannelBrowserAgent {
     const hashtagHint = ch?.hashtag_hint?.trim() || '#';
 
     const domData = await page.evaluate((hint: string) => {
-      // 1. Collect all Grok prompts in chronological order
-      const pres = Array.from(document.querySelectorAll('pre, code'));
-      const matchingPrompts: string[] = [];
-      for (const el of pres) {
-        if (el.tagName === 'CODE' && el.parentElement?.tagName === 'PRE') continue;
-        const t = ((el as HTMLElement).innerText || '').trim();
-        if (
-          t.includes('CRITICAL:') ||
-          t.includes('STRICT CHARACTER COUNT') ||
-          t.includes('EXACTLY TWO') ||
-          t.includes('0-2 SECONDS') ||
-          t.includes('0–2 SECONDS') ||
-          t.includes('15 seconds') ||
-          t.includes('10 seconds') ||
-          t.includes('FINAL RULE') ||
-          t.includes('CHOREOGRAPHY') ||
-          t.includes('MAIN CHARACTER') ||
-          (t.includes('seconds') && t.includes('9:16'))
-        ) {
-          matchingPrompts.push(t);
-        }
+      // Helper to check whether text looks like a Grok video generation prompt
+      function isVideoPromptText(text: string): boolean {
+        if (!text || text.length < 60 || text.length > 5000) return false;
+        const lower = text.toLowerCase();
+        const hasAspectOrDuration =
+          lower.includes('9:16') ||
+          lower.includes('vertical') ||
+          lower.includes('seconds') ||
+          lower.includes('second') ||
+          lower.includes('720p') ||
+          lower.includes('480p') ||
+          lower.includes('1080p') ||
+          lower.includes('sound enabled') ||
+          lower.includes('audio');
+        const hasPromptContent =
+          lower.includes('character') ||
+          lower.includes('duplicate') ||
+          lower.includes('dance') ||
+          lower.includes('animation') ||
+          lower.includes('choreography') ||
+          lower.includes('rule') ||
+          lower.includes('grok') ||
+          lower.includes('video') ||
+          lower.includes('scene') ||
+          lower.includes('snow leopard') ||
+          lower.includes('squirrel') ||
+          lower.includes('limbs') ||
+          lower.includes('shadows');
+        return hasAspectOrDuration && hasPromptContent;
       }
 
-      // Fallback if not in <pre>/<code>
-      if (matchingPrompts.length === 0) {
-        const containers = Array.from(document.querySelectorAll('[data-testid*="canvas"], article, [data-message-author-role="assistant"], div'));
-        for (const c of containers) {
-          const t = ((c as HTMLElement).innerText || '').trim();
-          if (
-            (t.includes('STRICT CHARACTER COUNT') || t.includes('EXACTLY TWO') || t.includes('0-2 SECONDS') || t.includes('FINAL RULE') || (t.includes('seconds') && t.includes('9:16'))) &&
-            t.length > 100 &&
-            t.length < 3000
-          ) {
-            matchingPrompts.push(t);
-          }
-        }
+      // Helper to clean UI noise from extracted prompt container text
+      function cleanPromptText(raw: string): string {
+        if (!raw) return '';
+        let cleaned = raw
+          .replace(/^(Writing|Start Writing|Plain text|Code|Copy code)\s+/i, '')
+          .replace(/^ChatGPT said:\s*/i, '')
+          .replace(/↳.*$/m, '')
+          .replace(/Files, images, and data analysis are unavailable.*$/s, '')
+          .replace(/Upgrade to Plus.*$/s, '')
+          .trim();
+        return cleaned;
       }
 
-      // Preferred: the longest code block or prompt container in the LATEST assistant reply
-      const assistantTurns = document.querySelectorAll('[data-message-author-role="assistant"]');
-      const assistantCount = assistantTurns.length;
-      const lastTurn = assistantTurns[assistantCount - 1] as HTMLElement | undefined;
+      // 1. Locate all conversation turns:
+      const turnNodes = Array.from(document.querySelectorAll('article, [data-testid*="conversation-turn"]'));
+      const assistantTurns = turnNodes.filter((el) => {
+        const role = el.getAttribute('data-message-author-role');
+        if (role === 'assistant') return true;
+        if (role === 'user') return false;
+        const hasFeedback = el.querySelector(
+          'button[aria-label*="copy" i], button[data-testid*="copy" i], button[aria-label*="read aloud" i], button[aria-label*="good response" i], [data-testid*="assistant"]'
+        );
+        return Boolean(hasFeedback);
+      });
+
+      const lastTurn = assistantTurns.length > 0 ? assistantTurns[assistantTurns.length - 1] : (turnNodes.length > 0 ? turnNodes[turnNodes.length - 1] : null);
+
       let latestReplyPrompt = '';
-      if (lastTurn) {
-        for (const pre of Array.from(lastTurn.querySelectorAll('pre'))) {
-          const t = ((pre as HTMLElement).innerText || '').trim();
-          if (t.length > 100 && t.length > latestReplyPrompt.length) latestReplyPrompt = t;
-        }
 
-        // Look for copy containers or artifact boxes
-        if (!latestReplyPrompt) {
-          const copyContainers = Array.from(lastTurn.querySelectorAll('div, section')).filter((d) =>
-            d.querySelector('button[aria-label*="copy" i], button[data-testid*="copy" i], svg')
-          );
-          for (const c of copyContainers) {
-            const t = ((c as HTMLElement).innerText || '').trim();
-            if (t.length > 100 && t.length > latestReplyPrompt.length) latestReplyPrompt = t;
+      // Priority 1: Check inside the latest turn for writing / canvas cards or code blocks
+      if (lastTurn) {
+        // Look for cards, inline canvases, or code blocks
+        const cardContainers = Array.from(
+          lastTurn.querySelectorAll('[data-testid*="canvas"], [data-testid*="code-block"], [class*="contain-inline-size"], pre, div, section')
+        );
+        for (const c of cardContainers) {
+          const t = cleanPromptText((c as HTMLElement).innerText || '');
+          if (isVideoPromptText(t)) {
+            // Pick the tightest container that contains the prompt
+            if (!latestReplyPrompt || t.length < latestReplyPrompt.length) {
+              latestReplyPrompt = t;
+            }
           }
         }
 
-        // Fallback: entire text of the assistant turn if it contains prompt markers
+        // If not found in card containers, check pre blocks
         if (!latestReplyPrompt) {
-          const fullText = ((lastTurn as HTMLElement).innerText || '').trim();
-          if (fullText.length > 100 && (fullText.includes('9:16') || fullText.includes('seconds') || fullText.includes('CHARACTER') || fullText.includes('Dance'))) {
-            latestReplyPrompt = fullText.replace(/^ChatGPT said:\s*/i, '').trim();
+          for (const pre of Array.from(lastTurn.querySelectorAll('pre'))) {
+            const t = cleanPromptText((pre as HTMLElement).innerText || '');
+            if (t.length > 50 && (!latestReplyPrompt || t.length > latestReplyPrompt.length)) {
+              latestReplyPrompt = t;
+            }
+          }
+        }
+
+        // If not found, inspect full cleaned text of the last turn
+        if (!latestReplyPrompt) {
+          const full = cleanPromptText((lastTurn as HTMLElement).innerText || '');
+          if (isVideoPromptText(full)) {
+            latestReplyPrompt = full;
           }
         }
       }
 
-      // Never mix sources: if the latest reply has no prompt yet, report none (so an OLD prompt is never reused).
-      const fallbackPrompt = matchingPrompts.length > 0 ? matchingPrompts[matchingPrompts.length - 1] : '';
-      const domPrompt = lastTurn ? latestReplyPrompt : fallbackPrompt;
-      const promptCount = lastTurn ? assistantCount : matchingPrompts.length;
+      // Priority 2: If latest reply prompt still not found, search bottom-up through all page elements
+      if (!latestReplyPrompt) {
+        const allCandidates = Array.from(document.querySelectorAll('pre, [data-testid*="canvas"], div, section, article'));
+        for (let i = allCandidates.length - 1; i >= 0; i--) {
+          const t = cleanPromptText((allCandidates[i] as HTMLElement).innerText || '');
+          if (isVideoPromptText(t)) {
+            latestReplyPrompt = t;
+            break;
+          }
+        }
+      }
 
-      // 2. Extract Title & Hashtags from the latest block at the bottom of the page
+      const promptCount = assistantTurns.length > 0 ? assistantTurns.length : (latestReplyPrompt ? 1 : 0);
+
+      // 2. Extract Title & Hashtags from the page
       let title = '';
       let hook = '';
       const allNodes = Array.from(document.querySelectorAll('pre, code, [contenteditable="true"], p, div, h1, h2, h3, h4'));
 
-      // Look from bottom up for the latest hashtag box
+      // Look from bottom up for hashtag box
       const cleanHint = hint && hint !== '#' ? hint.toLowerCase() : '#';
       for (let i = allNodes.length - 1; i >= 0; i--) {
         const text = ((allNodes[i] as HTMLElement).innerText || '').trim();
@@ -843,9 +878,15 @@ export class ChannelBrowserAgent {
       }
 
       // Fallback for title: check prompt first line or headings with "—" or "vs."
-      if (!title && domPrompt) {
-        const firstLine = domPrompt.split('\n')[0].replace(/^[🍎🎬"'#\s]+|["'\s]+$/g, '').trim();
-        if (firstLine.length > 5 && firstLine.length < 100 && (firstLine.includes('—') || firstLine.includes(':') || firstLine.includes('vs.') || firstLine.includes('Dance'))) {
+      if (!title && latestReplyPrompt) {
+        const firstLine = latestReplyPrompt.split('\n')[0].replace(/^[🍎🎬"'#\s]+|["'\s]+$/g, '').trim();
+        if (
+          firstLine.length > 5 &&
+          firstLine.length < 100 &&
+          !firstLine.toLowerCase().startsWith('never ') &&
+          !firstLine.toLowerCase().startsWith('strict ') &&
+          (firstLine.includes('—') || firstLine.includes(':') || firstLine.includes('vs.') || firstLine.includes('Dance'))
+        ) {
           title = firstLine;
         }
       }
@@ -855,7 +896,13 @@ export class ChannelBrowserAgent {
           const text = ((allNodes[i] as HTMLElement).innerText || '').trim();
           if ((text.includes('vs.') || text.includes('Challenge') || text.includes('Battle') || text.includes('—')) && text.length < 200) {
             const firstLine = text.split('\n')[0].replace(/^[🍎🎬"'#\s]+|["'\s]+$/g, '').trim();
-            if (firstLine.length > 5 && firstLine.length < 140 && !firstLine.startsWith('#')) {
+            if (
+              firstLine.length > 5 &&
+              firstLine.length < 140 &&
+              !firstLine.startsWith('#') &&
+              !firstLine.toLowerCase().startsWith('never ') &&
+              !firstLine.toLowerCase().startsWith('strict ')
+            ) {
               title = firstLine;
               break;
             }
@@ -863,7 +910,7 @@ export class ChannelBrowserAgent {
         }
       }
 
-      return { domPrompt, title, hook, promptCount };
+      return { domPrompt: latestReplyPrompt, title, hook, promptCount };
     }, hashtagHint);
 
     let grokPrompt = domData.domPrompt || '';
@@ -961,18 +1008,32 @@ export class ChannelBrowserAgent {
           }
         }).catch(() => {});
 
-        const stopBtn = await page.$(
-          'button[aria-label="Stop streaming"], button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop"]'
-        );
-        if (stopBtn) {
+        // Check if ChatGPT is actively generating/streaming (composer stop button or streaming animation)
+        const isStreaming = await page.evaluate(() => {
+          const stopBtn = document.querySelector(
+            'button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"]'
+          );
+          if (stopBtn) {
+            const rect = (stopBtn as HTMLElement).getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) return true;
+          }
+          const streamAnim = document.querySelector('.result-streaming, [class*="streaming" i], [class*="typing" i]');
+          if (streamAnim) return true;
+          return false;
+        }).catch(() => false);
+
+        if (isStreaming) {
           stableTicks = 0;
           continue; // Still actively streaming
         }
 
         const currentData = await this.extractPromptAndTitleFromChatGpt(page);
+        const hasPrompt = currentData.grokPrompt.length >= 60;
         const isBrandNewPrompt =
-          currentData.grokPrompt.length > 80 &&
-          (currentData.promptCount > priorData.promptCount || currentData.grokPrompt !== priorData.grokPrompt);
+          hasPrompt &&
+          (!priorData.grokPrompt ||
+            currentData.grokPrompt !== priorData.grokPrompt ||
+            currentData.promptCount > priorData.promptCount);
 
         if (isBrandNewPrompt) {
           if (currentData.grokPrompt.length === lastObservedPromptLen) {
@@ -983,21 +1044,33 @@ export class ChannelBrowserAgent {
           }
 
           if (stableTicks >= 2) {
-            await page.waitForTimeout(1500);
-            await page.evaluate(() => {
-              window.scrollTo(0, document.body.scrollHeight);
-              const scrollables = Array.from(document.querySelectorAll('main, [class*="scroll" i], [role="presentation"]'));
-              for (const s of scrollables) {
-                if (s.scrollHeight > s.clientHeight) s.scrollTop = s.scrollHeight;
+            // Optional: try copying via the card's native copy button to get 100% exact formatting
+            try {
+              const copyBtn = page
+                .locator('article, [data-testid*="conversation-turn"]')
+                .last()
+                .locator('button[aria-label*="copy" i], button[data-testid*="copy" i]')
+                .first();
+              if (await copyBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
+                await copyBtn.click({ force: true }).catch(() => {});
+                await page.waitForTimeout(400);
+                const clipText = execSync('pbpaste', { encoding: 'utf8' }).trim();
+                if (
+                  clipText.length >= 60 &&
+                  (clipText.includes('9:16') || clipText.includes('seconds') || clipText.includes('Vertical'))
+                ) {
+                  currentData.grokPrompt = clipText;
+                  currentData.rawText = clipText;
+                }
               }
-            }).catch(() => {});
-            await page.waitForTimeout(800);
+            } catch (_) {}
 
+            await page.waitForTimeout(800);
             const finalData = await this.extractPromptAndTitleFromChatGpt(page);
-            grokPrompt = finalData.grokPrompt;
+            grokPrompt = currentData.grokPrompt || finalData.grokPrompt;
             cleanTitle = finalData.cleanTitle;
             cleanHook = finalData.cleanHook;
-            rawCopiedText = finalData.rawText;
+            rawCopiedText = currentData.rawText || finalData.rawText;
             console.log(
               `[ChannelBrowserAgent-${this.channelId}] Brand new ChatGPT prompt finished streaming (${grokPrompt.length} chars)! Title: "${cleanTitle}"`
             );
@@ -1012,7 +1085,7 @@ export class ChannelBrowserAgent {
       }
 
       // STRICT VALIDATION: Must be a brand new, non-empty prompt!
-      if (!grokPrompt || grokPrompt.length < 100 || grokPrompt === priorData.grokPrompt) {
+      if (!grokPrompt || grokPrompt.length < 60 || (priorData.grokPrompt && grokPrompt === priorData.grokPrompt)) {
         throw new Error(
           `ChatGPT did not finish generating a new prompt after submitting "next" (extracted ${grokPrompt.length} chars). ` +
           `Aborting before Grok so an old or incomplete prompt is never used.`
