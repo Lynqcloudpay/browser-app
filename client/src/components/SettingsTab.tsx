@@ -52,6 +52,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const [savingSettings, setSavingSettings] = useState(false);
   const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
   const [runStatus, setRunStatus] = useState<any>({ state: 'idle', step: '' });
+  const [targets, setTargets] = useState<any>(null);
+  const [targetsMsg, setTargetsMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [schedule, setSchedule] = useState<any>(null);
   const [scheduleTimes, setScheduleTimes] = useState<string[]>(['10:00']);
   const [savingSchedule, setSavingSchedule] = useState(false);
@@ -85,6 +87,26 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    safeFetchJson('/api/publish-targets')
+      .then((t) => setTargets(t))
+      .catch(() => {});
+  }, []);
+
+  const saveTargets = async (patch: any) => {
+    setTargetsMsg(null);
+    const previous = targets;
+    setTargets({ ...targets, ...patch }); // instant feedback
+    try {
+      const t = await safeFetchJson('/api/publish-targets', { method: 'POST', body: JSON.stringify(patch) });
+      if (t.error) throw new Error(t.error);
+      setTargets(t);
+    } catch (e: any) {
+      setTargets(previous);
+      setTargetsMsg({ type: 'error', text: e.message });
+    }
+  };
 
   const handleRunClick = async () => {
     try {
@@ -315,6 +337,61 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 </button>
               )}
             </div>
+          )}
+        </div>
+
+        {/* Where to post */}
+        <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 text-xs space-y-3">
+          <div className="flex items-start gap-3">
+            <ExternalLink className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <h5 className="font-bold text-slate-200">Where to post each video</h5>
+              <p className="text-slate-400 leading-relaxed text-[11px]">
+                Every finished video is uploaded to each place you leave on. YouTube posts it as a Short using the same browser
+                window (your Google account must be signed in there).
+              </p>
+            </div>
+          </div>
+          {targets && (
+            <div className="pt-2 border-t border-slate-800/80 space-y-3">
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-slate-300">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked={targets.tiktok} onChange={(e) => saveTargets({ tiktok: e.target.checked })} />
+                  <span className="font-semibold">TikTok</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked={targets.youtube} onChange={(e) => saveTargets({ youtube: e.target.checked })} />
+                  <span className="font-semibold">YouTube Shorts</span>
+                </label>
+              </div>
+              {targets.youtube && (
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pl-1 text-slate-300">
+                  <label className="flex items-center gap-2">
+                    <span className="text-[11px] text-slate-400">YouTube visibility</span>
+                    <select
+                      value={targets.youtubeVisibility}
+                      onChange={(e) => saveTargets({ youtubeVisibility: e.target.value })}
+                      className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-xs text-slate-200"
+                    >
+                      <option value="public">Public</option>
+                      <option value="unlisted">Unlisted (link only)</option>
+                      <option value="private">Private (only you) — good for a first test</option>
+                    </select>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={targets.youtubeMadeForKids}
+                      onChange={(e) => saveTargets({ youtubeMadeForKids: e.target.checked })}
+                    />
+                    <span>Mark as "made for kids" (YouTube requires an answer; these are kids' videos)</span>
+                  </label>
+                </div>
+              )}
+            </div>
+          )}
+          {targetsMsg && (
+            <div className="p-3 rounded-xl text-xs bg-rose-950/40 border border-rose-800/80 text-rose-300">{targetsMsg.text}</div>
           )}
         </div>
 

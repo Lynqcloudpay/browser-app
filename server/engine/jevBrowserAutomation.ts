@@ -12,6 +12,7 @@ import db from '../db/database';
 import GrokVideoGenerator from './xaiVideoGenerator';
 import KidsSafetyQAInspector from './qaInspector';
 import BufferTikTokPublisher from './bufferPublisher';
+import { getPublishTargets, PublishTargets } from './publishTargets';
 
 export interface BrowserJobResult {
   success: boolean;
@@ -1616,7 +1617,7 @@ export class JevBrowserAgent {
    */
   private static async siteLoginState(
     page: Page,
-    site: 'chatgpt' | 'grok' | 'tiktok'
+    site: 'chatgpt' | 'grok' | 'tiktok' | 'youtube'
   ): Promise<{ state: 'in' | 'out' | 'unknown'; why: string }> {
     try {
       const url = page.url();
@@ -1627,7 +1628,7 @@ export class JevBrowserAgent {
         return false;
       };
       const authHost = /auth\.openai\.com|auth0\.com|accounts\.google\.com|appleid\.apple\.com|login\.live\.com|accounts\.x\.ai|x\.com\/i\/flow|twitter\.com\/i\/flow/i;
-      const host = site === 'chatgpt' ? 'chatgpt.com' : site === 'grok' ? 'grok.com' : 'tiktok.com';
+      const host = { chatgpt: 'chatgpt.com', grok: 'grok.com', tiktok: 'tiktok.com', youtube: 'youtube.com' }[site];
 
       if (!url.includes(host)) return authHost.test(url) ? { state: 'out', why: `on a sign-in page (${new URL(url).host})` } : { state: 'unknown', why: `off-site (${url.slice(0, 60)})` };
 
@@ -1644,6 +1645,14 @@ export class JevBrowserAgent {
         if (/sign-?in|login/i.test(url)) return { state: 'out', why: 'login URL' };
         if (await anyVisible(named(/^\s*Sign in\s*$/i))) return { state: 'out', why: '"Sign in" button' };
         if (await visible(page.locator('[role="textbox"], [contenteditable="true"], textarea'))) return { state: 'in', why: 'prompt box visible, no Sign in button' };
+        return { state: 'unknown', why: 'page not ready' };
+      }
+
+      if (site === 'youtube') {
+        if (await anyVisible(named(/^\s*Sign in\s*$/i))) return { state: 'out', why: '"Sign in" button' };
+        if (await visible(page.locator('#create-icon, #avatar-btn, ytcp-button#create-button, ytd-topbar-menu-button-renderer'))) {
+          return { state: 'in', why: 'YouTube account menu visible' };
+        }
         return { state: 'unknown', why: 'page not ready' };
       }
 
@@ -1670,19 +1679,24 @@ export class JevBrowserAgent {
   public static async ensureLoggedIn(
     context: BrowserContext,
     say: (step: string, kind?: 'running' | 'waiting_login') => void,
+    targets: PublishTargets,
     maxWaitMs = 10 * 60 * 1000
-  ): Promise<void> {
-    const sites = [
-      { key: 'chatgpt' as const, name: 'ChatGPT', url: this.getConfiguredChatGptUrl() || 'https://chatgpt.com/', host: 'chatgpt.com' },
-      { key: 'grok' as const, name: 'Grok', url: 'https://grok.com/imagine', host: 'grok.com' },
-      { key: 'tiktok' as const, name: 'TikTok', url: 'https://www.tiktok.com/tiktokstudio/upload', host: 'tiktok.com' },
+  ): Promise<{ skipped: Array<'youtube'> }> {
+    type SiteKey = 'chatgpt' | 'grok' | 'tiktok' | 'youtube';
+    const sites: Array<{ key: SiteKey; name: string; url: string; host: string; optional?: boolean }> = [
+      { key: 'chatgpt', name: 'ChatGPT', url: this.getConfiguredChatGptUrl() || 'https://chatgpt.com/', host: 'chatgpt.com' },
+      { key: 'grok', name: 'Grok', url: 'https://grok.com/imagine', host: 'grok.com' },
     ];
+    if (targets.tiktok) sites.push({ key: 'tiktok', name: 'TikTok', url: 'https://www.tiktok.com/tiktokstudio/upload', host: 'tiktok.com' });
+    // YouTube is optional: if nobody signs in, the run still makes the video and posts to TikTok.
+    if (targets.youtube) sites.push({ key: 'youtube', name: 'YouTube', url: 'https://studio.youtube.com/', host: 'youtube.com', optional: true });
+    const skipped: Array<'youtube'> = [];
     const framesDir = path.join(__dirname, '../../storage/frames');
     fs.mkdirSync(framesDir, { recursive: true });
     this.skipLogin = false;
 
     // 1. One tab per site, all loading at once so the operator sees them open immediately.
-    say('Opening ChatGPT, Grok and TikTok…');
+    say(`Opening ${sites.map((x) => x.name).join(', ')}…`);
     const pages: Page[] = [];
     for (const site of sites) {
       let page = context.pages().find((p) => !p.isClosed() && p.url().includes(site.host) && !pages.includes(p));
@@ -1717,7 +1731,7 @@ export class JevBrowserAgent {
       await page.bringToFront().catch(() => {});
       say(`Sign into ${site.name} in the browser window — it looks signed out (${st.why}). The run continues by itself when you're done, or press the button if you're already signed in.`, 'waiting_login');
 
-      const deadline = Date.now() + maxWaitMs;
+      const deadline = Date.now() + (site.optional ? Math.min(maxWaitMs, 4 * 60 * 1000) : maxWaitMs);
       let ok = false;
       let unknownStreak = 0;
       while (Date.now() < deadline) {
@@ -1741,12 +1755,19 @@ export class JevBrowserAgent {
           break;
         }
       }
+      if (!ok && site.optional) {
+        say(`${site.name} was not signed in — skipping ${site.name} for this run.`);
+        console.warn(`[JevBrowserAgent] ${site.name} sign-in timed out; continuing without it.`);
+        skipped.push(site.key as 'youtube');
+        continue;
+      }
       if (!ok) throw new Error(`${site.name} is not signed in. Run again and sign into ${site.name} in the browser window.`);
       say(`${site.name} signed in.`);
       await page.waitForTimeout(1500);
       await this.saveCookies(context);
     }
     await this.saveCookies(context);
+    return { skipped };
   }
 
   // ───────────────────────── Cover image: a different frame for every video ─────────────────────────
@@ -1889,6 +1910,178 @@ export class JevBrowserAgent {
       await page.keyboard.press('Escape').catch(() => {});
       await page.waitForTimeout(500);
       return false;
+    } finally {
+      page.off('filechooser', onChooser);
+    }
+  }
+
+  // ───────────────────────── YouTube (Shorts) upload ─────────────────────────
+
+  /**
+   * Upload the finished video to YouTube through YouTube Studio's upload dialog (same browser, same Google login).
+   * A 9:16 video under 3 minutes is published as a YouTube Short automatically.
+   *
+   * Flow: open the upload dialog → choose the file → title / description → "made for kids" answer → (best effort) custom
+   * thumbnail → Next ×3 → visibility → Publish → read the video link from the "Video published" dialog.
+   * Screenshots of each stage go to storage/frames/youtube_*.png so a Studio layout change is easy to diagnose.
+   */
+  public static async uploadToYouTubeViaBrowser(
+    videoPath: string,
+    title: string,
+    description: string,
+    opts: { coverPath?: string; madeForKids: boolean; visibility: 'public' | 'unlisted' | 'private' }
+  ): Promise<{ success: boolean; verified?: boolean; shareUrl?: string; message: string }> {
+    const context = await this.launchContext(false);
+    const page = context.pages().find((p) => !p.isClosed() && p.url().includes('youtube.com')) || (await context.newPage());
+    await page.bringToFront().catch(() => {});
+
+    const framesDir = path.join(__dirname, '../../storage/frames');
+    fs.mkdirSync(framesDir, { recursive: true });
+    const snap = (tag: string) => page.screenshot({ path: path.join(framesDir, `youtube_${tag}_${Date.now()}.png`) }).catch(() => {});
+    const visible = async (loc: ReturnType<Page['locator']>, ms = 1500) =>
+      loc.first().waitFor({ state: 'visible', timeout: ms }).then(() => true).catch(() => false);
+
+    // YouTube Studio sometimes shows an "unsupported browser" page with a "Skip to YouTube Studio" link.
+    const skipInterstitial = async () => {
+      await page.waitForTimeout(2500);
+      const skip = page.getByText(/skip to youtube studio/i).first();
+      if (await skip.isVisible().catch(() => false)) {
+        console.log('[JevBrowserAgent] YouTube showed its browser-support page — skipping it.');
+        await skip.click().catch(() => {});
+        await page.waitForTimeout(3000);
+      }
+    };
+
+    // No native "choose a file" window may ever open: intercept pickers, and only feed the one we open on purpose.
+    let chooserFile: string | null = null;
+    const onChooser = async (chooser: FileChooser) => {
+      if (chooserFile) await chooser.setFiles(chooserFile).catch(() => {});
+    };
+    page.on('filechooser', onChooser);
+
+    try {
+      if (!this.isValidVideoFile(videoPath)) return { success: false, message: 'Refusing to upload: the video file is missing or not a valid MP4.' };
+
+      // 1. Open the upload dialog.
+      console.log('[JevBrowserAgent] Opening YouTube Studio upload...');
+      await page.evaluate('window.onbeforeunload = null;').catch(() => {});
+      await page.goto('https://www.youtube.com/upload', { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await skipInterstitial();
+      const fileInput = page.locator('input[type="file"]').first();
+      let ready = await fileInput.waitFor({ state: 'attached', timeout: 20000 }).then(() => true).catch(() => false);
+      if (!ready && !/accounts\.google\.com/.test(page.url())) {
+        // Fallback: Studio → Create → Upload videos.
+        await page.goto('https://studio.youtube.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+        await skipInterstitial();
+        await page.getByRole('button', { name: /^Create$/i }).first().click({ timeout: 15000 }).catch(() => {});
+        await page.getByRole('menuitem', { name: /Upload videos/i }).first().click({ timeout: 8000 }).catch(() => {});
+        ready = await fileInput.waitFor({ state: 'attached', timeout: 15000 }).then(() => true).catch(() => false);
+      }
+      if (!ready) {
+        await snap('no_upload_dialog');
+        const why = /accounts\.google\.com/.test(page.url())
+          ? 'YouTube is not signed in.'
+          : (await visible(page.getByText(/create a channel/i)))
+            ? 'This Google account has no YouTube channel yet — create one at youtube.com first.'
+            : "Could not open YouTube Studio's upload dialog.";
+        return { success: false, message: `${why} Screenshot saved in storage/frames.` };
+      }
+
+      // 2. Choose the video file (this starts the upload).
+      console.log('[JevBrowserAgent] Sending the video file to YouTube...');
+      await fileInput.setInputFiles(videoPath);
+      if (await visible(page.getByText(/daily upload limit|upload limit reached/i), 4000)) {
+        await snap('limit');
+        return { success: false, message: 'YouTube says the daily upload limit has been reached. Try again later.' };
+      }
+
+      // 3. Details: title, description, audience.
+      const titleBox = page.locator('#title-textarea #textbox, [aria-label^="Add a title"]').first();
+      await titleBox.waitFor({ state: 'visible', timeout: 90000 });
+      await titleBox.click();
+      await page.keyboard.press('ControlOrMeta+A');
+      await page.keyboard.insertText(title.slice(0, 100));
+
+      const descBox = page.locator('#description-textarea #textbox, [aria-label^="Tell viewers about your video"]').first();
+      if (await visible(descBox, 3000)) {
+        await descBox.click();
+        await page.keyboard.press('ControlOrMeta+A');
+        await page.keyboard.insertText(description.slice(0, 4900));
+      }
+
+      // YouTube forces an answer to "Is this video made for kids?" before it lets you continue.
+      const kidsName = opts.madeForKids ? 'VIDEO_MADE_FOR_KIDS_MFK' : 'VIDEO_MADE_FOR_KIDS_NOT_MFK';
+      const kidsRadio = page.locator(`[name="${kidsName}"]`).first();
+      const kidsByRole = page.getByRole('radio', { name: opts.madeForKids ? /^Yes, it'?s made for kids/i : /^No, it'?s not made for kids/i }).first();
+      if (await visible(kidsRadio, 5000)) await kidsRadio.click();
+      else if (await visible(kidsByRole, 3000)) await kidsByRole.click();
+      else console.warn('[JevBrowserAgent] YouTube: could not find the "made for kids" choice.');
+
+      // "Altered content": cartoon characters are not realistic people/places, so the honest answer is "No" (best effort).
+      const alteredNo = page.locator('[name="VIDEO_HAS_ALTERED_CONTENT_NO"]').first();
+      if (await visible(alteredNo, 1500)) await alteredNo.click().catch(() => {});
+
+      // Custom thumbnail (best effort; YouTube only allows it on verified channels).
+      if (opts.coverPath && fs.existsSync(opts.coverPath)) {
+        const thumbBtn = page.getByRole('button', { name: /upload (file|thumbnail)/i }).first();
+        if (await visible(thumbBtn, 2500)) {
+          chooserFile = opts.coverPath;
+          await thumbBtn.click().catch(() => {});
+          await page.waitForTimeout(3000);
+          chooserFile = null;
+        }
+      }
+      await snap('details');
+
+      // 4. Next ×3 (Video elements → Checks → Visibility).
+      for (let i = 0; i < 3; i++) {
+        await page
+          .waitForFunction(() => {
+            const b = document.querySelector('#next-button');
+            return !!b && b.getAttribute('aria-disabled') !== 'true';
+          }, undefined, { timeout: 60000 })
+          .catch(() => {});
+        await page.locator('#next-button').first().click({ timeout: 15000 });
+        await page.waitForTimeout(1500);
+      }
+
+      // 5. Visibility.
+      const visName = { public: 'PUBLIC', unlisted: 'UNLISTED', private: 'PRIVATE' }[opts.visibility];
+      const visRadio = page.locator(`[name="${visName}"]`).first();
+      const visByRole = page.getByRole('radio', { name: new RegExp(`^${opts.visibility}`, 'i') }).first();
+      if (await visible(visRadio, 8000)) await visRadio.click();
+      else if (await visible(visByRole, 3000)) await visByRole.click();
+      else throw new Error('Could not find the visibility choice (Public / Unlisted / Private).');
+      await snap('visibility');
+
+      // 6. Publish — the button stays disabled until the upload itself has finished.
+      console.log('[JevBrowserAgent] Waiting for the YouTube upload to finish, then publishing...');
+      await page
+        .waitForFunction(() => {
+          const b = document.querySelector('#done-button');
+          return !!b && b.getAttribute('aria-disabled') !== 'true';
+        }, undefined, { timeout: 10 * 60 * 1000 })
+        .catch(() => {
+          throw new Error('YouTube did not finish processing the upload within 10 minutes.');
+        });
+      await page.locator('#done-button').first().click({ timeout: 15000 });
+
+      // 7. Confirmation dialog with the video link.
+      const link = page.locator('ytcp-video-share-dialog a[href], a[href*="/shorts/"], a[href*="youtu.be/"], a[href*="watch?v="]').first();
+      const published = await link.waitFor({ state: 'visible', timeout: 90000 }).then(() => true).catch(() => false);
+      const shareUrl = published ? await link.getAttribute('href').catch(() => null) : null;
+      await snap(published ? 'published' : 'unconfirmed');
+      await page.getByRole('button', { name: /^Close$/i }).first().click({ timeout: 4000 }).catch(() => {});
+
+      if (published) {
+        console.log(`[JevBrowserAgent] Video published on YouTube: ${shareUrl}`);
+        return { success: true, verified: true, shareUrl: shareUrl || undefined, message: 'Video published on YouTube.' };
+      }
+      return { success: true, verified: false, message: 'Publish was clicked, but YouTube did not show its confirmation (check YouTube Studio).' };
+    } catch (err: any) {
+      await snap('failed');
+      console.warn('[JevBrowserAgent] YouTube upload error:', err.message);
+      return { success: false, message: err.message };
     } finally {
       page.off('filechooser', onChooser);
     }
@@ -2179,10 +2372,10 @@ export class JevBrowserAgent {
     this.pipelineRunning = true;
     try {
       const result = await this.runPipelineOnce(options);
-      if (result.tiktokVerified) {
-        // TikTok confirmed the post: close the window so the next video starts from a clean browser.
-        options.onProgress?.('Posted to TikTok. Closing the browser so it is fresh for the next video…');
-        console.log('[JevBrowserAgent] TikTok post verified — closing the browser window.');
+      if (result.postedEverywhere) {
+        // Every place we posted to confirmed it: close the window so the next video starts from a clean browser.
+        options.onProgress?.('Posted. Closing the browser so it is fresh for the next video…');
+        console.log('[JevBrowserAgent] All posts verified — closing the browser window.');
         await new Promise((r) => setTimeout(r, 3000));
         await this.shutdown();
       }
@@ -2213,6 +2406,10 @@ export class JevBrowserAgent {
     tiktokStatus: string;
     tiktokVerified: boolean;
     tiktokUrl?: string;
+    youtubeStatus: string;
+    youtubeVerified: boolean;
+    youtubeUrl?: string;
+    postedEverywhere: boolean;
     message: string;
   }> {
     const jobId = 'job_' + crypto.randomUUID().slice(0, 10);
@@ -2221,7 +2418,9 @@ export class JevBrowserAgent {
 
     // 0. Open the browser (once) and make sure ChatGPT, Grok and TikTok are signed in — waits for the operator if not.
     const browser = await this.launchContext(false);
-    await this.ensureLoggedIn(browser, say);
+    const targets = getPublishTargets();
+    const login = await this.ensureLoggedIn(browser, say, targets);
+    const youtubeOn = targets.youtube && !login.skipped.includes('youtube');
 
 
     // 1. ChatGPT: Generate prompt & script
@@ -2308,53 +2507,90 @@ export class JevBrowserAgent {
       []
     );
 
-    // 6. TikTok upload — ONLY when QA passed. Browser upload first; Buffer only as a fallback (never both).
-    let tiktokStatus = 'held_for_review';
+    // 6. Post — ONLY when QA passed. TikTok first (browser; Buffer only as a fallback, never both), then YouTube.
+    let tiktokStatus = targets.tiktok ? 'held_for_review' : 'off';
     let tiktokUrl: string | undefined;
     let browserPosted = false; // Post was clicked in the browser — never also send through Buffer
     let tiktokVerified = false; // TikTok showed its "published" confirmation
+    let youtubeStatus = youtubeOn ? 'held_for_review' : targets.youtube ? 'skipped' : 'off';
+    let youtubeUrl: string | undefined;
+    let youtubeVerified = false;
 
     if (qaResult.passed) {
-      console.log('[JevBrowserAgent] SEQUENCE STEP 3: Uploading finished video to TikTok...');
-      say('Uploading to TikTok and posting…');
-      tiktokStatus = 'ready_to_publish';
-      try {
-        const uploadRes = await this.uploadToTikTokViaBrowser(finalVideoPath, scriptPkg.concept_title, scriptPkg.hook, coverPath || undefined);
-        if (uploadRes.success) {
-          browserPosted = true;
-          tiktokVerified = !!uploadRes.verified;
-          tiktokStatus = tiktokVerified ? 'published' : 'scheduled'; // 'scheduled' = Post clicked, awaiting TikTok's receipt
-          tiktokUrl = uploadRes.shareUrl;
-        } else {
-          console.warn('[JevBrowserAgent] TikTok browser upload did not complete:', uploadRes.message);
+      if (targets.tiktok) {
+        console.log('[JevBrowserAgent] SEQUENCE STEP 3: Uploading finished video to TikTok...');
+        say('Uploading to TikTok and posting…');
+        tiktokStatus = 'ready_to_publish';
+        try {
+          const uploadRes = await this.uploadToTikTokViaBrowser(finalVideoPath, scriptPkg.concept_title, scriptPkg.hook, coverPath || undefined);
+          if (uploadRes.success) {
+            browserPosted = true;
+            tiktokVerified = !!uploadRes.verified;
+            tiktokStatus = tiktokVerified ? 'published' : 'scheduled'; // 'scheduled' = Post clicked, awaiting TikTok's receipt
+            tiktokUrl = uploadRes.shareUrl;
+          } else {
+            console.warn('[JevBrowserAgent] TikTok browser upload did not complete:', uploadRes.message);
+          }
+        } catch (ttErr: any) {
+          console.warn('[JevBrowserAgent] TikTok browser upload error:', ttErr.message);
         }
-      } catch (ttErr: any) {
-        console.warn('[JevBrowserAgent] TikTok browser upload error:', ttErr.message);
+
+        if (!browserPosted) {
+          try {
+            const pubRes = await BufferTikTokPublisher.publishVideoPost(
+              jobId, scriptPkg.concept_title, scriptPkg.hook, finalVideoPath, thumbnailPath || undefined
+            );
+            if (pubRes.status === 'published' || pubRes.status === 'scheduled') {
+              tiktokStatus = pubRes.status;
+              tiktokUrl = pubRes.shareUrl || tiktokUrl;
+            }
+          } catch { }
+        }
       }
 
-      if (!browserPosted) {
+      if (youtubeOn) {
+        console.log('[JevBrowserAgent] SEQUENCE STEP 4: Uploading finished video to YouTube...');
+        say('Uploading to YouTube…');
+        youtubeStatus = 'failed';
         try {
-          const pubRes = await BufferTikTokPublisher.publishVideoPost(
-            jobId, scriptPkg.concept_title, scriptPkg.hook, finalVideoPath, thumbnailPath || undefined
+          const cleanTitle = scriptPkg.concept_title.replace(/\s*#\w+/g, '').trim();
+          const yt = await this.uploadToYouTubeViaBrowser(
+            finalVideoPath,
+            cleanTitle,
+            `${scriptPkg.hook}\n\n#Shorts`,
+            { coverPath: coverPath || undefined, madeForKids: targets.youtubeMadeForKids, visibility: targets.youtubeVisibility }
           );
-          if (pubRes.status === 'published' || pubRes.status === 'scheduled') {
-            tiktokStatus = pubRes.status;
-            tiktokUrl = pubRes.shareUrl || tiktokUrl;
+          if (yt.success) {
+            youtubeVerified = !!yt.verified;
+            youtubeStatus = youtubeVerified ? 'published' : 'submitted';
+            youtubeUrl = yt.shareUrl;
+          } else {
+            console.warn('[JevBrowserAgent] YouTube upload did not complete:', yt.message);
+            say(`YouTube upload failed: ${yt.message}`);
           }
-        } catch { }
+        } catch (ytErr: any) {
+          console.warn('[JevBrowserAgent] YouTube upload error:', ytErr.message);
+        }
       }
     } else {
-      console.warn('[JevBrowserAgent] QA did not pass — video held for review and NOT uploaded to TikTok.');
+      console.warn('[JevBrowserAgent] QA did not pass — video held for review and NOT uploaded anywhere.');
     }
 
+    // The browser window may close only when every place we meant to post to confirmed the post.
+    const postedEverywhere =
+      qaResult.passed && (tiktokVerified || youtubeVerified) && (!targets.tiktok || tiktokVerified) && (!youtubeOn || youtubeVerified);
+
     // 7. Update Job and Slot final states in database
+    const anyPublished = tiktokStatus === 'published' || youtubeStatus === 'published';
+    const anySubmitted = tiktokStatus === 'scheduled' || youtubeStatus === 'submitted';
     const finalState = !qaResult.passed
       ? 'held_for_review'
-      : tiktokStatus === 'published' ? 'published' : tiktokStatus === 'scheduled' ? 'scheduled' : 'ready_to_publish';
+      : anyPublished ? 'published' : anySubmitted ? 'scheduled' : 'ready_to_publish';
     db.prepare(`
       UPDATE jobs
       SET state = ?,
           tiktok_share_url = ?,
+          youtube_share_url = ?,
           video_path = ?,
           thumbnail_path = ?,
           updated_at = CURRENT_TIMESTAMP
@@ -2362,6 +2598,7 @@ export class JevBrowserAgent {
     `).run(
       finalState,
       tiktokUrl || null,
+      youtubeUrl || null,
       finalVideoPath,
       thumbnailPath,
       jobId
@@ -2383,7 +2620,11 @@ export class JevBrowserAgent {
       tiktokStatus,
       tiktokVerified,
       tiktokUrl,
-      message: `ChatGPT prompt -> Grok video (${videoDuration}s${grokRes.width && grokRes.height ? ', ' + grokRes.width + 'x' + grokRes.height : ''}, original sound) -> QA ${qaResult.passed ? 'passed' : 'held'} -> TikTok: ${tiktokStatus}`,
+      youtubeStatus,
+      youtubeVerified,
+      youtubeUrl,
+      postedEverywhere,
+      message: `ChatGPT prompt -> Grok video (${videoDuration}s${grokRes.width && grokRes.height ? ', ' + grokRes.width + 'x' + grokRes.height : ''}, original sound) -> QA ${qaResult.passed ? 'passed' : 'held'} -> TikTok: ${tiktokStatus} -> YouTube: ${youtubeStatus}`,
     };
   }
 }

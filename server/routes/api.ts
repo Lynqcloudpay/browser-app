@@ -6,6 +6,7 @@ import { exec } from 'child_process';
 import db, { resetContentCatalog } from '../db/database';
 import { startRun, getRunStatus } from '../engine/dailyRunner';
 import { getSchedule, setSchedule } from '../engine/dailySchedule';
+import { getPublishTargets, setPublishTargets } from '../engine/publishTargets';
 import ProductionWorker from '../engine/worker';
 import MonetizationEngine from '../engine/monetizationEngine';
 import Scheduler from '../engine/scheduler';
@@ -429,6 +430,19 @@ apiRouter.post('/browser/skip-login', (req, res) => {
 
 apiRouter.get('/browser/run-status', (req, res) => {
   res.json(getRunStatus());
+});
+
+// Where videos are posted (TikTok / YouTube) and YouTube's audience + visibility choices
+apiRouter.get('/publish-targets', (req, res) => {
+  res.json(getPublishTargets());
+});
+
+apiRouter.post('/publish-targets', (req, res) => {
+  try {
+    res.json(setPublishTargets(req.body || {}));
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // Daily automatic posting (macOS LaunchAgent)

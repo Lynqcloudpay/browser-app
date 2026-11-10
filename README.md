@@ -25,6 +25,7 @@ To also start the app and open it in your browser when it finishes, use:
 curl -fsSL https://raw.githubusercontent.com/Lynqcloudpay/browser-app/main/scripts/bootstrap.sh | bash -s -- --start
 ```
 
+Each video is posted to **TikTok and YouTube Shorts** (turn either off in Settings → *Where to post each video*).
 Then, in **Settings**, click **Make & Post a Video Now** and sign into ChatGPT, Grok and TikTok when the browser window asks.
 Needs a Mac (macOS). You can read the installer first: [scripts/bootstrap.sh](scripts/bootstrap.sh).
 

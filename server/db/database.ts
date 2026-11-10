@@ -29,6 +29,12 @@ export function initDatabase() {
     // Column already exists
   }
 
+  try {
+    db.exec(`ALTER TABLE jobs ADD COLUMN youtube_share_url TEXT`);
+  } catch {
+    // Column already exists
+  }
+
   // Initialize singleton settings if not present
   const existingSettings = db.prepare('SELECT id FROM settings WHERE id = 1').get();
   if (!existingSettings) {

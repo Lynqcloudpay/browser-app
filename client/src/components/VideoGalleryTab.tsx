@@ -209,6 +209,16 @@ export const VideoGalleryTab: React.FC<VideoGalleryTabProps> = ({
                               TikTok <ExternalLink className="w-3 h-3" />
                             </a>
                           )}
+                          {job.youtube_share_url && (
+                            <a
+                              href={job.youtube_share_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-[11px] text-rose-400 hover:underline flex items-center gap-1"
+                            >
+                              YouTube <ExternalLink className="w-3 h-3" />
+                            </a>
+                          )}
                         </div>
                       ) : job.state === 'scheduled' ? (
                         <div className="flex items-center gap-1 text-indigo-400 font-semibold text-[11px]">

@@ -14,7 +14,8 @@
     "smoke": "tsx scripts/smoke.ts",
     "daily": "tsx scripts/dailyRun.ts",
     "setup": "node scripts/setup.mjs",
-    "doctor": "node scripts/setup.mjs --check"
+    "doctor": "node scripts/setup.mjs --check",
+    "youtube:test": "tsx scripts/youtubeTest.ts"
   },
   "keywords": [
     "childrens-media",

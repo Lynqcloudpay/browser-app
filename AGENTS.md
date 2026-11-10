@@ -3,8 +3,9 @@
 Instructions for any AI coding agent (Claude, Codex, etc.) working in this repo.
 
 ## What this app is
-Makes one "Mr. Apple" video and posts it to TikTok by driving a **real browser** (Playwright Chromium):
-ChatGPT writes the prompt → Grok Imagine makes the video from the reference image → TikTok Studio posts it.
+Makes one "Mr. Apple" video and posts it to **TikTok and YouTube Shorts** by driving a **real browser** (Playwright Chromium):
+ChatGPT writes the prompt → Grok Imagine makes the video from the reference image → TikTok Studio and YouTube Studio post it.
+Where it posts is configurable in Settings → "Where to post each video" (`storage/publish_targets.json`).
 React UI (Vite, `:5173`) + Express/SQLite API (`:3000`). It runs on the owner's **Mac**. It needs no OpenAI/xAI/Buffer API keys.
 
 ## Fastest: the owner can paste ONE line (no agent needed)
@@ -34,9 +35,9 @@ Never ask for, type or store the owner's passwords. Never ask them to paste toke
 4. **GitHub push access** (owner account `Lynqcloudpay`): the human must add a collaborator or type a token at the terminal prompt themselves.
 
 ## Real-world side effects — don't trigger without being asked
-A run **posts a public video to the owner's TikTok** and uses their Grok credits.
+A run **posts a public video to the owner's TikTok and YouTube** (per Settings) and uses their Grok credits.
 Do not click "Make & Post a Video Now", `POST /api/browser/run`, or `npm run daily -- --force` unless the user explicitly asked for a live run.
-Test selectors/pages with a throw-away browser instead (see gotchas).
+Test selectors/pages with a throw-away browser instead (see gotchas). To test only the YouTube upload, `npm run youtube:test` uploads an existing video as **private** (close the app's browser window first; ask the owner first — it creates a private video on their channel).
 
 ## Verify any change
 ```bash
@@ -52,6 +53,7 @@ npm run build              # builds the web page
 - **Under `tsx`**, functions passed to `page.evaluate` get an injected `__name()` helper; `window.__name` is shimmed in `launchPersistent` and `extractCoverFrame`. Keep that when adding in-page code.
 - **Tests** run against their own database (`npm test` sets `DATABASE_PATH`). Never point tests at `storage/kindred_studio.db`.
 - **No ffmpeg.** The raw Grok video (with its original audio) goes straight to TikTok.
+- **YouTube** is driven through YouTube Studio's upload dialog (`uploadToYouTubeViaBrowser`): it must answer "made for kids" (Settings; default yes — these are kids' videos), picks Public/Unlisted/Private, and saves screenshots to `storage/frames/youtube_*.png`. Studio can show an "unsupported browser" page with a "Skip to YouTube Studio" link (handled). YouTube sign-in is optional: if nobody signs in within 4 minutes the run still posts to TikTok. The browser only closes when every enabled place confirmed the post.
 - **File pickers:** TikTok's "Upload cover" opens a native Mac file window unless a `filechooser` listener intercepts it. Keep the listeners.
 - **Schedule** = macOS LaunchAgent `com.kindredstudio.daily` → `scripts/dailyRun.ts`. Only scheduled runs use up slots (`storage/schedule_state.json`); log in `storage/logs/daily.log`.
 - The browser window closes by itself after TikTok confirms a post; the next run reopens it and restores saved login cookies.
@@ -61,6 +63,7 @@ npm run build              # builds the web page
 |---|---|
 | `server/engine/jevBrowserAutomation.ts` | All browser steps: login check, ChatGPT, Grok, cover frame, TikTok, cookies |
 | `server/engine/dailyRunner.ts` | One-button run + live status |
+| `server/engine/publishTargets.ts` | Where to post: TikTok / YouTube, YouTube visibility + kids setting |
 | `server/engine/dailySchedule.ts`, `scripts/dailyRun.ts` | Daily schedule (launchd) and its job |
 | `server/routes/api.ts` | REST API (`/api/browser/run`, `/run-status`, `/skip-login`, `/schedule`) |
 | `client/src/components/SettingsTab.tsx` | The Settings page (one button, schedule card) |
@@ -68,7 +71,7 @@ npm run build              # builds the web page
 
 ## Git rules (standing instruction from the owner)
 - **After every change: commit and push to `main`** (repo `Lynqcloudpay/browser-app`) in the same turn, once verification passes.
-- **Never commit private files:** `.env`, `storage/browser_profile/`, `storage/browser_cookies.json` (saved logins), `storage/*.db*`, `storage/schedule*.json`, `storage/logs/`, `.claude/settings.local.json`. They are git-ignored — keep it that way, and scan the diff for keys/tokens before committing.
+- **Never commit private files:** `.env`, `storage/browser_profile/`, `storage/browser_cookies.json` (saved logins), `storage/*.db*`, `storage/schedule*.json`, `storage/publish_targets.json`, `storage/logs/`, `.claude/settings.local.json`. They are git-ignored — keep it that way, and scan the diff for keys/tokens before committing.
 - Write a clear message explaining *why*. End it with the attribution line your tool requires.
 
 ## Troubleshooting

@@ -127,7 +127,7 @@ export function startRun(
         ...status,
         state: 'done',
         stage: 'finished',
-        step: `Finished: "${result.title}" (${result.durationSeconds}s) — QA ${result.qaPassed ? 'passed' : 'held for review'}, TikTok: ${result.tiktokStatus}.${result.tiktokVerified ? ' Browser closed — ready for the next video.' : ''}`,
+        step: `Finished: "${result.title}" (${result.durationSeconds}s) — QA ${result.qaPassed ? 'passed' : 'held for review'}, TikTok: ${result.tiktokStatus}, YouTube: ${result.youtubeStatus}.${result.postedEverywhere ? ' Browser closed — ready for the next video.' : ''}`,
         finishedAt: new Date().toISOString(),
         result,
       };
