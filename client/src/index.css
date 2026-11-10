@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --accent-color: #f59e0b;
+    --font-kids: 'Fredoka', cursive, sans-serif;
+    --font-ui: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  }
+}
+
+body {
+  font-family: var(--font-ui);
+}
+
+.font-kids {
+  font-family: var(--font-kids);
+}
+
+/* Modern switch progressive enhancement styling compliant with modern-web-guidance */
+input[type="checkbox"][switch] {
+  accent-color: var(--accent-color);
+  margin: 0;
+  cursor: pointer;
+  appearance: auto;
+}
+
+input[type="checkbox"][switch]:focus-visible {
+  outline: 3px solid #f59e0b;
+  outline-offset: 4px;
+}
+
+/* Custom fallback switch styling for non-supporting browsers */
+@supports not (selector(:has([switch]))) {
+  .custom-switch {
+    position: relative;
+    display: inline-block;
+    width: 48px;
+    height: 26px;
+  }
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+

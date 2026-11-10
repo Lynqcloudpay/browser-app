@@ -1,0 +1,55 @@
+{
+  "name": "kindred-studio",
+  "version": "1.0.0",
+  "description": "Autonomous AI Children's Media Studio & Discovery Engine powered by TypeSafe Jev",
+  "main": "server/index.ts",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:client": "vite",
+    "build": "vite build",
+    "start": "tsx server/index.ts",
+    "test": "tsx tests/safety_and_loop.test.ts",
+    "demo": "tsx scripts/demo.ts",
+    "smoke": "tsx scripts/smoke.ts"
+  },
+  "keywords": [
+    "childrens-media",
+    "family-coviewing",
+    "typesafe-jev",
+    "openai",
+    "xai-grok-video",
+    "buffer-tiktok",
+    "ai-automation"
+  ],
+  "author": "Claude & Lead Engineer",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "@jkudish/jev-browser": "^0.8.11",
+    "@tailwindcss/vite": "^4.3.5",
+    "better-sqlite3": "^13.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.10",
+    "express": "^5.3.0",
+    "lucide-react": "^1.70.0",
+    "playwright": "^1.65.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.6",
+    "@vitejs/plugin-react": "^6.3.0",
+    "autoprefixer": "^10.6.2",
+    "concurrently": "^10.0.7",
+    "postcss": "^8.5.32",
+    "tailwindcss": "^4.3.5",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.7"
+  }
+}
