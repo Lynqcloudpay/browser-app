@@ -7,18 +7,40 @@ The core business objective is to discover and pilot kids’ series that generat
 
 ---
 
-## Quick start (humans and AI agents)
+## Install on any Mac with ONE line (no AI needed)
+
+Open **Terminal**, paste this line, press Enter:
 
 ```bash
-git clone https://github.com/Lynqcloudpay/browser-app.git
-cd browser-app
+curl -fsSL https://raw.githubusercontent.com/Lynqcloudpay/browser-app/main/scripts/bootstrap.sh | bash
+```
+
+It checks for git and Node 20+ (installs Node with Homebrew if you have it), downloads the project to `~/browser-app`,
+installs everything, downloads the browser, creates `.env`, runs the checks, and ends with **`SETUP OK`**.
+Safe to paste again later: it updates the project and re-verifies.
+
+To also start the app and open it in your browser when it finishes, use:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Lynqcloudpay/browser-app/main/scripts/bootstrap.sh | bash -s -- --start
+```
+
+Then, in **Settings**, click **Make & Post a Video Now** and sign into ChatGPT, Grok and TikTok when the browser window asks.
+Needs a Mac (macOS). You can read the installer first: [scripts/bootstrap.sh](scripts/bootstrap.sh).
+
+### Backup: step by step (humans or AI agents)
+
+If the one-liner can't be used, do it by hand:
+
+```bash
+git clone https://github.com/Lynqcloudpay/browser-app.git ~/browser-app
+cd ~/browser-app
 node scripts/setup.mjs     # installs everything and verifies it; must end with "SETUP OK"
 npm run dev                # then open http://localhost:5173
 ```
 
-Then, in **Settings**, click **Make & Post a Video Now** and sign into ChatGPT, Grok and TikTok when the browser window asks.
-Needs macOS and Node 20+. `npm run doctor` re-checks the setup without changing anything.
-**AI agents: read [AGENTS.md](AGENTS.md) first** — it has the exact setup steps, what only a human can do, and the gotchas.
+`npm run doctor` re-checks the setup without changing anything.
+**AI agents: read [AGENTS.md](AGENTS.md) first** — exact setup steps, what only a human can do, and the gotchas.
 
 ---
 

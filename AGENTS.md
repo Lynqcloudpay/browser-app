@@ -7,6 +7,13 @@ Makes one "Mr. Apple" video and posts it to TikTok by driving a **real browser**
 ChatGPT writes the prompt → Grok Imagine makes the video from the reference image → TikTok Studio posts it.
 React UI (Vite, `:5173`) + Express/SQLite API (`:3000`). It runs on the owner's **Mac**. It needs no OpenAI/xAI/Buffer API keys.
 
+## Fastest: the owner can paste ONE line (no agent needed)
+```bash
+curl -fsSL https://raw.githubusercontent.com/Lynqcloudpay/browser-app/main/scripts/bootstrap.sh | bash
+```
+It installs git/Node checks, downloads the repo to `~/browser-app`, and runs the same `scripts/setup.mjs` below. If you are an agent, you may run it too
+(`KINDRED_DIR=<folder>` changes the install folder). The manual steps below are the backup.
+
 ## Set it up (do exactly this, in order)
 ```bash
 git clone https://github.com/Lynqcloudpay/browser-app.git
