@@ -2648,31 +2648,19 @@ export class JevBrowserAgent {
     console.log('[JevBrowserAgent] SEQUENCE STEP 2: Generating the video in Grok Imagine...');
     say('Generating the video in Grok (about 1–3 minutes)…');
     const series = db.prepare("SELECT * FROM series WHERE status IN ('pilot', 'active') LIMIT 1").get() as any;
-    // 720p first. If Grok's server fails on 720p, retry the same prompt once at 480p, and use 480p directly for the
-    // next 24 hours (each failed 720p try wastes minutes and possibly credits). Then 720p is tried again.
-    const grokStateFile = path.join(__dirname, '../../storage/grok_state.json');
-    let last720Failure = 0;
-    try {
-      last720Failure = Number(JSON.parse(fs.readFileSync(grokStateFile, 'utf8')).last720pServerFailure) || 0;
-    } catch { }
-    const skip720 = Date.now() - last720Failure < 24 * 60 * 60 * 1000;
-    const durationWanted = options.targetDurationSec || 15;
+    // If Grok's server fails ("Server failed to respond"), stop and say so. No automatic retry: it fails the same way at
+    // 480p and 720p, and every attempt may use Grok credits.
     let grokRes: Awaited<ReturnType<typeof JevBrowserAgent.createVideoViaGrok>>;
-    if (skip720) {
-      console.log('[JevBrowserAgent] 720p failed on Grok\'s server in the last 24h — making this video at 480p.');
-      grokRes = await this.createVideoViaGrok(grokPrompt, jobId, 1, false, durationWanted, '480p');
-    } else {
-      try {
-        grokRes = await this.createVideoViaGrok(grokPrompt, jobId, 1, false, durationWanted);
-      } catch (err: any) {
-        if (err?.code !== 'GROK_SERVER_FAILED') throw err;
-        try {
-          fs.writeFileSync(grokStateFile, JSON.stringify({ last720pServerFailure: Date.now() }));
-        } catch { }
-        console.warn(`[JevBrowserAgent] ${err.message} — retrying once at 480p.`);
-        say("Grok's server failed on the 720p video — trying again at 480p…");
-        grokRes = await this.createVideoViaGrok(grokPrompt, jobId, 1, false, durationWanted, '480p');
+    try {
+      grokRes = await this.createVideoViaGrok(grokPrompt, jobId, 1, false, options.targetDurationSec || 15);
+    } catch (err: any) {
+      if (err?.code === 'GROK_SERVER_FAILED') {
+        throw new Error(
+          `${err.message} Grok rendered the video but its server failed to deliver it. Nothing was posted. ` +
+            'Try making one video by hand in Grok: if that fails too, the problem is on Grok\'s side (or your Grok usage limit) and it should clear up later.'
+        );
       }
+      throw err;
     }
     if (!this.isValidVideoFile(grokRes.videoPath)) {
       throw new Error('Grok Imagine did not produce a valid video. Pipeline halted; nothing was uploaded to TikTok.');

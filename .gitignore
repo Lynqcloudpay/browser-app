@@ -7,7 +7,6 @@ storage/schedule.json
 storage/schedule_state.json
 storage/publish_targets.json
 storage/account_status.json
-storage/grok_state.json
 storage/test_interactive/
 storage/test_profile/
 storage/videos/*
