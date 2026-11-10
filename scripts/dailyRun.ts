@@ -84,21 +84,25 @@ async function main() {
   const caffeinate = spawn('/usr/bin/caffeinate', ['-i', '-m', '-s', '-w', String(process.pid)], { stdio: 'ignore' });
   caffeinate.on('error', () => {});
 
-  const { getSchedule, slotsDueSoFar, readState, recordRun } = await import('../server/engine/dailySchedule');
+  const { getSchedule, pickDueSlot, readState, recordRun } = await import('../server/engine/dailySchedule');
 
+  // Each scheduled time ("slot") makes one video, and a slot is only "done" once ITS video was made. Changing the times
+  // therefore never leaves a new time looking finished. Manual button posts don't use up a slot. A slot missed while the
+  // Mac was asleep is caught up once, so the day never gets a burst of videos.
+  let slot: string | null = null;
   if (!FORCE) {
-    // Each scheduled slot makes one video. Only videos made BY THE SCHEDULE count (a manual button post doesn't use up a slot),
-    // so a missed slot is caught up once and the day never gets more scheduled posts than slots.
     const times = getSchedule().times;
-    const due = Math.max(1, slotsDueSoFar(times));
-    const done = readState().completed;
-    if (done >= due) {
-      const msg = `Skipped: ${done} scheduled video(s) already made today and ${due} slot(s) due so far (${times.join(', ')}).`;
+    const st = readState();
+    const pick = pickDueSlot(times, st.doneSlots);
+    if (pick.allDue.length > 0 && !pick.slot) {
+      const msg = `Skipped: every slot due so far (${pick.allDue.join(', ')}) already has its video today.`;
       log(msg);
       recordRun('skipped', msg);
+      notify('Mr. Apple daily video skipped', msg);
       process.exit(0);
     }
-    log(`${done} scheduled video(s) made today, ${due} slot(s) due (${times.join(', ')}) — making one now.`);
+    slot = pick.slot;
+    log(slot ? `Slot ${slot} has no video yet today (slots: ${times.join(', ')}) — making one now.` : `No slot is due yet (slots: ${times.join(', ')}) — started by hand, making one now.`);
   }
 
   const viaApp = await serverIsUp();
@@ -115,7 +119,7 @@ async function main() {
   }
 
   log(result.ok ? `SUCCESS: ${result.message}` : `FAILED: ${result.message}`);
-  recordRun(result.ok ? 'success' : 'failed', result.message);
+  recordRun(result.ok ? 'success' : 'failed', result.message, slot);
   notify(result.ok ? 'Mr. Apple video posted' : 'Mr. Apple daily video FAILED', result.message.slice(0, 200));
 
   if (!viaApp) {

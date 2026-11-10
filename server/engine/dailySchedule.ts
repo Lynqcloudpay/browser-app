@@ -109,7 +109,7 @@ export interface LastRun {
 }
 export interface ScheduleState {
   date: string; // Mac-local YYYY-MM-DD
-  completed: number; // videos made by the SCHEDULE today (manual button posts don't count)
+  doneSlots: string[]; // slot times (HH:MM) the SCHEDULE has already made a video for today (manual button posts don't count)
   lastRun?: LastRun;
 }
 
@@ -122,15 +122,30 @@ export function readState(): ScheduleState {
   } catch {
     /* first run */
   }
-  return prev.date === localDate()
-    ? { date: prev.date, completed: prev.completed || 0, lastRun: prev.lastRun }
-    : { date: localDate(), completed: 0, lastRun: prev.lastRun };
+  const sameDay = prev.date === localDate();
+  return {
+    date: localDate(),
+    doneSlots: sameDay && Array.isArray(prev.doneSlots) ? prev.doneSlots : [], // (an old file that only had a count is ignored)
+    lastRun: prev.lastRun,
+  };
 }
 
-/** Remember what a scheduled run did. Only a successful post uses up one of today's slots. */
-export function recordRun(outcome: LastRun['outcome'], message: string): ScheduleState {
+/**
+ * Which slot should a scheduled run work on right now? The latest slot that has already come up today and has not been
+ * completed yet. Returns null when there is none: either every due slot is done (-> skip) or no slot is due yet
+ * (-> only possible when someone starts the job by hand).
+ */
+export function pickDueSlot(times: string[], doneSlots: string[], now = new Date()): { slot: string | null; allDue: string[] } {
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const due = times.filter((t) => toMinutes(t) <= nowMin);
+  const open = due.filter((t) => !doneSlots.includes(t));
+  return { slot: open.length ? open[open.length - 1] : null, allDue: due };
+}
+
+/** Remember what a scheduled run did. Only a successful post uses up its slot. */
+export function recordRun(outcome: LastRun['outcome'], message: string, slot?: string | null): ScheduleState {
   const st = readState();
-  if (outcome === 'success') st.completed += 1;
+  if (outcome === 'success' && slot && !st.doneSlots.includes(slot)) st.doneSlots.push(slot);
   st.lastRun = { at: new Date().toISOString(), outcome, message: message.slice(0, 300) };
   fs.writeFileSync(STATE_FILE, JSON.stringify(st, null, 2));
   return st;
@@ -157,7 +172,7 @@ export function getSchedule(): ScheduleConfig & {
   const st = readState();
   return {
     ...cfg,
-    completedToday: st.completed,
+    completedToday: cfg.times.filter((t) => st.doneSlots.includes(t)).length,
     lastRun: st.lastRun,
     installed: fs.existsSync(PLIST_PATH),
     logFile: LOG_FILE,
