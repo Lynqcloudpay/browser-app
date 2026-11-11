@@ -117,16 +117,9 @@ async function main() {
   const viaApp = await serverIsUp();
   log(viaApp ? 'App is open — running through it.' : 'App is closed — running directly.');
 
-  let result = viaApp ? await runViaRunningApp() : await runDirect();
+  const result = viaApp ? await runViaRunningApp() : await runDirect();
 
-  // One retry, only if it failed before anything reached TikTok (so a video can never be posted twice).
-  const stage = (result as any).stage as string | undefined;
-  if (!result.ok && !viaApp && (stage === 'chatgpt' || stage === 'grok' || stage === 'login')) {
-    log(`Failed at "${stage}": ${result.message}. Retrying once in 2 minutes…`);
-    await new Promise((r) => setTimeout(r, 2 * 60 * 1000));
-    result = await runDirect();
-  }
-
+  // Retries (a fresh start before any video exists, a re-post to a platform that failed) happen inside the run itself.
   log(result.ok ? `SUCCESS: ${result.message}` : `FAILED: ${result.message}`);
   recordChannelRun(CHANNEL_ID, result.ok ? 'success' : 'failed', result.message, slot);
   notify(result.ok ? `${channelName} video posted` : `${channelName} daily video FAILED`, result.message.slice(0, 200));

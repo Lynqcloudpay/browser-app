@@ -7,7 +7,8 @@ import { AddressInfo } from 'net';
 import { createApp } from '../server/index';
 import { db } from '../server/db/database';
 import { createRun, updateRun, listRuns, closeInterruptedRuns } from '../server/engine/runs';
-import { stageFromStep, describeResult } from '../server/engine/dailyRunner';
+import { stageFromStep, describeResult, platformsToRepost, mergeRepost } from '../server/engine/dailyRunner';
+import { isRetryableError, shortReason } from '../server/engine/jevBrowserAutomation';
 import { nextRunAt } from '../server/routes/api';
 import { canPostVideo } from '../server/routes/library';
 import { scanTextForSafety } from '../server/engine/qaInspector';
@@ -107,6 +108,30 @@ async function main(): Promise<void> {
     }
     console.log('ok safety scan phrases');
 
+    // ── Unattended recovery rules ──
+    const err = (message: string, code?: string) => Object.assign(new Error(message), code ? { code } : {});
+    assert(isRetryableError(err('Could not find the bottom ChatGPT chat input box.')), 'a missing page element is worth one more try');
+    assert(isRetryableError(err('page.goto: Timeout 30000ms exceeded.')), 'a slow page is worth one more try');
+    assert(isRetryableError(err('stopped', 'RUN_TIMEOUT')), 'a stuck attempt is retried');
+    assert(!isRetryableError(err('Run stopped.', 'RUN_CANCELLED')), 'a Stop is never undone by a retry');
+    assert(!isRetryableError(err('x', 'GROK_SERVER_FAILED')), 'a Grok server failure may have used credits: no retry');
+    assert(!isRetryableError(err('Grok did not start the video and said: "92% of weekly limit used".')), 'usage limits are not retried');
+    assert(!isRetryableError(err('ChatGPT is not signed in. Run again and sign into ChatGPT in the browser window.')), 'sign-in needs a person');
+    assert.strictEqual(shortReason(err('Grok did not finish. More detail here. Screenshot: /a/b.png')), 'Grok did not finish.');
+    const partlyPosted = result({ tiktokStatus: 'published', youtubeStatus: 'failed', postedAnywhere: true, postFailed: ['YouTube'] });
+    assert.deepStrictEqual(platformsToRepost(partlyPosted), ['YouTube'], 'a failed YouTube upload is posted again');
+    assert.deepStrictEqual(platformsToRepost(result({ tiktokStatus: 'submitted', postFailed: ['TikTok'] })), [], 'an unconfirmed post (maybe live) is never posted again automatically');
+    assert.deepStrictEqual(platformsToRepost(result({ qaPassed: false, youtubeStatus: 'failed', postFailed: ['YouTube'] })), [], 'a held video is not posted');
+    const merged = mergeRepost(partlyPosted, result({ tiktokStatus: 'published', youtubeStatus: 'published', youtubeVerified: true, youtubeUrl: 'https://youtube.com/shorts/x', postedAnywhere: true, postedEverywhere: true }));
+    assert.strictEqual(merged.youtubeStatus, 'published');
+    assert.deepStrictEqual(merged.postFailed, []);
+    assert.strictEqual(merged.youtubeUrl, 'https://youtube.com/shorts/x');
+    assert(describeResult(merged, false).ok, 'a re-post that worked makes the run a success');
+    const stillFailed = mergeRepost(partlyPosted, result({ tiktokStatus: 'published', youtubeStatus: 'failed', postFailed: ['YouTube'] }));
+    assert.deepStrictEqual(stillFailed.postFailed, ['YouTube']);
+    assert.strictEqual(stillFailed.tiktokStatus, 'published', 'TikTok stays posted');
+    console.log('ok unattended recovery rules');
+
     // ── Which videos can be posted again ──
     assert(canPostVideo('ready_to_publish') && canPostVideo('failed') && canPostVideo('scheduled'));
     assert(canPostVideo('published', 'published', 'failed'), 'posted on TikTok, failed on YouTube: retry the missing one');
@@ -184,6 +209,9 @@ async function main(): Promise<void> {
     // publish refusals (the success path opens a real browser and is never run in tests)
     assert.strictEqual((await json('/api/videos/job_done/publish', { method: 'POST' })).status, 400, 'a posted video is not posted again');
     assert.strictEqual((await json('/api/videos/job_gone/publish', { method: 'POST' })).status, 400, 'a missing file cannot be posted');
+    // With "hold flagged videos" on, a flagged video with no check on record is held instead of posted.
+    // (Never test the other case here: a successful /publish opens a real browser.)
+    db.prepare('UPDATE channels SET hold_flagged_videos = 1 WHERE id = 1').run();
     insertJob('job_risky', 'failed', goodFile, { prompt: 'The apple is playing with fire in the kitchen.' });
     const risky = await json('/api/videos/job_risky/publish', { method: 'POST' });
     assert.strictEqual(risky.status, 400, 'a video with no safety check on record is checked before posting');

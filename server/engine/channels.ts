@@ -19,6 +19,8 @@ export interface Channel {
   schedule_times: string[];
   /** Keep this channel's browser window open between videos (faster); its posting tabs are still released. */
   keep_browser_open: boolean;
+  /** Hold a video for a person when the safety check flags words in it. Off: post anyway and record the flags. */
+  hold_flagged_videos: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -119,6 +121,7 @@ function rowToChannel(row: any): Channel {
     schedule_enabled: Boolean(row.schedule_enabled),
     schedule_times: Array.isArray(times) ? times : [],
     keep_browser_open: row.keep_browser_open === undefined || row.keep_browser_open === null ? true : Boolean(row.keep_browser_open),
+    hold_flagged_videos: Boolean(row.hold_flagged_videos),
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -205,6 +208,10 @@ export function updateChannel(id: number, patch: Partial<Channel>): Channel {
   if (patch.schedule_enabled !== undefined) {
     updates.push('schedule_enabled = ?');
     params.push(patch.schedule_enabled ? 1 : 0);
+  }
+  if (patch.hold_flagged_videos !== undefined) {
+    updates.push('hold_flagged_videos = ?');
+    params.push(patch.hold_flagged_videos ? 1 : 0);
   }
   if (patch.keep_browser_open !== undefined) {
     updates.push('keep_browser_open = ?');

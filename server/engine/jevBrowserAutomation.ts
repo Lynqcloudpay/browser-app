@@ -13,6 +13,7 @@ import { ACCOUNT_KEYS, AccountKey, recordAccountStatus } from './accountStatus';
 import { withClipboard } from './clipboardLock';
 import { withGrokSlot } from './grokSemaphore';
 import { isValidVideoBuffer, isValidVideoFile } from './videoFile';
+import { installPopupGuards, dismissPopups } from './popups';
 import { FRAMES_DIR, THUMBNAILS_DIR, VIDEOS_DIR } from '../paths';
 import {
   getChannel,
@@ -82,6 +83,9 @@ export class ChannelBrowserAgent {
   private skipLogin = false;
   private accountCancel = false;
   private cancelRequested = false;
+  private cancelReason: 'user' | 'timeout' = 'user';
+  /** Set once the Grok prompt was submitted: from then on Grok may charge for the video. */
+  private grokSubmitted = false;
   /** When each site last looked signed in, in the window that is open now. Cleared whenever the window closes. */
   private siteVerifiedAt = new Map<AccountKey, number>();
 
@@ -209,6 +213,9 @@ export class ChannelBrowserAgent {
     });
     // tsx/esbuild injects a __name() helper into in-page functions; give every page a no-op version so evaluate() never breaks.
     await context.addInitScript('window.__name = window.__name || ((f) => f);');
+    // Every tab, now and later, gets the pop-up guards (cookie banners, promos, "verify your phone"...).
+    for (const p of context.pages()) void installPopupGuards(p);
+    context.on('page', (p) => void installPopupGuards(p));
     return context;
   }
 
@@ -954,6 +961,7 @@ export class ChannelBrowserAgent {
 
       while (Date.now() - streamWaitStart < 120000) {
         await page.waitForTimeout(1500);
+        await dismissPopups(page);
 
         // Keep the conversation scrolled to the newest reply. Only the scroller that holds the replies is moved:
         // scrolling every element with "scroll" in its class also scrolled the chat-history sidebar to the bottom.
@@ -1376,7 +1384,10 @@ export class ChannelBrowserAgent {
     try {
       // 1. Fresh Grok Imagine composer
       console.log(`[ChannelBrowserAgent-${this.channelId}] Opening fresh Grok Imagine composer (https://grok.com/imagine)...`);
+      this.grokSubmitted = false;
       await page.goto('https://grok.com/imagine', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(1500);
+      await dismissPopups(page);
       const textbox = this.grokComposer(page).locator('[role="textbox"], [contenteditable="true"], textarea').first();
       const ready = await textbox.waitFor({ state: 'visible', timeout: 20000 }).then(() => true).catch(() => false);
       if (!ready) {
@@ -1443,6 +1454,8 @@ export class ChannelBrowserAgent {
         await textbox.click();
         await page.keyboard.press('Enter');
       }
+      // From here on Grok may charge for the video, so a failure must not be retried automatically.
+      this.grokSubmitted = true;
       console.log(`[ChannelBrowserAgent] Submitted Shot ${shotNumber} to Grok. Waiting for the video...`);
 
       // 6. Wait for the finished video (main/largest <video>, new src, expected length)
@@ -1460,6 +1473,7 @@ export class ChannelBrowserAgent {
 
       while (Date.now() - start < timeoutMs) {
         await page.waitForTimeout(2000);
+        await dismissPopups(page);
         const state = await page.evaluate(({ initial, minDur }) => {
           const text = document.body.innerText || '';
           const errorMatch = text.match(/server failed to respond|failed to respond|something went wrong|content moderated|couldn['’]t generate|failed to generate|generation failed|rate limit|limit reached|try again later/i);
@@ -1975,6 +1989,7 @@ export class ChannelBrowserAgent {
     );
     await pages[0].bringToFront().catch(() => {});
     await pages[0].waitForTimeout(4000);
+    for (const p of pages) await dismissPopups(p);
 
     // 2. Check each one.
     for (let i = 0; i < sites.length; i++) {
@@ -2488,6 +2503,7 @@ export class ChannelBrowserAgent {
           }, undefined, { timeout: 60000 })
           .catch(() => {});
         await dismissYouTubeNag();
+        await dismissPopups(page);
         await page.locator('#next-button').first().click({ timeout: 15000 });
         await page.waitForTimeout(1500);
       }
@@ -2572,6 +2588,7 @@ export class ChannelBrowserAgent {
     }
     await page.bringToFront().catch(() => { });
 
+    let postClicked = false;
     try {
       // Helper: dismiss any unexpected "Are you sure you want to exit?" modal
       const dismissExitModal = async () => {
@@ -2698,6 +2715,7 @@ export class ChannelBrowserAgent {
         });
         await page.waitForTimeout(1500);
         await dismissExitModal();
+        await dismissPopups(page);
 
         // 7. Locate genuine Post button using Playwright locator & frames
         let targetPostBtn: any = null;
@@ -2742,6 +2760,7 @@ export class ChannelBrowserAgent {
           }
 
           console.log('[ChannelBrowserAgent] Clicking genuine red TikTok Post button now...');
+          postClicked = true;
           await targetPostBtn.click({ force: true });
           // Native event fallback
           await targetPostBtn.evaluate((el: HTMLElement) => el.click()).catch(() => { });
@@ -2758,6 +2777,10 @@ export class ChannelBrowserAgent {
           }
         } else {
           console.warn('[ChannelBrowserAgent] Could not find bottom Post button.');
+          // Nothing was posted: say so, so the run can safely try again instead of reporting "submitted".
+          const snap = path.join(FRAMES_DIR, `tiktok_no_post_button_${Date.now()}.png`);
+          await page.screenshot({ path: snap }).catch(() => {});
+          return { success: false, message: `TikTok's Post button was not found, so nothing was posted. Screenshot: ${snap}` };
         }
 
         // 8. Monitor TikTok for publication confirmation
@@ -2791,6 +2814,7 @@ export class ChannelBrowserAgent {
 
           // If exit modal popped up, dismiss it
           await dismissExitModal();
+          await dismissPopups(page);
         }
 
         if (isPublished) {
@@ -2821,6 +2845,8 @@ export class ChannelBrowserAgent {
       };
     } catch (err: any) {
       console.warn('[ChannelBrowserAgent] TikTok browser upload note:', err.message);
+      // After Post was clicked TikTok may still publish it: report "submitted", never "failed", so it is not posted twice.
+      if (postClicked) return { success: true, verified: false, message: `Post was clicked, then: ${err.message}` };
       return { success: false, message: err.message };
     }
   }
@@ -2829,6 +2855,11 @@ export class ChannelBrowserAgent {
 
   /** Thrown out of a run that the operator stopped. */
   private cancelledError(): Error {
+    if (this.cancelReason === 'timeout') {
+      const err: any = new Error('The step took too long and the run was stopped (browser closed).');
+      err.code = 'RUN_TIMEOUT';
+      return err;
+    }
     const err: any = new Error('Run stopped.');
     err.code = 'RUN_CANCELLED';
     return err;
@@ -2842,9 +2873,10 @@ export class ChannelBrowserAgent {
    * "Stop": closes the browser window, which makes whatever step is in flight fail, and marks the run as stopped.
    * If the Post button was already clicked, the platform may still publish the video.
    */
-  public async requestCancel(): Promise<boolean> {
+  public async requestCancel(reason: 'user' | 'timeout' = 'user'): Promise<boolean> {
     if (!this.pipelineRunning) return false;
     this.cancelRequested = true;
+    this.cancelReason = reason;
     await this.shutdown().catch(() => {});
     return true;
   }
@@ -2859,6 +2891,7 @@ export class ChannelBrowserAgent {
     }
     this.pipelineRunning = true;
     this.cancelRequested = false;
+    this.cancelReason = 'user';
     try {
       const result = await fn();
       if (result.postedEverywhere && !this.keepBrowserOpen()) {
@@ -2968,7 +3001,13 @@ export class ChannelBrowserAgent {
       say('Uploading to TikTok and posting…');
       tiktokStatus = 'failed';
       try {
-        const uploadRes = await this.uploadToTikTokViaBrowser(input.videoPath, input.title, input.hook, input.coverPath || undefined);
+        let uploadRes = await this.uploadToTikTokViaBrowser(input.videoPath, input.title, input.hook, input.coverPath || undefined);
+        if (!uploadRes.success && !this.cancelRequested) {
+          // success=false means Post was never clicked, so a second try cannot post the video twice.
+          say(`TikTok upload failed (${uploadRes.message.slice(0, 120)}). Trying once more…`);
+          await this.releaseTabs(['tiktok.com']);
+          uploadRes = await this.uploadToTikTokViaBrowser(input.videoPath, input.title, input.hook, input.coverPath || undefined);
+        }
         if (uploadRes.success) {
           tiktokVerified = !!uploadRes.verified;
           tiktokStatus = tiktokVerified ? 'published' : 'submitted'; // 'submitted' = Post clicked, TikTok has not confirmed
@@ -2989,10 +3028,14 @@ export class ChannelBrowserAgent {
       youtubeStatus = 'failed';
       try {
         const cleanTitle = input.title.replace(/\s*#\w+/g, '').trim();
-        const yt = await this.uploadToYouTubeViaBrowser(input.videoPath, cleanTitle, `${input.hook}\n\n#Shorts`, {
-          coverPath: input.coverPath || undefined,
-          madeForKids: input.youtubeMadeForKids,
-        });
+        const ytOptions = { coverPath: input.coverPath || undefined, madeForKids: input.youtubeMadeForKids };
+        let yt = await this.uploadToYouTubeViaBrowser(input.videoPath, cleanTitle, `${input.hook}\n\n#Shorts`, ytOptions);
+        if (!yt.success && !this.cancelRequested && !/daily upload limit|not signed in|no YouTube channel/i.test(yt.message)) {
+          // success=false means Publish was never clicked (at most a private draft exists), so a retry cannot double-post.
+          say(`YouTube upload failed (${yt.message.slice(0, 120)}). Trying once more…`);
+          await this.releaseTabs(['youtube.com']);
+          yt = await this.uploadToYouTubeViaBrowser(input.videoPath, cleanTitle, `${input.hook}\n\n#Shorts`, ytOptions);
+        }
         if (yt.success) {
           youtubeVerified = !!yt.verified;
           youtubeStatus = youtubeVerified ? 'published' : 'submitted';
@@ -3054,6 +3097,24 @@ export class ChannelBrowserAgent {
     };
   }
 
+  /**
+   * Runs one step and, if it fails for a reason a second try can fix (a slow page, a pop-up, a changed layout that
+   * reloads fine), runs it once more after reloading. Never retried: a stop, a sign-in problem, a usage limit.
+   */
+  private async retryStep<T>(name: string, say: (step: string) => void, attempt: (n: number) => Promise<T>, canRetry: (err: any) => boolean = () => true): Promise<T> {
+    try {
+      return await attempt(1);
+    } catch (err: any) {
+      this.throwIfCancelled();
+      if (!isRetryableError(err) || !canRetry(err)) throw err;
+      console.warn(`[ChannelBrowserAgent-${this.channelId}] ${name} failed, trying once more: ${err?.message}`);
+      say(`${name} hit a problem (${shortReason(err)}). Trying once more…`);
+      await new Promise((r) => setTimeout(r, 5000));
+      this.throwIfCancelled();
+      return attempt(2);
+    }
+  }
+
   private async runPipelineOnce(options: PipelineOptions): Promise<PipelineResult> {
     const jobId = 'job_' + crypto.randomUUID().slice(0, 10);
     console.log(`[ChannelBrowserAgent-${this.channelId}] Starting full autonomous pipeline for Job ${jobId}...`);
@@ -3074,7 +3135,11 @@ export class ChannelBrowserAgent {
     // 1. ChatGPT: Generate prompt & script
     console.log('[ChannelBrowserAgent] SEQUENCE STEP 1: Creating prompt and script in ChatGPT...');
     say('Writing a new prompt in ChatGPT…');
-    const chatGptResult = await this.generatePromptViaChatGPT(false);
+    // A retry sends "next" again, which only asks ChatGPT for another prompt: nothing is spent or posted.
+    const chatGptResult = await this.retryStep('Writing the prompt in ChatGPT', say, async (n) => {
+      if (n > 1) say('Writing a new prompt in ChatGPT (second try)…');
+      return this.generatePromptViaChatGPT(false);
+    });
 
     const scriptPkg = chatGptResult.scriptPackage;
     const grokPrompt = scriptPkg.shot_briefs[0]?.video_prompt;
@@ -3094,7 +3159,16 @@ export class ChannelBrowserAgent {
 
     let grokRes: Awaited<ReturnType<typeof ChannelBrowserAgent.prototype.createVideoViaGrok>>;
     try {
-      grokRes = await this.createVideoViaGrok(grokPrompt, jobId, 1, false, effDuration, effResolution);
+      // Retried only when the failure came before the prompt was submitted: after that Grok may already charge for it.
+      grokRes = await this.retryStep(
+        'Setting up Grok',
+        say,
+        async (n) => {
+          if (n > 1) say('Generating the video in Grok (second try)…');
+          return this.createVideoViaGrok(grokPrompt, jobId, 1, false, effDuration, effResolution);
+        },
+        () => !this.grokSubmitted
+      );
     } catch (err: any) {
       if (err?.code === 'GROK_SERVER_FAILED') {
         throw new Error(
@@ -3153,6 +3227,7 @@ export class ChannelBrowserAgent {
       prompt: grokPrompt,
       videoPath: finalVideoPath,
       coverPath: thumbnailPath,
+      holdOnFlags: ch ? ch.hold_flagged_videos : false,
     });
     this.throwIfCancelled();
 
@@ -3199,4 +3274,21 @@ export class ChannelBrowserAgent {
       message: `ChatGPT prompt -> Grok video (${videoDuration}s${grokRes.width && grokRes.height ? ', ' + grokRes.width + 'x' + grokRes.height : ''}, original sound) -> QA ${qaResult.passed ? 'passed' : 'held'} -> TikTok: ${posted.tiktokStatus} -> YouTube: ${posted.youtubeStatus}`,
     };
   }
+}
+
+/** Errors a second attempt cannot fix: a stop, a sign-in that needs a person, a usage or upload limit. */
+const NOT_RETRYABLE = /not signed in|requires login|sign into|signed out|usage limit|weekly limit|credits?|quota|upgrade|daily upload limit|already being produced|server failed|no longer exists|missing from disk|nothing to post/i;
+
+export function isRetryableError(err: any): boolean {
+  if (!err) return false;
+  if (err.code === 'RUN_CANCELLED' || err.code === 'GROK_SERVER_FAILED') return false;
+  if (err.code === 'RUN_TIMEOUT') return true;
+  return !NOT_RETRYABLE.test(String(err.message || err));
+}
+
+/** First sentence of an error, without screenshot paths, for progress messages. */
+export function shortReason(err: any): string {
+  const text = String(err?.message || err || 'unknown error').replace(/\s*Screenshot:.*$/s, '').trim();
+  const first = text.split(/(?<=\.)\s/)[0];
+  return first.length > 140 ? first.slice(0, 137) + '…' : first;
 }

@@ -42,6 +42,7 @@ export function initDatabase(): void {
   addColumnIfMissing('jobs', 'tiktok_status', 'TEXT');
   addColumnIfMissing('jobs', 'youtube_status', 'TEXT');
   addColumnIfMissing('channels', 'keep_browser_open', 'INTEGER NOT NULL DEFAULT 1');
+  addColumnIfMissing('channels', 'hold_flagged_videos', 'INTEGER NOT NULL DEFAULT 0');
   db.exec(POST_MIGRATION_SQL);
 
   try {

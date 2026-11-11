@@ -60,6 +60,15 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
   posts the existing file (no new Grok credits) and re-runs the safety check first when none is on record.
 - Run status is in memory per channel (`getRunStatus`); every run is also a row in `runs`. On start the server closes out
   runs whose process died. A run owned by another live process (the scheduled job) blocks starting one from the app.
+- **Unattended recovery** (`dailyRunner.makeVideoUnattended`, `retryStep`, `server/engine/popups.ts`): pop-ups (cookie
+  banners, promos, "verify your phone", surveys) are closed automatically before clicks and during long waits; dialogs the
+  run needs are never touched. ChatGPT is retried once; Grok once only if the prompt was not yet submitted (credits); a
+  TikTok/YouTube upload once only when Post/Publish was never clicked (`success: false`). A run that fails before a video
+  exists starts over once with a fresh browser after 1 minute; a platform whose upload failed is posted again once after
+  2 minutes; an attempt stuck for 25 minutes is stopped (browser closed). Sign-in problems, usage limits and Stop are never
+  retried. Failures show a macOS notification. Rules: `isRetryableError`, `platformsToRepost`.
+- **Safety check** is advisory by default: flags are recorded and the video still posts. A channel with
+  `hold_flagged_videos` on holds flagged videos instead. A missing or broken video file always blocks.
 - Stop = `ChannelBrowserAgent.requestCancel()`: closes the browser; the step in flight fails and is reported as stopped.
   If Post was already clicked the platform may still publish.
 

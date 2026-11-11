@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS channels (
   schedule_enabled INTEGER NOT NULL DEFAULT 0,
   schedule_times TEXT NOT NULL DEFAULT '[]',
   keep_browser_open INTEGER NOT NULL DEFAULT 1, -- keep the channel's browser window open between videos
+  hold_flagged_videos INTEGER NOT NULL DEFAULT 0, -- 1: a safety-check hit holds the video for a person; 0: post anyway, record it
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

@@ -13,6 +13,8 @@ process.env.DATABASE_PATH = path.join(TEST_STORAGE, 'kindred_studio.db');
 delete process.env.KINDRED_CHANNELS_DIR;
 // Never write to ~/Library/LaunchAgents or call launchctl from a test.
 process.env.KINDRED_NO_LAUNCHD = '1';
+// Never show macOS notifications from a test.
+process.env.KINDRED_NO_NOTIFY = '1';
 
 /** Removes the temp storage folder. Call once at the end of each test file. */
 export function cleanup(): void {

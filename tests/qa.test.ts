@@ -59,6 +59,21 @@ async function runQaTests(): Promise<void> {
   assert.strictEqual(readyRow.state, 'ready_to_publish');
   console.log('ok valid video with clean prompt is ready_to_publish');
 
+  // Without the hold setting, flagged words are recorded but the video still posts; with it, the video is held.
+  const flagged = 'The apple is playing with fire in the kitchen.';
+  for (const [id, hold] of [['job_qa_warn', false], ['job_qa_hold', true]] as const) {
+    db.prepare(`
+      INSERT INTO jobs (id, channel_id, concept_title, format, age_band, hook, hypothesis, state, created_at, updated_at)
+      VALUES (?, 1, 'Test', 'short', 'all', 'hook', '', 'rendering', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `).run(id);
+    const r = await inspectJob(id, { title: 'Test', hook: 'hook', prompt: flagged, videoPath: goodPath, holdOnFlags: hold });
+    assert.strictEqual(r.passed, !hold, hold ? 'hold on: flagged video is held' : 'hold off: flagged video still posts');
+    assert(r.flaggedReasons.length > 0, 'the flag is recorded either way');
+    const row = db.prepare('SELECT state FROM jobs WHERE id = ?').get(id) as any;
+    assert.strictEqual(row.state, hold ? 'held_for_review' : 'ready_to_publish');
+  }
+  console.log('ok flags are warnings unless the channel holds flagged videos');
+
   console.log('--- ALL QA TESTS PASSED ---');
 }
 

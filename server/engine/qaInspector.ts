@@ -25,6 +25,11 @@ export interface InspectInput {
   prompt: string;
   videoPath: string;
   coverPath?: string | null;
+  /**
+   * true: a flagged word holds the video for a person. false (default): the flags are recorded as warnings and the
+   * video still posts. A missing or broken video file always blocks, whatever this says.
+   */
+  holdOnFlags?: boolean;
 }
 
 // Terms are phrases a kids' video prompt should not contain. Single words that are also harmless in everyday
@@ -91,7 +96,8 @@ export function scanTextForSafety(text: string): Flag[] {
  * The job row must already exist.
  */
 export async function inspectJob(jobId: string, input: InspectInput): Promise<QAResult> {
-  const flaggedReasons = scanTextForSafety(`${input.title} ${input.hook} ${input.prompt}`);
+  const textFlags = scanTextForSafety(`${input.title} ${input.hook} ${input.prompt}`);
+  const flaggedReasons: Flag[] = input.holdOnFlags ? textFlags : textFlags.map((f) => ({ ...f, severity: 'warning' as const }));
 
   // Video integrity: a missing or non-MP4/WebM file is critical; nothing can be posted without it.
   const videoValid = isValidVideoFile(input.videoPath);
@@ -106,10 +112,10 @@ export async function inspectJob(jobId: string, input: InspectInput): Promise<QA
 
   const criticalCount = flaggedReasons.filter((r) => r.severity === 'critical').length;
   const passed = criticalCount === 0;
-  const kidsSafeScore = criticalCount === 0 ? 1 : 0;
+  const kidsSafeScore = textFlags.length === 0 ? 1 : 0;
   const audioClarityScore = videoValid ? 1 : 0;
   const visualCoherenceScore = videoValid ? 1 : 0;
-  const overallScore = kidsSafeScore;
+  const overallScore = criticalCount === 0 ? 1 : 0;
   const reviewerAction = passed ? 'auto_passed' : 'held';
   const sampledFrames = input.coverPath ? [input.coverPath] : [];
 

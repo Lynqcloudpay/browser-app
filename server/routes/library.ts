@@ -7,6 +7,7 @@ import { route, sqliteToIso, megabytes } from './helpers';
 import { VIDEOS_DIR, FRAMES_DIR, THUMBNAILS_DIR } from '../paths';
 import { startRepublish, getRunStatus, isRunBusy } from '../engine/dailyRunner';
 import { inspectJob } from '../engine/qaInspector';
+import { getChannel } from '../engine/channels';
 
 /** Videos: every video the studio has made, with review, post-again and delete actions. */
 export const libraryRouter = Router();
@@ -179,7 +180,8 @@ libraryRouter.post(
     // Nothing is posted without a safety check on record: a video whose run died before the check gets it now.
     const cleared = row.qa_id && (row.qa_passed || row.qa_reviewer_action === 'manually_approved');
     if (!cleared) {
-      const qa = await inspectJob(row.id, { title: row.concept_title, hook: row.hook || '', prompt: row.script_text || '', videoPath: video.file });
+      const holdOnFlags = row.channel_id ? Boolean(getChannel(row.channel_id)?.hold_flagged_videos) : false;
+      const qa = await inspectJob(row.id, { title: row.concept_title, hook: row.hook || '', prompt: row.script_text || '', videoPath: video.file, holdOnFlags });
       if (!qa.passed) throw new HttpError(400, 'The safety check held this video. Review and approve it before posting.');
     }
 
