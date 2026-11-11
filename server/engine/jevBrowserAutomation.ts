@@ -3,7 +3,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { execFile, execSync } from 'child_process';
 import { promisify } from 'util';
-import { chromium, BrowserContext, Page, FileChooser } from 'playwright';
+import { chromium, BrowserContext, Page, FileChooser, Locator } from 'playwright';
 
 const execFileAsync = promisify(execFile);
 import db from '../db/database';
@@ -1377,6 +1377,77 @@ export class ChannelBrowserAgent {
   }
 
   /**
+   * Press Grok's Submit arrow — only when Grok is ready — and confirm Grok took it.
+   *
+   * While Grok is still processing the reference image (a spinner on its thumbnail; a big PNG can take tens of seconds)
+   * the Submit arrow is DISABLED, and a click or Enter is silently ignored. The old code checked once, pressed Enter
+   * anyway, and then waited 6 minutes for a video that had never started (Mr Watermelon's 2.3 MB image). So: wait until
+   * Submit is enabled, click, then require proof that Grok accepted it (the page moves to the result, a progress % shows,
+   * or the prompt box empties). If not, press Enter once. Throws, with nothing submitted, if Grok never takes it.
+   */
+  public async submitGrokPrompt(
+    page: Page,
+    textbox: Locator,
+    promptLength: number,
+    opts: { enableTimeoutMs?: number; acceptTimeoutMs?: number } = {}
+  ): Promise<void> {
+    const enableTimeoutMs = opts.enableTimeoutMs ?? 120_000;
+    const acceptTimeoutMs = opts.acceptTimeoutMs ?? 25_000;
+    const submitBtn = this.grokComposer(page).locator('button[aria-label="Submit"], button[type="submit"]').first();
+
+    const ready = await page
+      .waitForFunction(
+        () => {
+          const b = document.querySelector('form button[aria-label="Submit"]') as HTMLButtonElement | null;
+          return !!b && !b.disabled && b.getAttribute('aria-disabled') !== 'true';
+        },
+        undefined,
+        { timeout: enableTimeoutMs, polling: 250 }
+      )
+      .then(() => true)
+      .catch(() => false);
+    if (!ready) {
+      throw new Error(
+        `Grok's Submit button stayed disabled for ${Math.round(enableTimeoutMs / 1000)} seconds (it is still processing the reference image, or the prompt box is empty). Nothing was submitted.`
+      );
+    }
+
+    const accepted = async (): Promise<boolean> =>
+      page
+        .evaluate((len) => {
+          const text = document.body.innerText || '';
+          const box = document.querySelector('form [role="textbox"], form [contenteditable="true"], form textarea') as HTMLElement | null;
+          const boxLen = box ? (((box as any).value ?? box.innerText) || '').trim().length : 0;
+          return {
+            moved: location.pathname.includes('/imagine/post/'),
+            progress: /\b\d{1,2}%/.test(text),
+            emptied: boxLen < len * 0.3,
+          };
+        }, promptLength)
+        .then((r) => r.moved || r.progress || r.emptied)
+        .catch(() => false);
+    const waitAccepted = async (ms: number): Promise<boolean> => {
+      const end = Date.now() + ms;
+      while (Date.now() < end) {
+        if (await accepted()) return true;
+        await page.waitForTimeout(500);
+      }
+      return false;
+    };
+
+    await submitBtn.click({ timeout: 15_000 });
+    if (await waitAccepted(acceptTimeoutMs)) return;
+
+    // Not taken: Grok may have been mid-update. Try the keyboard once.
+    console.warn(`[ChannelBrowserAgent-${this.channelId}] Grok did not react to the Submit click; pressing Enter once.`);
+    await textbox.click({ timeout: 5000 }).catch(() => {});
+    await page.keyboard.press('Enter');
+    if (await waitAccepted(acceptTimeoutMs)) return;
+
+    throw new Error(`Grok did not accept the submit within ${Math.round((acceptTimeoutMs * 2) / 1000)} seconds (the page never started the video). Nothing was submitted.`);
+  }
+
+  /**
    * Attach the Mr. Apple reference image to the composer's OWN file input.
    * (The page has other hidden file inputs that open the image editor — never use those.)
    */
@@ -1583,13 +1654,11 @@ export class ChannelBrowserAgent {
       page.on('response', onResponse);
       listening = true;
 
-      // 5. Submit once
-      const submitBtn = this.grokComposer(page).locator('button[aria-label="Submit"], button[type="submit"]').first();
-      if (await submitBtn.isEnabled({ timeout: 5000 }).catch(() => false)) {
-        await submitBtn.click();
-      } else {
-        await textbox.click();
-        await page.keyboard.press('Enter');
+      // 5. Submit once — only when Grok is ready, and only counted as submitted once Grok has taken it.
+      try {
+        await this.submitGrokPrompt(page, textbox, grokPrompt.length);
+      } catch (err: any) {
+        await fail(err?.message || 'Grok did not accept the submit. Nothing was submitted.');
       }
       // From here on Grok may charge for the video, so a failure must not be retried automatically.
       this.grokSubmitted = true;
