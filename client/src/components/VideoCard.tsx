@@ -32,8 +32,14 @@ export function VideoCard({ video, showChannel, busy, actions }: VideoCardProps)
   const title = video.title?.trim() || video.hook?.trim() || 'Untitled video';
   const badge = BADGE[video.state];
   const BadgeIcon = badge.icon;
+  // Posted on one platform but failed or unconfirmed on the other: the file can be sent again to the missing one.
+  const platformProblems = (
+    [['TikTok', video.tiktok_status], ['YouTube', video.youtube_status]] as const
+  ).filter(([, status]) => status === 'failed' || status === 'submitted');
+  const partlyPosted = video.state === 'published' && platformProblems.length > 0;
   const canPost =
-    video.file_exists && (video.state === 'ready_to_publish' || video.state === 'failed' || video.state === 'scheduled');
+    video.file_exists &&
+    (video.state === 'ready_to_publish' || video.state === 'failed' || video.state === 'scheduled' || partlyPosted);
   const length = duration(video.duration_seconds);
   const meta = [showChannel ? video.channel_name : null, relativeTime(video.created_at), length || null]
     .filter(Boolean)
@@ -102,6 +108,14 @@ export function VideoCard({ video, showChannel, busy, actions }: VideoCardProps)
           </div>
         )}
 
+        {platformProblems.length > 0 && (
+          <p className="text-[13px] text-apple-deep">
+            {platformProblems
+              .map(([name, status]) => (status === 'failed' ? `${name}: did not post.` : `${name}: not confirmed, check the account.`))
+              .join(' ')}
+          </p>
+        )}
+
         {(video.tiktok_url || video.youtube_url) && (
           <div className="flex flex-wrap gap-3 text-[13px] font-semibold">
             {video.tiktok_url && (
@@ -130,7 +144,7 @@ export function VideoCard({ video, showChannel, busy, actions }: VideoCardProps)
           )}
           {canPost && (
             <Button size="sm" variant="primary" busy={mine === 'publish'} onClick={() => actions.publish(video)}>
-              {video.state === 'scheduled' ? 'Post again' : 'Post now'}
+              {partlyPosted ? `Post to ${platformProblems.map(([name]) => name).join(' and ')}` : video.state === 'scheduled' ? 'Post again' : 'Post now'}
             </Button>
           )}
         </div>

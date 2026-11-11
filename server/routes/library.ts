@@ -94,6 +94,16 @@ function getRow(id: string): any {
 
 const idParam = (req: Request) => String(req.params.id);
 
+/**
+ * Whether "Post now" is allowed. A video that reached one platform but failed or went unconfirmed on the other is
+ * "published" overall, and can still be sent again to the missing platform.
+ */
+export function canPostVideo(state: string, tiktokStatus?: string | null, youtubeStatus?: string | null): boolean {
+  const needsRetry = (status?: string | null) => status === 'failed' || status === 'submitted';
+  if (['ready_to_publish', 'failed', 'scheduled'].includes(state)) return true;
+  return state === 'published' && (needsRetry(tiktokStatus) || needsRetry(youtubeStatus));
+}
+
 libraryRouter.get(
   '/videos',
   route((req, res) => {
@@ -157,7 +167,7 @@ libraryRouter.post(
   '/videos/:id/publish',
   route(async (req, res) => {
     const row = getRow(idParam(req));
-    if (!['ready_to_publish', 'failed', 'scheduled'].includes(row.state)) {
+    if (!canPostVideo(row.state, row.tiktok_status, row.youtube_status)) {
       throw new HttpError(400, row.state === 'held_for_review' ? 'Approve this video first.' : 'This video cannot be posted from its current state.');
     }
     const video = locateMedia(row.video_path);

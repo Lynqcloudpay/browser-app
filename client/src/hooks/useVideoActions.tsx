@@ -69,11 +69,14 @@ export function useVideoActions(onChanged: () => void): VideoActionsResult {
     publish: (v) => {
       void (async () => {
         const again = v.state === 'scheduled';
+        const retry = v.state === 'published';
         const ok = await confirm({
           title: again ? `Post "${titleOf(v)}" again?` : `Post "${titleOf(v)}" now?`,
           body: again
             ? `TikTok or YouTube did not confirm the first attempt. Check the ${v.channel_name} account first so it is not posted twice.`
-            : `This posts "${titleOf(v)}" publicly to the platforms turned on for ${v.channel_name} that have not confirmed it yet.`,
+            : retry
+              ? `"${titleOf(v)}" is already posted somewhere. This sends it only to the platform that did not get it.`
+              : `This posts "${titleOf(v)}" publicly to the platforms turned on for ${v.channel_name} that have not confirmed it yet.`,
           confirmLabel: again ? 'Post again' : 'Post now',
         });
         if (!ok) return;

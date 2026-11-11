@@ -86,6 +86,12 @@ export function describeResult(result: PipelineResult, republish: boolean): { ok
       message: `${title} ${republish ? 'was not posted' : 'was made, but posting failed'}. ${parts}. The video is saved: use "Post now" on the Videos page to try again.`,
     };
   }
+  if (result.postFailed.length > 0) {
+    return {
+      ok: false,
+      message: `${title} ${republish ? 'was posted to part of what was asked' : 'was made and posted'}, but ${result.postFailed.join(' and ')} did not go through. ${parts}. Use "Post to ${result.postFailed.join(' and ')}" on the Videos page to try again.`,
+    };
+  }
   return { ok: true, message: `${republish ? 'Posted' : 'Made and posted'} ${title} (${Math.round(result.durationSeconds)}s). ${parts}.` };
 }
 

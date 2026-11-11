@@ -9,6 +9,7 @@ import { db } from '../server/db/database';
 import { createRun, updateRun, listRuns, closeInterruptedRuns } from '../server/engine/runs';
 import { stageFromStep, describeResult } from '../server/engine/dailyRunner';
 import { nextRunAt } from '../server/routes/api';
+import { canPostVideo } from '../server/routes/library';
 import { scanTextForSafety } from '../server/engine/qaInspector';
 import { shutdownAllAgents } from '../server/engine/agentRegistry';
 import type { PipelineResult } from '../server/engine/jevBrowserAutomation';
@@ -46,6 +47,7 @@ const result = (over: Partial<PipelineResult>): PipelineResult => ({
   youtubeVerified: false,
   postedEverywhere: false,
   postedAnywhere: false,
+  postFailed: [],
   message: '',
   ...over,
 });
@@ -79,6 +81,8 @@ async function main(): Promise<void> {
     assert(posted.ok && /Made and posted/.test(posted.message) && /TikTok: posted/.test(posted.message));
     const failed = describeResult(result({ tiktokStatus: 'failed', youtubeStatus: 'failed' }), false);
     assert(!failed.ok && /Post now/.test(failed.message), 'a made-but-unposted video is a failed run that points at Post now');
+    const partial = describeResult(result({ tiktokStatus: 'published', youtubeStatus: 'failed', postedAnywhere: true, postFailed: ['YouTube'] }), false);
+    assert(!partial.ok && /YouTube did not go through/.test(partial.message) && /Post to YouTube/.test(partial.message), 'a partial post is flagged, not reported as done');
     const held = describeResult(result({ qaPassed: false }), false);
     assert(held.ok && /held/.test(held.message));
     console.log('ok run results are worded and classified correctly');
@@ -102,6 +106,15 @@ async function main(): Promise<void> {
       assert(scanTextForSafety(risky).length > 0, `"${risky}" must be held`);
     }
     console.log('ok safety scan phrases');
+
+    // ── Which videos can be posted again ──
+    assert(canPostVideo('ready_to_publish') && canPostVideo('failed') && canPostVideo('scheduled'));
+    assert(canPostVideo('published', 'published', 'failed'), 'posted on TikTok, failed on YouTube: retry the missing one');
+    assert(canPostVideo('published', 'submitted', 'published'), 'posted but unconfirmed on one platform: can be sent again');
+    assert(!canPostVideo('published', 'published', 'published'), 'posted everywhere: nothing to send');
+    assert(!canPostVideo('published', null, null), 'older videos with no per-platform record are not offered again');
+    assert(!canPostVideo('held_for_review') && !canPostVideo('rejected'));
+    console.log('ok post-again rules');
 
     // ── Run history ──
     const runId = createRun(1, 'button', 'Opening…');

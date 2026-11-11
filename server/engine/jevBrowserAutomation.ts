@@ -65,6 +65,8 @@ export interface PipelineResult {
   postedEverywhere: boolean;
   /** True when at least one platform accepted the post (confirmed or not). */
   postedAnywhere: boolean;
+  /** Platforms attempted in this pass that did not go through, e.g. ["YouTube"]. */
+  postFailed: string[];
   message: string;
 }
 
@@ -2338,8 +2340,20 @@ export class ChannelBrowserAgent {
       }
     };
 
+    // YouTube sometimes stops the upload dialog with a modal ("Unlock more on YouTube": custom thumbnails need a
+    // verified phone number). Its backdrop blocks every click behind it, so cancel it whenever it shows up.
+    const dismissYouTubeNag = async () => {
+      if (!(await page.getByText(/unlock more on youtube|verify your phone number/i).first().isVisible().catch(() => false))) return false;
+      console.log('[ChannelBrowserAgent] YouTube showed a "verify your phone number" prompt — dismissing it.');
+      const cancel = page.getByRole('button', { name: /^Cancel$/i }).last();
+      if (await cancel.isVisible().catch(() => false)) await cancel.click({ timeout: 4000 }).catch(() => {});
+      else await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(600);
+      return true;
+    };
+
     // No native "choose a file" window may ever open: intercept pickers, and only feed the one we open on purpose.
-    let chooserFile: string | null = null;
+    const chooserFile: string | null = null; // no file is ever offered to a picker; any picker that opens is cancelled
     const onChooser = async (chooser: FileChooser) => {
       if (chooserFile) await chooser.setFiles(chooserFile).catch(() => {});
     };
@@ -2407,16 +2421,8 @@ export class ChannelBrowserAgent {
       const alteredNo = page.locator('[name="VIDEO_HAS_ALTERED_CONTENT_NO"]').first();
       if (await visible(alteredNo, 1500)) await alteredNo.click().catch(() => {});
 
-      // Custom thumbnail (best effort; YouTube only allows it on verified channels).
-      if (opts.coverPath && fs.existsSync(opts.coverPath)) {
-        const thumbBtn = page.getByRole('button', { name: /upload (file|thumbnail)/i }).first();
-        if (await visible(thumbBtn, 2500)) {
-          chooserFile = opts.coverPath;
-          await thumbBtn.click().catch(() => {});
-          await page.waitForTimeout(3000);
-          chooserFile = null;
-        }
-      }
+      // No custom thumbnail: YouTube only allows one on phone-verified channels and otherwise opens a modal that blocks
+      // the whole dialog (this stopped every upload). A Short gets an automatic frame as its thumbnail.
       await snap('details');
 
       // 4. Next ×3 (Video elements → Checks → Visibility).
@@ -2427,6 +2433,7 @@ export class ChannelBrowserAgent {
             return !!b && b.getAttribute('aria-disabled') !== 'true';
           }, undefined, { timeout: 60000 })
           .catch(() => {});
+        await dismissYouTubeNag();
         await page.locator('#next-button').first().click({ timeout: 15000 });
         await page.waitForTimeout(1500);
       }
@@ -2441,24 +2448,44 @@ export class ChannelBrowserAgent {
       else throw new Error('Could not find the visibility choice (Public / Private).');
       await snap('visibility');
 
-      // 6. Publish — the button stays disabled until the upload itself has finished.
+      // 6. Wait for the upload itself to finish. The Publish button is ENABLED while the file is still uploading
+      // ("Uploading 78% … 9 seconds left"), so the button is not a finished signal: clicking it then, and closing the
+      // dialog afterwards, cancelled the upload and nothing reached YouTube. The progress text in the dialog footer is.
       console.log('[ChannelBrowserAgent] Waiting for the YouTube upload to finish, then publishing...');
-      await page
-        .waitForFunction(() => {
+      const uploadDone = () =>
+        page.waitForFunction(() => {
+          const dialog = document.querySelector('ytcp-uploads-dialog');
+          const text = ((dialog as HTMLElement | null)?.innerText || '');
+          if (!dialog) return false; // the dialog is gone: not a finished upload
+          if (/uploading\s*\d+\s*%/i.test(text) || /uploading\s*\.\.\./i.test(text)) return false;
           const b = document.querySelector('#done-button');
           return !!b && b.getAttribute('aria-disabled') !== 'true';
-        }, undefined, { timeout: 10 * 60 * 1000 })
-        .catch(() => {
-          throw new Error('YouTube did not finish processing the upload within 10 minutes.');
-        });
+        }, undefined, { timeout: 10 * 60 * 1000, polling: 1000 });
+      await uploadDone().catch(() => {
+        throw new Error('YouTube did not finish uploading the video within 10 minutes.');
+      });
+      await snap('upload_finished');
+      // The video's address is shown in the dialog from the moment the file is uploaded.
+      const dialogLink = await page
+        .locator('ytcp-uploads-dialog a[href*="/shorts/"], ytcp-uploads-dialog a[href*="youtu.be/"], ytcp-uploads-dialog a[href*="watch?v="]')
+        .first()
+        .getAttribute('href', { timeout: 3000 })
+        .catch(() => null);
       await page.locator('#done-button').first().click({ timeout: 15000 });
 
-      // 7. Confirmation dialog with the video link.
-      const link = page.locator('ytcp-video-share-dialog a[href], a[href*="/shorts/"], a[href*="youtu.be/"], a[href*="watch?v="]').first();
-      const published = await link.waitFor({ state: 'visible', timeout: 90000 }).then(() => true).catch(() => false);
-      const shareUrl = published ? await link.getAttribute('href').catch(() => null) : null;
+      // 7. Only YouTube's own confirmation dialog counts: "Video published", or "Video processing" (a Short is public once its
+      // SD version has processed; checks already passed). A link elsewhere on the page does not count: the upload dialog
+      // itself carries the video's link before anything is published.
+      const confirmation = page.getByText(/^\s*Video (published|processing)\s*$/i).first();
+      const published = await confirmation.waitFor({ state: 'visible', timeout: 120000 }).then(() => true).catch(() => false);
+      let shareUrl: string | null = null;
+      if (published) {
+        shareUrl =
+          (await page.locator('ytcp-video-share-dialog').locator('a[href*="/shorts/"], a[href*="youtu.be/"], a[href*="watch?v="]').first().getAttribute('href', { timeout: 1500 }).catch(() => null)) ||
+          dialogLink;
+      }
       await snap(published ? 'published' : 'unconfirmed');
-      await page.getByRole('button', { name: /^Close$/i }).first().click({ timeout: 4000 }).catch(() => {});
+      if (published) await page.getByRole('button', { name: /^Close$/i }).first().click({ timeout: 4000 }).catch(() => {});
 
       if (published) {
         console.log(`[ChannelBrowserAgent] Video published on YouTube: ${shareUrl}`);
@@ -2871,7 +2898,7 @@ export class ChannelBrowserAgent {
     youtubeMadeForKids: boolean;
     previous?: { tiktokStatus?: string | null; tiktokUrl?: string | null; youtubeStatus?: string | null; youtubeUrl?: string | null };
     say: (step: string, kind?: 'running' | 'waiting_login') => void;
-  }): Promise<Pick<PipelineResult, 'tiktokStatus' | 'tiktokVerified' | 'tiktokUrl' | 'youtubeStatus' | 'youtubeVerified' | 'youtubeUrl' | 'postedEverywhere' | 'postedAnywhere'>> {
+  }): Promise<Pick<PipelineResult, 'tiktokStatus' | 'tiktokVerified' | 'tiktokUrl' | 'youtubeStatus' | 'youtubeVerified' | 'youtubeUrl' | 'postedEverywhere' | 'postedAnywhere' | 'postFailed'>> {
     const { say } = input;
     let tiktokStatus = input.previous?.tiktokStatus || 'off';
     let tiktokUrl: string | undefined = input.previous?.tiktokUrl || undefined;
@@ -2930,6 +2957,10 @@ export class ChannelBrowserAgent {
     const postedEverywhere = attempted.length > 0 && attempted.every(Boolean);
     const anyPublished = tiktokStatus === 'published' || youtubeStatus === 'published';
     const anySubmitted = tiktokStatus === 'submitted' || youtubeStatus === 'submitted';
+    // What THIS pass did. A platform posted by an earlier run must not make a failed retry look like a success.
+    const accepted = (status: string) => status === 'published' || status === 'submitted';
+    const postedNow = (input.tiktok && accepted(tiktokStatus)) || (input.youtube && accepted(youtubeStatus));
+    const postFailed = [input.tiktok && !accepted(tiktokStatus) ? 'TikTok' : '', input.youtube && !accepted(youtubeStatus) ? 'YouTube' : ''].filter(Boolean);
     // 'scheduled' = Post was clicked somewhere but no platform confirmed; 'failed' = the video exists and nothing went out.
     const finalState = anyPublished ? 'published' : anySubmitted ? 'scheduled' : 'failed';
 
@@ -2956,7 +2987,8 @@ export class ChannelBrowserAgent {
       youtubeVerified,
       youtubeUrl,
       postedEverywhere,
-      postedAnywhere: anyPublished || anySubmitted,
+      postedAnywhere: postedNow,
+      postFailed,
     };
   }
 
@@ -3088,6 +3120,7 @@ export class ChannelBrowserAgent {
         youtubeUrl: undefined,
         postedEverywhere: false,
         postedAnywhere: false,
+        postFailed: [],
       };
     }
 
