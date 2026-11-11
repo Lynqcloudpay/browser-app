@@ -29,3 +29,7 @@ storage/*.db*
 # local Claude Code settings (machine-specific)
 .claude/settings.local.json
 .serena/
+
+# screenshots from debugging scripts never belong in the repo
+/*.png
+/*.jpg
