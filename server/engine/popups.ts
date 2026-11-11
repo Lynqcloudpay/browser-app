@@ -27,6 +27,44 @@ export const COOKIE_REJECT = /^\s*(reject all|reject optional cookies|decline( a
 
 const DIALOGS = '[role="dialog"], [role="alertdialog"], [aria-modal="true"], tp-yt-paper-dialog, ytcp-dialog';
 
+/** Icon-only close buttons on promo cards (e.g. Grok's "Shape your scene" card has an × labelled "Dismiss"). */
+const CLOSE_ICON = 'button[aria-label="Dismiss" i], button[aria-label="Close" i], button[aria-label="Not now" i]';
+
+/**
+ * Promo cards that are NOT marked as dialogs (a plain floating <div>, like Grok's "Shape your scene, start to finish …
+ * Try it now"). Marks the innermost small box (≤ 600 characters) whose text is a known nag and that has its own
+ * close/"not now" button, with data-kindred-nag. Returns how many were marked.
+ */
+async function markNagCards(page: Page): Promise<number> {
+  return page
+    .evaluate(
+      ({ src, flags }) => {
+        const nag = new RegExp(src, flags);
+        const closeLabel = /^\s*(dismiss|close|not now|maybe later|no,? thanks|skip( for now)?|×|✕)\s*$/i;
+        document.querySelectorAll('[data-kindred-nag]').forEach((e) => e.removeAttribute('data-kindred-nag'));
+        const cards: Element[] = [];
+        for (const el of Array.from(document.querySelectorAll('div, aside, section'))) {
+          const r = el.getBoundingClientRect();
+          if (r.width < 100 || r.height < 40) continue;
+          const text = ((el as HTMLElement).innerText || '').trim();
+          if (text.length < 10 || text.length > 600 || !nag.test(text)) continue;
+          const hasClose = Array.from(el.querySelectorAll('button')).some((b) => {
+          const br = b.getBoundingClientRect();
+            if (br.width <= 0 || br.height <= 0) return false;
+            const label = (b.getAttribute('aria-label') || '').trim() || ((b as HTMLElement).innerText || '').trim();
+            return closeLabel.test(label);
+          });
+          if (hasClose) cards.push(el);
+        }
+        const innermost = cards.filter((c) => !cards.some((o) => o !== c && c.contains(o)));
+        innermost.forEach((e) => e.setAttribute('data-kindred-nag', '1'));
+        return innermost.length;
+      },
+      { src: NAG_TEXT.source, flags: NAG_TEXT.flags }
+    )
+    .catch(() => 0);
+}
+
 /** Index of the button that safely closes a nag dialog, or -1 when it has none (then Escape is pressed). */
 export function pickSafeButton(labels: string[]): number {
   const usable = labels.map((label, i) => ({ label: label.trim(), i })).filter((b) => b.label && !UNSAFE_BUTTON.test(b.label));
@@ -84,6 +122,10 @@ export async function dismissPopups(page: Page): Promise<string[]> {
         const what = await closeNag(page, nags.first());
         if (what) closed.push(what);
         acted = true;
+      } else if ((await markNagCards(page)) > 0) {
+        const what = await closeNag(page, page.locator('[data-kindred-nag]').first());
+        if (what) closed.push(what);
+        acted = true;
       }
       if (!acted) break;
     }
@@ -106,6 +148,15 @@ export async function installPopupGuards(page: Page): Promise<void> {
   await page
     .addLocatorHandler(nag, async (dialog) => {
       const what = await closeNag(page, dialog);
+      if (what) console.log(`[popups] Cleared before an action: ${what}`);
+    }, { noWaitAfter: true, times: 20 })
+    .catch(() => {});
+  // Promo cards that are not dialogs: present while some box holds nag text AND an icon close button.
+  const card = page.locator('div, aside, section').filter({ hasText: NAG_TEXT }).filter({ has: page.locator(CLOSE_ICON) }).first();
+  await page
+    .addLocatorHandler(card, async () => {
+      if ((await markNagCards(page)) === 0) return;
+      const what = await closeNag(page, page.locator('[data-kindred-nag]').first());
       if (what) console.log(`[popups] Cleared before an action: ${what}`);
     }, { noWaitAfter: true, times: 20 })
     .catch(() => {});

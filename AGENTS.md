@@ -92,6 +92,7 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
 - **No ffmpeg.** The raw Grok video goes straight to the platforms.
 - **YouTube** goes through Studio's upload dialog: answers "made for kids" from the channel, always publishes Public, saves
   screenshots to `storage/frames/youtube_*.png`. YouTube sign-in is optional: after 4 minutes unsigned the run posts to TikTok only.
+- **Pop-ups that are not dialogs:** Grok's "Shape your scene, start to finish … Try it now" promo is a plain floating `<div>` (no `role=dialog`) with an icon button labelled "Dismiss". `popups.ts` marks small boxes (≤ 600 chars) whose text is a known nag AND that have their own Dismiss/Close/Not now button, and closes them with that button — never "Try it now". Covered by `tests/popups.test.ts`.
 - **File pickers:** TikTok's "Upload cover" opens a native Mac window unless a `filechooser` listener intercepts it. Keep them.
 - **Multi-channel:** each channel has its own browser context, reference image, ChatGPT chat, Grok settings, destinations and
   LaunchAgent (`com.kindredstudio.channel.<id>` → `scripts/dailyRun.ts --channel <id>`). Grok generations are throttled by

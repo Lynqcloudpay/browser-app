@@ -64,7 +64,35 @@ async function main(): Promise<void> {
     assert.strictEqual(await page.locator('#late').count(), 0, 'the survey was closed first');
     console.log('ok a pop-up in the way is cleared before a click');
 
-    // 3. A page with nothing to close is left as it is.
+    // 3. Grok's "Shape your scene" card is a plain floating <div>, not a dialog. It is closed with its "Dismiss" ×,
+    //    never with "Try it now"; a busy upload box with a Cancel button is never touched.
+    const grokCard = `<div id="promo" style="position:fixed;left:20px;bottom:20px;width:520px;height:480px;background:#fff">
+        <div><button aria-label="Dismiss" onclick="document.getElementById('promo').remove()">✕</button></div>
+        <h3>Shape your scene, start to finish</h3><p>Choose your first and last frames, or create seamless loops.</p>
+        <button onclick="document.body.dataset.tried=1">Try it now</button></div>`;
+    const uploadBox = `<div id="busy" style="position:fixed;right:20px;top:20px;width:300px;height:120px"><p>Uploading video… 43%</p><button aria-label="Close" onclick="document.getElementById('busy').remove()">✕</button></div>`;
+    await page.setContent(`<!doctype html><body><div id="grok-app-root"><div contenteditable="true">MR. WATERMELON prompt</div>
+      <button id="submit" aria-label="Submit" onclick="document.body.dataset.sent=1">↑</button>${grokCard}${uploadBox}</div></body>`);
+    const grokClosed = await dismissPopups(page);
+    assert.strictEqual(await page.locator('#promo').count(), 0, 'the floating Grok promo is closed');
+    assert.strictEqual(await page.evaluate(() => document.body.dataset.tried), undefined, '"Try it now" is never pressed');
+    assert.strictEqual(await page.locator('#busy').count(), 1, 'a box that is not a nag is left alone');
+    assert(grokClosed.some((c) => /Dismiss|✕/.test(c) && /Shape your scene/.test(c)), `closed with its Dismiss × (got ${grokClosed.join(' | ')})`);
+    console.log('ok floating Grok promo closed with Dismiss');
+
+    //    The same card appearing while the app is about to click Submit is cleared first.
+    const fresh = await context.newPage();
+    await fresh.setContent(`<!doctype html><body><div id="grok-app-root"><div contenteditable="true">MR. WATERMELON prompt</div>
+      <button id="submit" aria-label="Submit" style="position:fixed;left:40px;bottom:40px" onclick="document.body.dataset.sent=1">↑</button>${grokCard}</div></body>`);
+    await installPopupGuards(fresh);
+    await fresh.locator('#submit').click({ timeout: 8000 });
+    assert.strictEqual(await fresh.evaluate(() => document.body.dataset.sent), '1', 'Submit went through');
+    assert.strictEqual(await fresh.locator('#promo').count(), 0, 'the promo covering Submit was closed first');
+    assert.strictEqual(await fresh.evaluate(() => document.body.dataset.tried), undefined, '"Try it now" is never pressed');
+    await fresh.close();
+    console.log('ok floating Grok promo cleared before a click');
+
+    // 4. A page with nothing to close is left as it is.
     await page.setContent('<!doctype html><body><p>Type to imagine</p></body>');
     assert.deepStrictEqual(await dismissPopups(page), []);
     console.log('ok quiet page untouched');
