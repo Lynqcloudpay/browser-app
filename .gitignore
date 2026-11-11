@@ -28,3 +28,4 @@ storage/*.db*
 
 # local Claude Code settings (machine-specific)
 .claude/settings.local.json
+.serena/
