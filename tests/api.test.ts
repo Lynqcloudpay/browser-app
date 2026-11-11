@@ -70,6 +70,21 @@ async function runApiTests(): Promise<void> {
     assert.strictEqual(((await patched.json()) as any).hashtag_hint, '#ApiTest');
     console.log('ok PATCH /api/channels/:id');
 
+    // Warm browser: on by default, can be switched off, and the window state is reported.
+    assert.strictEqual(newChannel.keep_browser_open, true, 'new channels keep their browser open by default');
+    const warmOff: any = await (await fetch(`${base}/api/channels/${newId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keep_browser_open: false }),
+    })).json();
+    assert.strictEqual(warmOff.keep_browser_open, false);
+    const view: any = await (await fetch(`${base}/api/channels/${newId}`)).json();
+    assert.strictEqual(view.browserOpen, false, 'no window is open in tests');
+    const closed: any = await (await fetch(`${base}/api/channels/${newId}/close-browser`, { method: 'POST' })).json();
+    assert.strictEqual(closed.success, true);
+    assert(/already closed/.test(closed.message));
+    console.log('ok keep_browser_open setting, browserOpen state, close-browser');
+
     const deleted = await fetch(`${base}/api/channels/${newId}`, { method: 'DELETE' });
     assert.strictEqual(deleted.status, 200);
     assert.deepStrictEqual(await deleted.json(), { success: true });

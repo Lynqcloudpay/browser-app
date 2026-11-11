@@ -26,6 +26,8 @@ export interface Channel {
   post_tiktok: boolean;
   post_youtube: boolean;
   youtube_made_for_kids: boolean;
+  /** Keep the channel's browser window open between videos (on by default). */
+  keep_browser_open: boolean;
   hashtag_hint: string;
   schedule_enabled: boolean;
   schedule_times: string[];
@@ -82,6 +84,8 @@ export interface Run {
 
 export interface ChannelView extends Channel {
   hasReferenceImage: boolean;
+  /** Whether the channel's browser window is open right now. */
+  browserOpen: boolean;
   runStatus: RunStatus;
   accounts: AccountsOverview;
   stats: ChannelStats;

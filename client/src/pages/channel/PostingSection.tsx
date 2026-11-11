@@ -9,7 +9,9 @@ export function PostingSection({ channel, patch }: { channel: ChannelView; patch
   const toast = useToast();
   const [saving, setSaving] = useState(false);
 
-  const save = async (change: Partial<Pick<ChannelView, 'post_tiktok' | 'post_youtube' | 'youtube_made_for_kids'>>) => {
+  const save = async (
+    change: Partial<Pick<ChannelView, 'post_tiktok' | 'post_youtube' | 'youtube_made_for_kids' | 'keep_browser_open'>>,
+  ) => {
     setSaving(true);
     try {
       await patch(change);
@@ -40,6 +42,14 @@ export function PostingSection({ channel, patch }: { channel: ChannelView; patch
           </Switch>
         </div>
       )}
+      <div className="border-t border-line pt-4">
+        <Switch checked={channel.keep_browser_open} disabled={saving} onChange={(v) => void save({ keep_browser_open: v })}>
+          <span className="block font-semibold">Keep the browser open between videos</span>
+          <span className="block text-[14px] text-ink-soft">
+            Faster: the next video skips opening the browser and checking logins. The TikTok and YouTube tabs are closed after each post to save memory.
+          </span>
+        </Switch>
+      </div>
       {nothingOn && <p className="text-[14px] font-medium text-honey-ink">Turn on at least one platform to make videos.</p>}
     </Section>
   );

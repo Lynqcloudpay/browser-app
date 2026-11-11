@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { ImageIcon } from 'lucide-react';
+import { AppWindow, ImageIcon } from 'lucide-react';
 import { clock, relativeTime } from '../format';
 import { LOGIN_SITES, RUN_STATE_LABEL, isAccountBusy, isRunBusy, platformsText, stageLabel } from '../labels';
 import { cx } from '../cx';
@@ -85,6 +85,12 @@ export function ChannelCard({ channel: ch, starting, onMake }: ChannelCardProps)
             Posts to: {platforms || 'nowhere yet'}
           </p>
           <p className="mt-0.5 text-[14px] text-ink-soft">{scheduleLine(ch)}</p>
+          {ch.browserOpen && (
+            <p className="mt-0.5 flex items-center gap-1.5 text-[13px] text-ink-soft">
+              <AppWindow className="size-3.5" aria-hidden="true" />
+              Browser open
+            </p>
+          )}
         </div>
       </div>
 

@@ -82,6 +82,8 @@ export class ChannelBrowserAgent {
   private skipLogin = false;
   private accountCancel = false;
   private cancelRequested = false;
+  /** When each site last looked signed in, in the window that is open now. Cleared whenever the window closes. */
+  private siteVerifiedAt = new Map<AccountKey, number>();
 
   constructor(channelId = 1) {
     this.channelId = channelId;
@@ -174,6 +176,7 @@ export class ChannelBrowserAgent {
           this.activeInteractiveContext = context;
           context.on('close', () => {
             if (this.activeInteractiveContext === context) this.activeInteractiveContext = null;
+            this.siteVerifiedAt.clear();
           });
           return context;
         })
@@ -1774,10 +1777,37 @@ export class ChannelBrowserAgent {
   /** Save logins and close the browser (used by the scheduled job, which should not leave a window behind). */
   public async shutdown(): Promise<void> {
     const ctx = this.activeInteractiveContext;
+    this.siteVerifiedAt.clear();
     if (!ctx) return;
     await this.saveCookies(ctx);
     this.activeInteractiveContext = null;
     await ctx.close().catch(() => {});
+  }
+
+  /** Whether this channel's browser window is open right now. */
+  public isBrowserOpen(): boolean {
+    return Boolean(this.activeInteractiveContext);
+  }
+
+  /** The channel's "keep the browser open between videos" setting (on unless switched off). */
+  private keepBrowserOpen(): boolean {
+    const ch = getChannel(this.channelId);
+    return ch ? ch.keep_browser_open !== false : true;
+  }
+
+  /**
+   * Frees the memory held by finished tabs (TikTok Studio, YouTube Studio) while the window stays open. The upload
+   * steps open a fresh tab the next time they need one. The last tab is blanked instead of closed, so the window stays.
+   */
+  private async releaseTabs(hosts: string[]): Promise<void> {
+    const ctx = this.activeInteractiveContext;
+    if (!ctx) return;
+    for (const page of ctx.pages()) {
+      if (page.isClosed() || !hosts.some((h) => page.url().includes(h))) continue;
+      const open = ctx.pages().filter((p) => !p.isClosed());
+      if (open.length > 1) await page.close({ runBeforeUnload: false }).catch(() => {});
+      else await page.goto('about:blank').catch(() => {});
+    }
   }
 
   /**
@@ -1911,6 +1941,23 @@ export class ChannelBrowserAgent {
     fs.mkdirSync(framesDir, { recursive: true });
     this.skipLogin = false;
 
+    // A warm window that already confirmed a site recently does not need to load and check it again: that check
+    // loaded all four sites at once and was the slowest part of every run. A step that lands on a sign-in page
+    // still fails clearly, and any failed run clears these marks so the next run checks everything.
+    const WARM_LOGIN_MS = 6 * 60 * 60 * 1000;
+    const recentlyVerified = (key: SiteKey) => {
+      const at = this.siteVerifiedAt.get(key);
+      return at !== undefined && Date.now() - at < WARM_LOGIN_MS;
+    };
+    const alreadyFine = sites.filter((site) => recentlyVerified(site.key));
+    if (alreadyFine.length === sites.length) {
+      say('Browser is already open and signed in. Skipping the login check.');
+      return { skipped };
+    }
+    if (alreadyFine.length > 0) {
+      sites.splice(0, sites.length, ...sites.filter((site) => !recentlyVerified(site.key)));
+    }
+
     // 1. One tab per site, all loading at once so the operator sees them open immediately.
     say(`Opening ${sites.map((x) => x.name).join(', ')}…`);
     const pages: Page[] = [];
@@ -1942,7 +1989,10 @@ export class ChannelBrowserAgent {
       }
       console.log(`[ChannelBrowserAgent-${this.channelId}] ${site.name} login check: ${st.state} (${st.why})`);
       recordAccountStatus(site.key, st.state, this.channelId);
-      if (st.state !== 'out') continue;
+      if (st.state !== 'out') {
+        this.siteVerifiedAt.set(site.key, Date.now());
+        continue;
+      }
 
       await page.screenshot({ path: path.join(framesDir, `login_wait_${site.key}.png`) }).catch(() => {});
       await page.bringToFront().catch(() => {});
@@ -1990,6 +2040,7 @@ export class ChannelBrowserAgent {
       if (!ok) throw new Error(`${site.name} is not signed in. Run again and sign into ${site.name} in the browser window.`);
       say(`${site.name} signed in.`);
       recordAccountStatus(site.key, 'in', this.channelId);
+      this.siteVerifiedAt.set(site.key, Date.now());
       await page.waitForTimeout(1500);
       await this.saveCookies(context);
     }
@@ -2065,8 +2116,11 @@ export class ChannelBrowserAgent {
       }
       console.log(`[ChannelBrowserAgent-${this.channelId}] ${cfg.name} account check: ${st.state} (${st.why})`);
       recordAccountStatus(key, st.state, this.channelId);
+      if (st.state === 'out') this.siteVerifiedAt.delete(key);
+      else this.siteVerifiedAt.set(key, Date.now());
     }
-    await this.shutdown();
+    if (this.keepBrowserOpen()) await this.releaseTabs(['tiktok.com', 'youtube.com']);
+    else await this.shutdown();
   }
 
   /**
@@ -2807,15 +2861,16 @@ export class ChannelBrowserAgent {
     this.cancelRequested = false;
     try {
       const result = await fn();
-      if (result.postedEverywhere) {
-        // Every place we posted to confirmed it: close the window so the next video starts from a clean browser.
-        onProgress?.('Posted. Closing the browser so it is fresh for the next video…');
-        console.log(`[ChannelBrowserAgent-${this.channelId}] All posts verified — closing the browser window.`);
+      if (result.postedEverywhere && !this.keepBrowserOpen()) {
+        // The channel asked for a closed window between videos.
+        onProgress?.('Posted. Closing the browser window…');
         await new Promise((r) => setTimeout(r, 3000));
         await this.shutdown();
       }
       return result;
     } catch (err) {
+      // Something went wrong: check every login again next time rather than trusting the warm window.
+      this.siteVerifiedAt.clear();
       // A stop closes the browser under the running step, so that step fails with some Playwright error: report the stop.
       if (this.cancelRequested) throw this.cancelledError();
       throw err;
@@ -2951,6 +3006,13 @@ export class ChannelBrowserAgent {
       }
     }
     this.throwIfCancelled();
+
+    // Posting tabs are the heaviest pages and are not needed until the next video: free them once the platform
+    // confirmed the post. A tab whose post failed stays open so the problem can be seen.
+    if (this.keepBrowserOpen()) {
+      const done = [input.tiktok && tiktokVerified ? 'tiktok.com' : '', input.youtube && youtubeVerified ? 'youtube.com' : ''].filter(Boolean);
+      if (done.length) await this.releaseTabs(done);
+    }
 
     const attempted = [input.tiktok ? tiktokVerified : null, input.youtube ? youtubeVerified : null].filter((v) => v !== null);
     // The browser window may close only when every place we posted to in this pass confirmed the post.

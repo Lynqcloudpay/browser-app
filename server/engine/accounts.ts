@@ -61,7 +61,7 @@ export function startCheck(channelId = 1): { started: boolean; reason?: string }
   const agent = getAgent(channelId);
   void agent.checkAccounts(say)
     .then(() => {
-      channelOps.set(channelId, { ...getOp(channelId), state: 'done', step: 'Finished checking. The browser window is closed.', finishedAt: new Date().toISOString() });
+      channelOps.set(channelId, { ...getOp(channelId), state: 'done', step: agent.isBrowserOpen() ? 'Finished checking. The browser stays open for the next video; the TikTok and YouTube tabs were closed.' : 'Finished checking. The browser window is closed.', finishedAt: new Date().toISOString() });
     })
     .catch(async (err: any) => {
       await agent.shutdown().catch(() => {});

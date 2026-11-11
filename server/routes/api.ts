@@ -6,10 +6,10 @@ import { route } from './helpers';
 import { libraryRouter } from './library';
 import { systemRouter } from './system';
 import { listRuns, lastRun } from '../engine/runs';
-import { startRun, getRunStatus, cancelRun, postedTodayCount } from '../engine/dailyRunner';
+import { startRun, getRunStatus, cancelRun, postedTodayCount, isRunBusy } from '../engine/dailyRunner';
 import db from '../db/database';
 import { getChannelSchedule, setChannelSchedule, syncChannelLaunchAgent } from '../engine/dailySchedule';
-import { getAccountsOverview, startCheck, startSwitch, cancelAccountOp } from '../engine/accounts';
+import { getAccountsOverview, startCheck, startSwitch, cancelAccountOp, isAccountOpBusy } from '../engine/accounts';
 import { AccountKey } from '../engine/accountStatus';
 import {
   listChannels,
@@ -84,6 +84,7 @@ function channelView(c: Channel) {
     },
     lastRun: lastRun(c.id),
     nextRunAt: nextRunAt(c),
+    browserOpen: getAgent(c.id).isBrowserOpen(),
   };
 }
 
@@ -332,6 +333,20 @@ apiRouter.post(
   route(async (req, res) => {
     const { id } = existingChannel(req);
     res.json(await getAgent(id).openInteractiveSession());
+  })
+);
+
+// Closes the channel's browser window to free its memory. Logins stay saved; the next video reopens it.
+apiRouter.post(
+  '/channels/:id/close-browser',
+  route(async (req, res) => {
+    const { id } = existingChannel(req);
+    if (isRunBusy(id)) throw new HttpError(409, 'This channel is making or posting a video. Stop it first, or wait for it to finish.');
+    if (isAccountOpBusy(id)) throw new HttpError(409, 'A login check or account switch is using the browser. Wait for it to finish.');
+    const agent = getAgent(id);
+    const wasOpen = agent.isBrowserOpen();
+    await agent.shutdown();
+    res.json({ success: true, message: wasOpen ? 'Browser window closed. Logins are saved.' : 'The browser window was already closed.' });
   })
 );
 

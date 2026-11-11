@@ -111,6 +111,8 @@ export const api = {
       body: file,
     }),
   openBrowser: (id: number) => request<unknown>(`/api/channels/${id}/open-browser`, { method: 'POST', json: {} }),
+  closeBrowser: (id: number) =>
+    request<{ success: boolean; message: string }>(`/api/channels/${id}/close-browser`, { method: 'POST', json: {} }),
   detectChatGptUrl: (id: number) =>
     request<DetectChatGptResult>(`/api/channels/${id}/detect-chatgpt-url`, { method: 'POST', json: {} }),
 

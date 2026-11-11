@@ -98,7 +98,13 @@ export function ChannelPage({ id }: { id: number }) {
 
   return (
     <>
-      <ChannelHeader channel={channel} patch={patch} />
+      <ChannelHeader
+        channel={channel}
+        patch={patch}
+        runBusy={runBusy}
+        accountBusy={accountBusy}
+        onChanged={refresh}
+      />
 
       <div className="mt-8">
         <ProductionLine

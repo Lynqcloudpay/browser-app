@@ -2,17 +2,42 @@ import { useState } from 'react';
 import { ArrowLeft, Globe, Pencil } from 'lucide-react';
 import { api } from '../../api';
 import { Button } from '../../components/Button';
+import { useConfirm } from '../../components/ConfirmDialog';
+import { StatusDot } from '../../components/StatusDot';
 import { useToast } from '../../components/Toasts';
 import type { ChannelPatch, ChannelUpdate, ChannelView } from '../../types';
 
 export type PatchFn = (patch: ChannelPatch) => Promise<ChannelUpdate>;
 
-export function ChannelHeader({ channel, patch }: { channel: ChannelView; patch: PatchFn }) {
+export function ChannelHeader({
+  channel,
+  patch,
+  runBusy,
+  accountBusy,
+  onChanged,
+}: {
+  channel: ChannelView;
+  patch: PatchFn;
+  /** A run is making or posting a video, so the browser is in use. */
+  runBusy: boolean;
+  /** A login check or account switch is using the browser. */
+  accountBusy: boolean;
+  /** Reloads the channel data the page polls. */
+  onChanged: () => void;
+}) {
   const toast = useToast();
+  const { confirm, dialog } = useConfirm();
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(channel.name);
   const [saving, setSaving] = useState(false);
-  const [opening, setOpening] = useState(false);
+  const [browserPending, setBrowserPending] = useState<'open' | 'close' | null>(null);
+
+  const browserInUse = runBusy || accountBusy;
+  const closeBlockedReason = runBusy
+    ? 'A video is being made, so the browser is in use.'
+    : accountBusy
+      ? 'A login check is using the browser.'
+      : null;
 
   const save = async () => {
     const clean = name.trim();
@@ -32,14 +57,34 @@ export function ChannelHeader({ channel, patch }: { channel: ChannelView; patch:
   };
 
   const openBrowser = async () => {
-    setOpening(true);
+    setBrowserPending('open');
     try {
       await api.openBrowser(channel.id);
       toast.success('Browser window opened.');
     } catch (err) {
       toast.failure(err);
     } finally {
-      setOpening(false);
+      setBrowserPending(null);
+      onChanged();
+    }
+  };
+
+  const closeBrowser = async () => {
+    const ok = await confirm({
+      title: 'Close the browser window?',
+      body: 'Logins stay saved. The next video opens it again, which takes about a minute longer.',
+      confirmLabel: 'Close browser',
+    });
+    if (!ok) return;
+    setBrowserPending('close');
+    try {
+      const result = await api.closeBrowser(channel.id);
+      toast.success(result.message || 'Browser window closed.');
+    } catch (err) {
+      toast.failure(err);
+    } finally {
+      setBrowserPending(null);
+      onChanged();
     }
   };
 
@@ -96,9 +141,37 @@ export function ChannelHeader({ channel, patch }: { channel: ChannelView; patch:
           </div>
         )}
       </div>
-      <Button busy={opening} onClick={() => void openBrowser()} icon={<Globe className="size-4" aria-hidden="true" />}>
-        Open browser window
-      </Button>
+      <div className="flex flex-col items-end gap-1.5">
+        <div className="flex flex-wrap items-center gap-3">
+          <p className="flex items-center gap-2 text-[14px] font-semibold text-ink-soft">
+            <StatusDot tone={channel.browserOpen ? 'in' : 'idle'} />
+            {channel.browserOpen ? 'Browser open' : 'Browser closed'}
+          </p>
+          {channel.browserOpen ? (
+            <Button
+              busy={browserPending === 'close'}
+              disabled={browserInUse || browserPending !== null}
+              onClick={() => void closeBrowser()}
+              icon={<Globe className="size-4" aria-hidden="true" />}
+            >
+              Close browser
+            </Button>
+          ) : (
+            <Button
+              busy={browserPending === 'open'}
+              disabled={browserPending !== null}
+              onClick={() => void openBrowser()}
+              icon={<Globe className="size-4" aria-hidden="true" />}
+            >
+              Open browser
+            </Button>
+          )}
+        </div>
+        {channel.browserOpen && closeBlockedReason && (
+          <p className="text-[13px] text-honey-ink">Can't close yet. {closeBlockedReason}</p>
+        )}
+      </div>
+      {dialog}
     </header>
   );
 }

@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS channels (
   hashtag_hint TEXT NOT NULL DEFAULT '',
   schedule_enabled INTEGER NOT NULL DEFAULT 0,
   schedule_times TEXT NOT NULL DEFAULT '[]',
+  keep_browser_open INTEGER NOT NULL DEFAULT 1, -- keep the channel's browser window open between videos
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
