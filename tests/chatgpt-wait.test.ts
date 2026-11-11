@@ -42,7 +42,8 @@ function standInPage(): string {
     </div>
   </main>
   <form><div contenteditable="true"></div><div id="composer-actions"></div></form>
-  <script>
+  <script>(() => {
+    // Scoped: setContent reuses the same window, so a top-level const from the previous stand-in would collide.
     const NEW_LINES = ${JSON.stringify(promptLines(NEW_ANIMAL))};
     window.startNext = (withStopButton) => {
       setTimeout(() => {
@@ -65,7 +66,48 @@ function standInPage(): string {
         }, 900);
       }, 800);
     };
-  </script></body></html>`;
+  })();</script></body></html>`;
+}
+
+/** Writing-card format (Mr Watermelon): no "Plain text" block; each prompt is the body of a ChatGPT writing card. */
+const WM_SETTINGS = '10 seconds • Vertical 9:16 • 720p • Full synchronized audio • Premium cinematic 3D animation';
+const wmLines = (place: string): string[] => [
+  `Create a spectacular, ultra-high-energy 10-second vertical 9:16 animated dance video featuring EXACTLY TWO animated characters TOTAL: ONE Mr. Watermelon and ONE supporting co-star at the ${place}.`,
+  'Never create duplicate characters, clones, extra animals, extra people, reflections that look like characters, or additional living creatures.',
+  'MAIN CHARACTER — MR. WATERMELON',
+  'Exactly ONE adorable anthropomorphic watermelon character with a round, slightly oval bright-green body covered in dark-green stripes.',
+  `0-3 SECONDS: Mr. Watermelon bursts into a joyful dance move on the ${place} while the beat drops.`,
+  '3-7 SECONDS: Both characters dance in perfect sync, spinning and hopping, camera circling them.',
+  '7-10 SECONDS: A final heroic pose and a seamless loop back to the first frame. Sound enabled.',
+  'NO TEXT, CAPTIONS, LOGOS, OR WATERMARKS.',
+  WM_SETTINGS,
+];
+function writingCard(title: string, lines: string[], id = ''): string {
+  return `<div data-testid="chatgpt-writing-block"><div><header><div>${title}</div><div><button aria-label="Copy"></button></div></header>
+    <div><div id="${id}">${lines.map((l) => `<p>${l}</p>`).join('')}</div></div></div></div>`;
+}
+function writingCardPage(): string {
+  return `<!doctype html><html><body>
+  <main id="chat">${writingCard('Mr. Watermelon — Sky Castle Dance Rush', wmLines('sky castle'))}</main>
+  <form><div contenteditable="true"></div><div id="composer-actions"></div></form>
+  <script>(() => {
+    // Scoped: setContent reuses the same window, so a top-level const from the previous stand-in would collide.
+    const NEW_LINES = ${JSON.stringify(wmLines('neon rain city'))};
+    window.startNext = (withStopButton) => {
+      setTimeout(() => {
+        const chat = document.getElementById('chat');
+        chat.insertAdjacentHTML('beforeend', '<div style="text-align:right">next</div>');
+        chat.insertAdjacentHTML('beforeend', ${JSON.stringify(writingCard('Mr. Watermelon — Neon Rain Dance', [], 'newBody'))});
+        if (withStopButton) document.getElementById('composer-actions').innerHTML = '<button aria-label="Stop" style="width:30px;height:30px">■</button>';
+        let i = 0;
+        const timer = setInterval(() => {
+          document.getElementById('newBody').insertAdjacentHTML('beforeend', '<p>' + NEW_LINES[i] + '</p>');
+          i++;
+          if (i >= NEW_LINES.length) { clearInterval(timer); document.getElementById('composer-actions').innerHTML = ''; }
+        }, 900);
+      }, 800);
+    };
+  })();</script></body></html>`;
 }
 
 async function main(): Promise<void> {
@@ -124,6 +166,34 @@ async function main(): Promise<void> {
       assert(new RegExp(NEW_ANIMAL, 'i').test(got.cleanTitle), `the title belongs to the new reply (got "${got.cleanTitle}")`);
       console.log(`ok new prompt ${withStop ? 'with' : 'WITHOUT'} a Stop button (${secs}s, ${got.grokPrompt.length} chars)`);
     }
+    // ── Mr Watermelon's writing-card format ──────────────────────────────────────
+    await page.setContent(writingCardPage());
+    const wmStart = await agent.extractPromptAndTitleFromChatGpt(page);
+    assert(wmStart.grokPrompt === '' || !wmStart.grokPrompt.includes('neon'), 'no code-block prompt in this format');
+    assert(wmStart.writingPrompt.includes('sky castle'), 'the existing writing card is read as a prompt');
+    assert(wmStart.writingTitle === 'Mr. Watermelon — Sky Castle Dance Rush', `the card header is the title (got "${wmStart.writingTitle}")`);
+    assert(!wmStart.writingPrompt.startsWith('Mr. Watermelon —'), 'the card header is not part of the prompt');
+    for (const withStop of [true, false]) {
+      await page.setContent(writingCardPage());
+      const snapshot = await agent.chatGptPageText(page);
+      const sentAt = Date.now();
+      await page.evaluate((w) => (window as any).startNext(w), withStop);
+      const got = await agent.waitForNewChatGptReply(page, snapshot, sentAt);
+      const secs = Math.round((Date.now() - sentAt) / 1000);
+      assert(got.grokPrompt.includes('neon rain city'), `writing card: the NEW prompt is returned (got "${got.grokPrompt.slice(0, 80)}")`);
+      assert(!got.grokPrompt.includes('sky castle'), 'writing card: the OLD prompt is never returned');
+      assert(got.grokPrompt.endsWith(WM_SETTINGS), 'writing card: the whole prompt was waited for');
+      assert(got.cleanTitle === 'Mr. Watermelon — Neon Rain Dance', `writing card: title from the new card (got "${got.cleanTitle}")`);
+      console.log(`ok writing-card format ${withStop ? 'with' : 'WITHOUT'} a Stop button (${secs}s, ${got.grokPrompt.length} chars)`);
+    }
+
+    // ── channel 1's format must not change: its title/hashtag card is not mistaken for a prompt ──
+    await page.setContent(standInPage());
+    const ch1 = await agent.extractPromptAndTitleFromChatGpt(page);
+    assert(ch1.grokPrompt.includes(OLD_ANIMAL), 'code-block format still reads the code-block prompt');
+    assert(ch1.writingPrompt === '', 'a title/hashtag card is never read as a prompt');
+    console.log('ok code-block format unchanged');
+
     await context.close();
   } finally {
     await browser.close();

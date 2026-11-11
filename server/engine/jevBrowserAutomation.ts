@@ -701,6 +701,9 @@ export class ChannelBrowserAgent {
     cleanHook: string;
     rawText: string;
     promptCount: number;
+    /** The newest prompt found in a ChatGPT "writing" card (writing-card format), with that card's title. */
+    writingPrompt: string;
+    writingTitle: string;
   }> {
     const ch = getChannel(this.channelId);
     const hashtagHint = ch?.hashtag_hint?.trim() || '#';
@@ -826,6 +829,25 @@ export class ChannelBrowserAgent {
         }
       }
 
+      // Writing-card format (e.g. Mr Watermelon): no "Plain text" code block; the prompt is the body of a ChatGPT
+      // "writing" card — a <header> with the story title (or just "Writing"), then the prompt text. The newest card
+      // that reads as a video prompt wins. Read separately so the code-block path above is unchanged.
+      let writingPrompt = '';
+      let writingTitle = '';
+      for (const card of Array.from(document.querySelectorAll('[data-testid="chatgpt-writing-block"]'))) {
+        const full = ((card as HTMLElement).innerText || '').trim();
+        const header = card.querySelector('header');
+        const headText = header ? ((header as HTMLElement).innerText || '').trim() : '';
+        const body = headText && full.startsWith(headText) ? full.slice(headText.length).trim() : full;
+        if (!isVideoPromptText(body)) continue; // e.g. a title + hashtags card
+        writingPrompt = body;
+        writingTitle = headText && !/^(writing|start writing)$/i.test(headText) ? headText : '';
+        if (!writingTitle) {
+          const first = body.split('\n')[0].trim();
+          if (first.length > 5 && first.length < 120 && /—|–|:/.test(first)) writingTitle = first;
+        }
+      }
+
       const promptCount = assistantTurns.length > 0 ? assistantTurns.length : (latestReplyPrompt ? 1 : 0);
 
       // 2. Extract Title & Hashtags from the page
@@ -891,7 +913,7 @@ export class ChannelBrowserAgent {
         }
       }
 
-      return { domPrompt: latestReplyPrompt, title, hook, promptCount };
+      return { domPrompt: latestReplyPrompt, title, hook, promptCount, writingPrompt, writingTitle };
     }, hashtagHint);
 
     let grokPrompt = domData.domPrompt || '';
@@ -912,6 +934,8 @@ export class ChannelBrowserAgent {
       cleanHook,
       rawText: grokPrompt,
       promptCount: domData.promptCount,
+      writingPrompt: (domData.writingPrompt || '').trim(),
+      writingTitle: (domData.writingTitle || '').replace(/^[🍎🎬"'#\s]+|["'\s]+$/g, '').trim(),
     };
   }
 
@@ -989,7 +1013,17 @@ export class ChannelBrowserAgent {
       if (Date.now() - sentAt < 6000) continue; // ChatGPT needs a moment to start; never decide in the first seconds
 
       const currentData = await this.extractPromptAndTitleFromChatGpt(page);
-      const candidate = currentData.grokPrompt;
+      let candidate = currentData.grokPrompt;
+      let fromWritingCard = false;
+      // Channels whose ChatGPT answers in a writing card instead of a "Plain text" code block (Mr Watermelon).
+      if (
+        (candidate.length < 60 || isOldPrompt(candidate, pageTextBefore)) &&
+        currentData.writingPrompt.length >= 60 &&
+        !isOldPrompt(currentData.writingPrompt, pageTextBefore)
+      ) {
+        candidate = currentData.writingPrompt;
+        fromWritingCard = true;
+      }
       if (candidate.length < 60 || isOldPrompt(candidate, pageTextBefore)) {
         stableTicks = 0; // nothing new yet: the only prompt on the page is one that was already there
         lastObservedPromptLen = 0;
@@ -1002,8 +1036,10 @@ export class ChannelBrowserAgent {
         stableTicks = 0;
       }
 
-      // If the Stop button was never seen (ChatGPT may have changed it again), be extra patient.
-      if (stableTicks >= (sawWriting ? 2 : 3)) {
+      // If the Stop button was never seen (ChatGPT may have changed it again), be extra patient. A writing card is only
+      // taken early once it ends with its settings line ("10 seconds • Vertical 9:16 • …"); otherwise wait longer.
+      const needTicks = (sawWriting ? 2 : 3) + (fromWritingCard && !endsWithSettingsLine(candidate) ? 3 : 0);
+      if (stableTicks >= needTicks) {
         // Optional: try copying via the card's native copy button to get 100% exact formatting. The clipboard text is only
         // used if it is the SAME prompt (a stale clipboard from an earlier run must never replace it).
         let chosen = candidate;
@@ -1029,7 +1065,7 @@ export class ChannelBrowserAgent {
         await page.waitForTimeout(800);
         const finalData = await this.extractPromptAndTitleFromChatGpt(page);
         grokPrompt = chosen || finalData.grokPrompt;
-        cleanTitle = finalData.cleanTitle;
+        cleanTitle = (fromWritingCard && finalData.writingTitle) || finalData.cleanTitle;
         cleanHook = finalData.cleanHook;
         console.log(
           `[ChannelBrowserAgent-${this.channelId}] Brand new ChatGPT prompt finished writing (${grokPrompt.length} chars)! Title: "${cleanTitle}"`
@@ -3501,6 +3537,13 @@ export function normalizePromptText(text: string): string {
 
 /** How much of a prompt's beginning identifies it. (Prompts differ in the very first sentence: the guest animal.) */
 const PROMPT_KEY_CHARS = 300;
+
+/** True if the prompt's last line is a settings line such as "10 seconds • Vertical 9:16 • 720p • …" (the reply is complete). */
+export function endsWithSettingsLine(prompt: string): boolean {
+  const lines = (prompt || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const last = lines[lines.length - 1] || '';
+  return /\d{1,2}\s*seconds?\s*[•·|]/i.test(last) && /vertical|9:16|\d{3,4}p/i.test(last);
+}
 
 /** True if this prompt was already on the page before "next" was sent, i.e. it belongs to an OLD reply. */
 export function isOldPrompt(candidate: string, pageTextBeforeNormalized: string): boolean {
