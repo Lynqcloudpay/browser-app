@@ -1409,6 +1409,7 @@ export class ChannelBrowserAgent {
         Date.now() - this.grokPreparedAt < 10 * 60 * 1000 &&
         /^https:\/\/grok\.com\/imagine\/?(\?.*)?$/.test(page.url());
       this.grokPreparedAt = 0;
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Grok composer ${prepared ? 'already prepared — no reload' : `not prepared (${page.url()}) — loading it`}.`);
       if (!prepared) {
         await page.goto('https://grok.com/imagine', { waitUntil: 'domcontentloaded', timeout: 30000 });
         await page.waitForTimeout(400); // the composer itself is awaited just below
@@ -2705,14 +2706,21 @@ export class ChannelBrowserAgent {
           });
         }
 
-        // 2. Fill caption / description with clean title and hashtags (without corrupting Draft.js DOM spans)
+        // 2. Fill caption / description with clean title and hashtags (without corrupting Draft.js DOM spans).
+        // TikTok pre-fills the caption with the file name a moment after the upload starts and overwrites anything
+        // typed before that, so: wait for its pre-fill, type, then check the caption really holds the title.
         const cleanTitle = title.replace(/\s*\(ChatGPT Browser\)\s*/gi, '').replace(/^["']|["']$/g, '').trim();
+        const cleanCaption = `${cleanTitle} ${hook}`.trim();
         const captionSelector = 'div[contenteditable="true"], textarea, div[role="combobox"]';
-        const captionEl = await page.$(captionSelector);
-        if (captionEl) {
+        const captionText = async () =>
+          ((await page.locator(captionSelector).first().innerText({ timeout: 2000 }).catch(() => '')) || '').trim();
+        const titleStart = cleanTitle.slice(0, 20);
+        const captionOk = async () => (await captionText()).includes(titleStart);
+        const fillCaption = async (): Promise<boolean> => {
+          const captionEl = await page.$(captionSelector);
+          if (!captionEl) return false;
           await captionEl.click({ force: true });
           await page.waitForTimeout(300);
-
           // Select all and delete natively using keyboard so Draft.js/Lexical state stays intact
           await page.keyboard.press('Meta+A');
           await page.waitForTimeout(100);
@@ -2721,14 +2729,22 @@ export class ChannelBrowserAgent {
           await page.keyboard.press('Control+A');
           await page.keyboard.press('Backspace');
           await page.waitForTimeout(200);
-
-          const cleanCaption = `${cleanTitle} ${hook}`.trim();
           await page.keyboard.insertText(cleanCaption);
           await page.waitForTimeout(300);
           // Press Escape in case hashtag autocomplete dropdown opened
           await page.keyboard.press('Escape').catch(() => {});
-          await page.waitForTimeout(200);
+          await page.waitForTimeout(400);
+          return captionOk();
+        };
+        // Wait (up to 20 s) for TikTok's own pre-fill: the caption box exists and is no longer empty.
+        const prefillDeadline = Date.now() + 20000;
+        while (Date.now() < prefillDeadline && !(await captionText())) await page.waitForTimeout(500);
+        let captionFilled = await fillCaption();
+        if (!captionFilled) {
+          await page.waitForTimeout(2000);
+          captionFilled = await fillCaption();
         }
+        console.log(`[ChannelBrowserAgent] TikTok caption ${captionFilled ? 'set' : 'NOT confirmed'}: "${(await captionText()).slice(0, 80)}"`);
 
         // 3. Toggle AI-generated content disclosure if visible
         try {
@@ -2812,6 +2828,11 @@ export class ChannelBrowserAgent {
             await page.waitForTimeout(2000);
           }
 
+          // Last check before posting: the caption must hold the title, not the file name TikTok filled in.
+          if (!(await captionOk())) {
+            console.warn('[ChannelBrowserAgent] TikTok caption was replaced before posting — typing it again.');
+            await fillCaption();
+          }
           console.log('[ChannelBrowserAgent] Clicking genuine red TikTok Post button now...');
           postClicked = true;
           await targetPostBtn.click({ force: true });
@@ -3162,11 +3183,23 @@ export class ChannelBrowserAgent {
    */
   private async prepareGrok(durationSec: number, resolution: GrokResolution): Promise<void> {
     try {
+      const started = Date.now();
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Preparing Grok while ChatGPT writes…`);
       const context = await this.launchContext(false);
       const page = context.pages().find((p) => !p.isClosed() && p.url().includes('grok.com')) || (await context.newPage());
       await page.goto('https://grok.com/imagine', { waitUntil: 'domcontentloaded', timeout: 30000 });
       const textbox = this.grokComposer(page).locator('[role="textbox"], [contenteditable="true"], textarea').first();
-      if (!(await textbox.waitFor({ state: 'visible', timeout: 20000 }).then(() => true).catch(() => false))) return;
+      // A cold window can show a banner or promo over Grok first: clear pop-ups while waiting (up to 35 s).
+      let composerShown = false;
+      for (let i = 0; i < 7 && !composerShown; i++) {
+        await dismissPopups(page);
+        composerShown = await textbox.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
+      }
+      if (!composerShown) {
+        await page.screenshot({ path: path.join(FRAMES_DIR, `grok_prepare_no_composer_${Date.now()}.png`) }).catch(() => {});
+        console.warn(`[ChannelBrowserAgent-${this.channelId}] Grok composer did not appear while preparing (${page.url()}); the Grok step will load it.`);
+        return;
+      }
       await dismissPopups(page);
       const spec: GrokVideoSpec = {
         durationSec: ([6, 10, 15] as const).includes(durationSec as 6 | 10 | 15) ? (durationSec as 6 | 10 | 15) : 15,
@@ -3175,7 +3208,7 @@ export class ChannelBrowserAgent {
       };
       await this.configureGrokVideoMode(page, spec);
       this.grokPreparedAt = Date.now();
-      console.log(`[ChannelBrowserAgent-${this.channelId}] Grok composer ready ahead of time (Video, ${spec.durationSec}s, ${spec.resolution}).`);
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Grok composer ready ahead of time (Video, ${spec.durationSec}s, ${spec.resolution}) in ${Math.round((Date.now() - started) / 1000)}s.`);
     } catch (err: any) {
       console.warn(`[ChannelBrowserAgent-${this.channelId}] Could not prepare Grok ahead of time (the Grok step will): ${err?.message}`);
     }
