@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS runs (
   message TEXT NOT NULL DEFAULT '',
   job_id TEXT,
   pid INTEGER,                              -- process doing the run, to tell a live run from an interrupted one
+  timings_json TEXT,                        -- seconds spent in each station, e.g. {"login":12,"chatgpt":25}
   started_at TEXT NOT NULL,                 -- ISO-8601 UTC
   finished_at TEXT
 );

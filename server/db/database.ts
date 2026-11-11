@@ -43,6 +43,7 @@ export function initDatabase(): void {
   addColumnIfMissing('jobs', 'youtube_status', 'TEXT');
   addColumnIfMissing('channels', 'keep_browser_open', 'INTEGER NOT NULL DEFAULT 1');
   addColumnIfMissing('channels', 'hold_flagged_videos', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing('runs', 'timings_json', 'TEXT');
   db.exec(POST_MIGRATION_SQL);
 
   try {

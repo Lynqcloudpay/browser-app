@@ -67,6 +67,13 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
   exists starts over once with a fresh browser after 1 minute; a platform whose upload failed is posted again once after
   2 minutes; an attempt stuck for 25 minutes is stopped (browser closed). Sign-in problems, usage limits and Stop are never
   retried. Failures show a macOS notification. Rules: `isRetryableError`, `platformsToRepost`.
+- **Speed:** TikTok and YouTube upload at the same time in separate tabs (Playwright keeps background tabs live); Grok
+  is opened and set to Video in its own tab while ChatGPT writes (`prepareGrok`). Every run stores seconds per station in
+  `runs.timings` and logs `[timing]` lines — measure before changing waits.
+- **Jev backup** (`server/engine/jevAssist.ts`, key `TYPESAFE_API_KEY` in `.env`): only when a scripted lookup finds
+  nothing (ChatGPT message box, Grok Video toggle, TikTok Post, YouTube Next / visibility), the visible controls are sent to
+  Jev; code clicks only if Jev says a matching control exists (Noul >= 0.7) and favours one (>= 0.6). Tests never call the
+  API unless `KINDRED_TEST_LIVE_JEV=1`.
 - **Safety check** is advisory by default: flags are recorded and the video still posts. A channel with
   `hold_flagged_videos` on holds flagged videos instead. A missing or broken video file always blocks.
 - Stop = `ChannelBrowserAgent.requestCancel()`: closes the browser; the step in flight fails and is reported as stopped.

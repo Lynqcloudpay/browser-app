@@ -14,6 +14,7 @@ import { withClipboard } from './clipboardLock';
 import { withGrokSlot } from './grokSemaphore';
 import { isValidVideoBuffer, isValidVideoFile } from './videoFile';
 import { installPopupGuards, dismissPopups } from './popups';
+import { findWithJev } from './jevAssist';
 import { FRAMES_DIR, THUMBNAILS_DIR, VIDEOS_DIR } from '../paths';
 import {
   getChannel,
@@ -86,6 +87,8 @@ export class ChannelBrowserAgent {
   private cancelReason: 'user' | 'timeout' = 'user';
   /** Set once the Grok prompt was submitted: from then on Grok may charge for the video. */
   private grokSubmitted = false;
+  /** When the Grok composer was opened and set to Video ahead of time (0: not prepared). */
+  private grokPreparedAt = 0;
   /** When each site last looked signed in, in the window that is open now. Cleared whenever the window closes. */
   private siteVerifiedAt = new Map<AccountKey, number>();
 
@@ -627,7 +630,12 @@ export class ChannelBrowserAgent {
       return null;
     });
 
-    const element = inputHandle.asElement();
+    let element: any = inputHandle.asElement();
+    if (!element) {
+      // Backup: ChatGPT changed its layout. Ask Jev which box on screen is the message box.
+      const byJev = await findWithJev(page, 'type a new message to ChatGPT (the message box at the bottom of the chat)', 'ChatGPT');
+      element = byJev ? await byJev.elementHandle({ timeout: 2000 }).catch(() => null) : null;
+    }
     if (!element) {
       throw new Error('Could not find the bottom ChatGPT chat input box.');
     }
@@ -1206,7 +1214,17 @@ export class ChannelBrowserAgent {
    * Only touches the composer's own controls (Image/Video/Agent radios, 480p/720p, 6s/10s/15s, Aspect Ratio).
    */
   public async configureGrokVideoMode(page: Page, spec: GrokVideoSpec): Promise<void> {
-    if (!(await this.selectGrokRadio(page, { label: 'Video' }, 15000))) {
+    let videoOn = await this.selectGrokRadio(page, { label: 'Video' }, 15000);
+    if (!videoOn) {
+      // Backup: Grok renamed or restyled the toggle. Ask Jev which control switches the composer to video.
+      const byJev = await findWithJev(page, 'switch the prompt composer to Video mode so it makes a video instead of an image', 'Grok Imagine');
+      if (byJev) {
+        await byJev.click({ timeout: 5000 }).catch(() => {});
+        await page.waitForTimeout(800);
+        videoOn = (await page.locator('button[aria-label="Video resolution"], button[aria-label="Video duration"]').count().catch(() => 0)) > 0;
+      }
+    }
+    if (!videoOn) {
       const shot = path.join(FRAMES_DIR, `grok_no_video_toggle_${Date.now()}.png`);
       await page.screenshot({ path: shot }).catch(() => {});
       throw new Error(`Could not switch Grok Imagine to Video mode (the "Video" toggle beside the prompt box was not found). Screenshot: ${shot}`);
@@ -1385,8 +1403,16 @@ export class ChannelBrowserAgent {
       // 1. Fresh Grok Imagine composer
       console.log(`[ChannelBrowserAgent-${this.channelId}] Opening fresh Grok Imagine composer (https://grok.com/imagine)...`);
       this.grokSubmitted = false;
-      await page.goto('https://grok.com/imagine', { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForTimeout(1500);
+      // The composer was opened and set to Video while ChatGPT was writing: use it as it is instead of reloading.
+      const prepared =
+        this.grokPreparedAt > 0 &&
+        Date.now() - this.grokPreparedAt < 10 * 60 * 1000 &&
+        /^https:\/\/grok\.com\/imagine\/?(\?.*)?$/.test(page.url());
+      this.grokPreparedAt = 0;
+      if (!prepared) {
+        await page.goto('https://grok.com/imagine', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForTimeout(400); // the composer itself is awaited just below
+      }
       await dismissPopups(page);
       const textbox = this.grokComposer(page).locator('[role="textbox"], [contenteditable="true"], textarea').first();
       const ready = await textbox.waitFor({ state: 'visible', timeout: 20000 }).then(() => true).catch(() => false);
@@ -2390,7 +2416,6 @@ export class ChannelBrowserAgent {
   ): Promise<{ success: boolean; verified?: boolean; shareUrl?: string; message: string }> {
     const context = await this.launchContext(false);
     const page = context.pages().find((p) => !p.isClosed() && p.url().includes('youtube.com')) || (await context.newPage());
-    await page.bringToFront().catch(() => {});
 
     const framesDir = FRAMES_DIR;
     fs.mkdirSync(framesDir, { recursive: true });
@@ -2400,12 +2425,17 @@ export class ChannelBrowserAgent {
 
     // YouTube Studio sometimes shows an "unsupported browser" page with a "Skip to YouTube Studio" link.
     const skipInterstitial = async () => {
-      await page.waitForTimeout(2500);
+      // Wait for whichever comes first: the upload form or the "unsupported browser" page, not a fixed pause.
       const skip = page.getByText(/skip to youtube studio/i).first();
+      const form = page.locator('input[type="file"]').first();
+      await Promise.race([
+        skip.waitFor({ state: 'visible', timeout: 6000 }),
+        form.waitFor({ state: 'attached', timeout: 6000 }),
+      ]).catch(() => {});
       if (await skip.isVisible().catch(() => false)) {
         console.log('[ChannelBrowserAgent] YouTube showed its browser-support page — skipping it.');
         await skip.click().catch(() => {});
-        await page.waitForTimeout(3000);
+        await form.waitFor({ state: 'attached', timeout: 8000 }).catch(() => {});
       }
     };
 
@@ -2504,8 +2534,15 @@ export class ChannelBrowserAgent {
           .catch(() => {});
         await dismissYouTubeNag();
         await dismissPopups(page);
-        await page.locator('#next-button').first().click({ timeout: 15000 });
-        await page.waitForTimeout(1500);
+        const nextBtn = page.locator('#next-button').first();
+        const clicked = await nextBtn.click({ timeout: 15000 }).then(() => true).catch(() => false);
+        if (!clicked) {
+          // Backup: something covers or renamed the Next button. Ask Jev which control moves the upload forward.
+          const byJev = await findWithJev(page, 'go to the next step of the upload (the Next button)', 'YouTube Studio upload');
+          if (!byJev) throw new Error('YouTube\'s Next button could not be clicked.');
+          await byJev.click({ timeout: 5000 });
+        }
+        await page.waitForTimeout(700);
       }
 
       // 5. Visibility.
@@ -2515,7 +2552,11 @@ export class ChannelBrowserAgent {
       const visByRole = page.getByRole('radio', { name: new RegExp(`^${visibility}`, 'i') }).first();
       if (await visible(visRadio, 8000)) await visRadio.click();
       else if (await visible(visByRole, 3000)) await visByRole.click();
-      else throw new Error('Could not find the visibility choice (Public / Private).');
+      else {
+        const byJev = await findWithJev(page, `make the video ${visibility} (the "${visibility === 'public' ? 'Public' : 'Private'}" visibility choice)`, 'YouTube Studio upload');
+        if (!byJev) throw new Error('Could not find the visibility choice (Public / Private).');
+        await byJev.click({ timeout: 5000 });
+      }
       await snap('visibility');
 
       // 6. Wait for the upload itself to finish. The Publish button is ENABLED while the file is still uploading
@@ -2612,7 +2653,14 @@ export class ChannelBrowserAgent {
         window.onbeforeunload = null;
       }).catch(() => {});
       await page.goto('https://www.tiktok.com/tiktokstudio/upload', { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForTimeout(3500);
+      // Wait for the upload form (or a sign-in page) instead of a fixed pause.
+      await page
+        .locator('input[type="file"], a[href*="/login"], button:has-text("Log in")')
+        .first()
+        .waitFor({ state: 'attached', timeout: 15000 })
+        .catch(() => {});
+      await page.waitForTimeout(500);
+      await dismissPopups(page);
 
       await dismissExitModal();
 
@@ -2641,7 +2689,7 @@ export class ChannelBrowserAgent {
       if (fileInput) {
         console.log('[ChannelBrowserAgent] Uploading genuine MP4 video file to TikTok Studio:', videoPath);
         await fileInput.setInputFiles(videoPath);
-        await page.waitForTimeout(3500);
+        await page.waitForTimeout(1000);
 
         // 1. Disable beforeunload dialog so Chromium never halts with "Leave site?"
         await page.evaluate(() => {
@@ -2693,7 +2741,7 @@ export class ChannelBrowserAgent {
         // 4. Wait for video upload & processing status to be 100% complete
         console.log('[ChannelBrowserAgent] Waiting for TikTok video upload to show Uploaded (100%)...');
         await page.getByText(/^\s*Uploaded\b/i).first().waitFor({ state: 'visible', timeout: 120000 }).catch(() => null);
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(800);
 
         // 4b. Unique cover image (a mid-video frame instead of the identical first frame)
         if (coverPath && fs.existsSync(coverPath)) {
@@ -2741,6 +2789,11 @@ export class ChannelBrowserAgent {
               break;
             }
           }
+        }
+
+        if (!targetPostBtn) {
+          // Backup: TikTok renamed or restyled its Post button. Ask Jev which control publishes the video.
+          targetPostBtn = await findWithJev(page, 'publish the uploaded video now (the final Post button, not Save draft or Discard)', 'TikTok Studio upload');
         }
 
         if (targetPostBtn) {
@@ -2995,10 +3048,10 @@ export class ChannelBrowserAgent {
     let youtubeUrl: string | undefined = input.previous?.youtubeUrl || undefined;
     let youtubeVerified = youtubeStatus === 'published';
 
-    if (input.tiktok) {
+    const tiktokTask = async () => {
+      if (!input.tiktok) return;
       this.throwIfCancelled();
       console.log(`[ChannelBrowserAgent-${this.channelId}] Uploading the video to TikTok...`);
-      say('Uploading to TikTok and posting…');
       tiktokStatus = 'failed';
       try {
         let uploadRes = await this.uploadToTikTokViaBrowser(input.videoPath, input.title, input.hook, input.coverPath || undefined);
@@ -3019,12 +3072,12 @@ export class ChannelBrowserAgent {
       } catch (ttErr: any) {
         console.warn('[ChannelBrowserAgent] TikTok browser upload error:', ttErr.message);
       }
-    }
+    };
 
-    if (input.youtube) {
+    const youtubeTask = async () => {
+      if (!input.youtube) return;
       this.throwIfCancelled();
       console.log(`[ChannelBrowserAgent-${this.channelId}] Uploading the video to YouTube...`);
-      say('Uploading to YouTube…');
       youtubeStatus = 'failed';
       try {
         const cleanTitle = input.title.replace(/\s*#\w+/g, '').trim();
@@ -3047,7 +3100,13 @@ export class ChannelBrowserAgent {
       } catch (ytErr: any) {
         console.warn('[ChannelBrowserAgent] YouTube upload error:', ytErr.message);
       }
-    }
+    };
+
+    // TikTok and YouTube upload at the same time, each in its own tab: the uploads are the slowest part of a run,
+    // and Playwright keeps background tabs fully live. Each platform keeps its own retry and its own status.
+    say(input.tiktok && input.youtube ? 'Uploading to TikTok and YouTube at the same time…' : input.tiktok ? 'Uploading to TikTok and posting…' : 'Uploading to YouTube…');
+    await Promise.all([tiktokTask(), youtubeTask()]);
+
     this.throwIfCancelled();
 
     // Posting tabs are the heaviest pages and are not needed until the next video: free them once the platform
@@ -3098,6 +3157,31 @@ export class ChannelBrowserAgent {
   }
 
   /**
+   * Opens Grok Imagine and switches it to Video with the channel's length and quality while ChatGPT is still writing,
+   * so the Grok step starts straight away. Best effort: any problem is left for the Grok step, which reloads.
+   */
+  private async prepareGrok(durationSec: number, resolution: GrokResolution): Promise<void> {
+    try {
+      const context = await this.launchContext(false);
+      const page = context.pages().find((p) => !p.isClosed() && p.url().includes('grok.com')) || (await context.newPage());
+      await page.goto('https://grok.com/imagine', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      const textbox = this.grokComposer(page).locator('[role="textbox"], [contenteditable="true"], textarea').first();
+      if (!(await textbox.waitFor({ state: 'visible', timeout: 20000 }).then(() => true).catch(() => false))) return;
+      await dismissPopups(page);
+      const spec: GrokVideoSpec = {
+        durationSec: ([6, 10, 15] as const).includes(durationSec as 6 | 10 | 15) ? (durationSec as 6 | 10 | 15) : 15,
+        resolution,
+        aspect: '9:16',
+      };
+      await this.configureGrokVideoMode(page, spec);
+      this.grokPreparedAt = Date.now();
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Grok composer ready ahead of time (Video, ${spec.durationSec}s, ${spec.resolution}).`);
+    } catch (err: any) {
+      console.warn(`[ChannelBrowserAgent-${this.channelId}] Could not prepare Grok ahead of time (the Grok step will): ${err?.message}`);
+    }
+  }
+
+  /**
    * Runs one step and, if it fails for a reason a second try can fix (a slow page, a pop-up, a changed layout that
    * reloads fine), runs it once more after reloading. Never retried: a stop, a sign-in problem, a usage limit.
    */
@@ -3135,6 +3219,11 @@ export class ChannelBrowserAgent {
     // 1. ChatGPT: Generate prompt & script
     console.log('[ChannelBrowserAgent] SEQUENCE STEP 1: Creating prompt and script in ChatGPT...');
     say('Writing a new prompt in ChatGPT…');
+    // Grok is prepared in its own tab while ChatGPT writes (both are waiting on remote servers).
+    const prepDuration = options.targetDurationSec || ch?.grok_duration || 15;
+    const prepResolution: GrokResolution = options.targetResolution || ch?.grok_resolution || '720p';
+    this.grokPreparedAt = 0;
+    const grokReady = this.prepareGrok(prepDuration, prepResolution);
     // A retry sends "next" again, which only asks ChatGPT for another prompt: nothing is spent or posted.
     const chatGptResult = await this.retryStep('Writing the prompt in ChatGPT', say, async (n) => {
       if (n > 1) say('Writing a new prompt in ChatGPT (second try)…');
@@ -3147,6 +3236,7 @@ export class ChannelBrowserAgent {
       throw new Error(`Master prompt from ChatGPT is empty or too short (${grokPrompt?.length || 0} chars). Aborting.`);
     }
     console.log(`[ChannelBrowserAgent] SEQUENCE STEP 1 SUCCESS: "${scriptPkg.concept_title}". Copied Grok prompt (${grokPrompt.length} chars).`);
+    await grokReady;
     this.throwIfCancelled();
 
     // 2. Grok: one video from the exact ChatGPT prompt + the channel's reference image

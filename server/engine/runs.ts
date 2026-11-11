@@ -21,6 +21,8 @@ export interface Run {
   started_at: string;
   finished_at: string | null;
   duration_sec: number | null;
+  /** Seconds spent in each station of the production line, in order. */
+  timings: Record<string, number>;
 }
 
 function rowToRun(row: any): Run {
@@ -38,6 +40,13 @@ function rowToRun(row: any): Run {
     started_at: row.started_at,
     finished_at: row.finished_at || null,
     duration_sec: Number.isFinite(started) && Number.isFinite(finished) ? Math.max(0, Math.round((finished - started) / 1000)) : null,
+    timings: (() => {
+      try {
+        return row.timings_json ? JSON.parse(row.timings_json) : {};
+      } catch {
+        return {};
+      }
+    })(),
   };
 }
 
@@ -54,7 +63,7 @@ export function createRun(channelId: number, trigger: RunTrigger, message: strin
 
 export function updateRun(
   id: string,
-  patch: { state?: RunRecordState; stage?: string; message?: string; jobId?: string; finished?: boolean }
+  patch: { state?: RunRecordState; stage?: string; message?: string; jobId?: string; finished?: boolean; timings?: Record<string, number> }
 ): void {
   const sets: string[] = [];
   const params: any[] = [];
@@ -63,6 +72,7 @@ export function updateRun(
   if (patch.message !== undefined) (sets.push('message = ?'), params.push(patch.message));
   if (patch.jobId !== undefined) (sets.push('job_id = ?'), params.push(patch.jobId));
   if (patch.finished) (sets.push('finished_at = ?'), params.push(new Date().toISOString()));
+  if (patch.timings !== undefined) (sets.push('timings_json = ?'), params.push(JSON.stringify(patch.timings)));
   if (!sets.length) return;
   params.push(id);
   db.prepare(`UPDATE runs SET ${sets.join(', ')} WHERE id = ?`).run(...params);

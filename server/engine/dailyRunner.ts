@@ -245,13 +245,26 @@ function track(channelId: number, runId: string, republish: boolean, work: (hook
   let jobId: string | undefined;
   const current = () => statuses.get(channelId) as RunStatus;
 
+  // Time spent in each station, so slow steps show up in the run history ("timings") and the server log.
+  const timings: Record<string, number> = {};
+  let timedStage: RunStage = current().stage || 'login';
+  let stageStartedAt = Date.now();
+  const closeStage = (next?: RunStage) => {
+    const seconds = Math.round((Date.now() - stageStartedAt) / 1000);
+    timings[timedStage] = (timings[timedStage] || 0) + seconds;
+    console.log(`[timing] channel ${channelId} ${timedStage}: ${seconds}s`);
+    if (next) timedStage = next;
+    stageStartedAt = Date.now();
+  };
+
   const onProgress: Hooks['onProgress'] = (step, kind) => {
     const prev = current();
     if (prev.runId !== runId) return;
     const state: RunState = kind === 'waiting_login' ? 'waiting_login' : 'running';
     const stage = kind === 'waiting_login' ? prev.stage || 'login' : stageFromStep(step, prev.stage);
+    if (stage !== timedStage) closeStage(stage);
     statuses.set(channelId, { ...prev, state, stage, step });
-    updateRun(runId, { state, stage, message: step });
+    updateRun(runId, { state, stage, message: step, timings });
   };
   const onJob: Hooks['onJob'] = (id) => {
     jobId = id;
@@ -260,6 +273,7 @@ function track(channelId: number, runId: string, republish: boolean, work: (hook
 
   void work({ onProgress, onJob })
     .then((result) => {
+      closeStage();
       const { ok, message } = describeResult(result, republish);
       statuses.set(channelId, {
         ...current(),
@@ -270,7 +284,7 @@ function track(channelId: number, runId: string, republish: boolean, work: (hook
         finishedAt: new Date().toISOString(),
         result,
       });
-      updateRun(runId, { state: ok ? 'done' : 'error', stage: ok ? 'finished' : 'post', message, jobId: result.jobId, finished: true });
+      updateRun(runId, { state: ok ? 'done' : 'error', stage: ok ? 'finished' : 'post', message, jobId: result.jobId, finished: true, timings });
       stopRequested.delete(channelId);
       if (!ok && current().trigger !== 'schedule') notify(`${getChannel(channelId)?.name || 'Channel'}: posting failed`, message);
     })
@@ -284,7 +298,8 @@ function track(channelId: number, runId: string, republish: boolean, work: (hook
         error: cancelled ? undefined : message,
         finishedAt: new Date().toISOString(),
       });
-      updateRun(runId, { state: cancelled ? 'cancelled' : 'error', message, finished: true });
+      closeStage();
+      updateRun(runId, { state: cancelled ? 'cancelled' : 'error', message, finished: true, timings });
       stopRequested.delete(channelId);
       // The scheduled job sends its own notification.
       if (!cancelled && current().trigger !== 'schedule') notify(`${getChannel(channelId)?.name || 'Channel'}: video failed`, shortReason(err));
