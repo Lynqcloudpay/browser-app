@@ -1129,16 +1129,21 @@ export class ChannelBrowserAgent {
     by: { label?: string; text?: string },
     waitMs = 3000
   ): Promise<boolean> {
+    // Grok has shipped these controls two ways: role="radio" buttons, and plain buttons with aria-pressed (current).
     const btn = (
       by.label
-        ? page.locator(`[role="radio"][aria-label="${by.label}"]`)
+        ? page.locator(`[role="radio"][aria-label="${by.label}"], button[aria-label="${by.label}"][aria-pressed]`)
         : page.locator('[role="radio"], [role="menuitemradio"], [role="option"]').filter({ hasText: new RegExp(`(^|\\s|\\b)${by.text}(\\b|\\s|$)`) })
     ).filter({ visible: true }).first();
     if (!(await btn.waitFor({ state: 'visible', timeout: waitMs }).then(() => true).catch(() => false))) return false;
-    if ((await btn.getAttribute('aria-checked')) !== 'true') {
+    const isOn = async () =>
+      (await btn.getAttribute('aria-checked').catch(() => null)) === 'true' ||
+      (await btn.getAttribute('aria-pressed').catch(() => null)) === 'true' ||
+      (await btn.getAttribute('data-state').catch(() => null)) === 'on';
+    if (!(await isOn())) {
       // Short timeout and no retries into whatever pops up (e.g. a sign-in dialog).
       await btn.click({ timeout: 5000 }).catch(() => {});
-      for (let i = 0; i < 4 && (await btn.getAttribute('aria-checked').catch(() => null)) !== 'true'; i++) {
+      for (let i = 0; i < 8 && !(await isOn()); i++) {
         await page.waitForTimeout(250);
       }
       const blocked = await page.locator('#dialog-portal').filter({ hasText: /continue with|sign in|log in|upgrade/i }).count().catch(() => 0);
@@ -1147,7 +1152,7 @@ export class ChannelBrowserAgent {
         throw new Error(`Grok blocked the "${by.label || by.text}" option behind a sign-in/upgrade dialog. Log into Grok in the app's browser window, then run again.`);
       }
     }
-    const checked = (await btn.getAttribute('aria-checked')) === 'true' || (await btn.getAttribute('data-state')) === 'on';
+    const checked = await isOn();
     if (!checked && by.text) {
       const seen = await page.locator('[role="radio"]').evaluateAll((els) =>
         els.map((e) => `${(e.textContent || e.getAttribute('aria-label') || '').trim()}=${e.getAttribute('aria-checked')}${(e as HTMLButtonElement).disabled ? '(disabled)' : ''}`).join(', ')
