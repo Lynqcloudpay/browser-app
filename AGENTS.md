@@ -85,6 +85,7 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
 - **Ports:** the backend reads `SERVER_PORT` (default 3000), not `PORT` (launchers set `PORT=5173` for Vite).
 - **Grok** shows resolution and length as dropdown buttons (`aria-label="Video resolution"` / `"Video duration"`, items are
   `menuitemradio`). If Grok's server fails the run stops; there is no automatic retry (it may use credits).
+- **ChatGPT's layout has no message containers** (no `<article>`, no `data-message-author-role`, no conversation-turn test ids — only `data-testid="chatgpt-writing-block"` cards and "Plain text" code blocks), and its **Stop button is labelled just `Stop`** (no test id). So "is ChatGPT still writing?" is `chatGptIsWriting` (all Stop labels), and the new reply is recognised as a prompt that was NOT on the page before "next" was sent (`isOldPrompt`) — never by comparing against the last reply, and never by turn counts. A prompt this channel already used is refused (`promptWasUsedBefore`). Regression test: `tests/chatgpt-wait.test.ts` (old reply on the page, new one streams in; run with and without a Stop button).
 - **Under `tsx`**, functions passed to `page.evaluate` get an injected `__name()` helper; `window.__name` is shimmed in
   `launchPersistent` and `extractCoverFrame`. Keep that when adding in-page code.
 - **No ffmpeg.** The raw Grok video goes straight to the platforms.

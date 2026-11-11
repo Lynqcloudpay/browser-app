@@ -916,6 +916,157 @@ export class ChannelBrowserAgent {
   }
 
   /**
+   * True while ChatGPT is still writing a reply. Its Stop button is labelled just "Stop" (no test id), which an earlier
+   * version of this check did not know, so the app never noticed ChatGPT was still writing.
+   */
+  public async chatGptIsWriting(page: Page): Promise<boolean> {
+    return page
+      .evaluate(() => {
+        return Array.from(document.querySelectorAll('button')).some((b) => {
+          const r = b.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return false;
+          if (b.getAttribute('data-testid') === 'stop-button') return true;
+          const label = (b.getAttribute('aria-label') || '').trim().toLowerCase();
+          return /^stop( generating| streaming| response| answering)?$/.test(label); // not "Stop voice mode", "Stop dictation"...
+        });
+      })
+      .catch(() => false);
+  }
+
+  /** The whole page's text, lower-cased with whitespace collapsed, so two readings of the same text compare equal. */
+  public async chatGptPageText(page: Page): Promise<string> {
+    const text = await page.evaluate(() => document.body.innerText || '').catch(() => '');
+    return normalizePromptText(text);
+  }
+
+  /**
+   * After "next" is sent: wait until ChatGPT has FINISHED writing a reply whose prompt was not on the page before.
+   * Nothing is decided while ChatGPT shows its Stop button, in the first seconds after sending, or while the only prompt
+   * visible is an old one. The prompt must then read the same three times in a row.
+   */
+  public async waitForNewChatGptReply(
+    page: Page,
+    pageTextBefore: string,
+    sentAt: number,
+    screenshotPath?: string,
+    timeoutMs = 120000
+  ): Promise<{ grokPrompt: string; cleanTitle: string; cleanHook: string; stillWriting: boolean }> {
+    let grokPrompt = '';
+    let cleanTitle = '';
+    let cleanHook = '';
+    let lastObservedPromptLen = 0;
+    let stableTicks = 0;
+    let stillWriting = false;
+    let sawWriting = false;
+
+    while (Date.now() - sentAt < timeoutMs) {
+      await page.waitForTimeout(1500);
+      await dismissPopups(page);
+
+      // Keep the conversation scrolled to the newest reply. Only the scroller that holds the replies is moved:
+      // scrolling every element with "scroll" in its class also scrolled the chat-history sidebar to the bottom.
+      await page.evaluate(() => {
+        const turns = Array.from(document.querySelectorAll('article, [data-testid*="conversation-turn"]'));
+        let node: HTMLElement | null = (turns[turns.length - 1] as HTMLElement | undefined) || null;
+        while (node) {
+          const overflowY = getComputedStyle(node).overflowY;
+          if ((overflowY === 'auto' || overflowY === 'scroll') && node.scrollHeight > node.clientHeight) {
+            node.scrollTop = node.scrollHeight;
+            return;
+          }
+          node = node.parentElement;
+        }
+        window.scrollTo(0, document.body.scrollHeight);
+      }).catch(() => {});
+
+      stillWriting = await this.chatGptIsWriting(page);
+      if (stillWriting) {
+        sawWriting = true;
+        stableTicks = 0;
+        lastObservedPromptLen = 0;
+        continue; // ChatGPT is still writing
+      }
+      if (Date.now() - sentAt < 6000) continue; // ChatGPT needs a moment to start; never decide in the first seconds
+
+      const currentData = await this.extractPromptAndTitleFromChatGpt(page);
+      const candidate = currentData.grokPrompt;
+      if (candidate.length < 60 || isOldPrompt(candidate, pageTextBefore)) {
+        stableTicks = 0; // nothing new yet: the only prompt on the page is one that was already there
+        lastObservedPromptLen = 0;
+        continue;
+      }
+
+      if (candidate.length === lastObservedPromptLen) stableTicks++;
+      else {
+        lastObservedPromptLen = candidate.length;
+        stableTicks = 0;
+      }
+
+      // If the Stop button was never seen (ChatGPT may have changed it again), be extra patient.
+      if (stableTicks >= (sawWriting ? 2 : 3)) {
+        // Optional: try copying via the card's native copy button to get 100% exact formatting. The clipboard text is only
+        // used if it is the SAME prompt (a stale clipboard from an earlier run must never replace it).
+        let chosen = candidate;
+        try {
+          const copyBtn = page
+            .locator('article, [data-testid*="conversation-turn"]')
+            .last()
+            .locator('button[aria-label*="copy" i], button[data-testid*="copy" i]')
+            .first();
+          if (await copyBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
+            await copyBtn.click({ force: true }).catch(() => {});
+            await page.waitForTimeout(400);
+            const clipText = execSync('pbpaste', { encoding: 'utf8' }).trim();
+            if (
+              clipText.length >= 60 &&
+              normalizePromptText(clipText).slice(0, 200) === normalizePromptText(candidate).slice(0, 200)
+            ) {
+              chosen = clipText;
+            }
+          }
+        } catch (_) {}
+
+        await page.waitForTimeout(800);
+        const finalData = await this.extractPromptAndTitleFromChatGpt(page);
+        grokPrompt = chosen || finalData.grokPrompt;
+        cleanTitle = finalData.cleanTitle;
+        cleanHook = finalData.cleanHook;
+        console.log(
+          `[ChannelBrowserAgent-${this.channelId}] Brand new ChatGPT prompt finished writing (${grokPrompt.length} chars)! Title: "${cleanTitle}"`
+        );
+        break;
+      }
+    }
+
+    void screenshotPath;
+    return { grokPrompt, cleanTitle, cleanHook, stillWriting };
+  }
+
+  /** Refuse a prompt this channel has already made a video from (it would post the same video twice). */
+  private assertPromptNotUsedBefore(prompt: string): void {
+    let previous: string[] = [];
+    try {
+      const rows = db
+        .prepare('SELECT shot_briefs_json FROM jobs WHERE channel_id = ? ORDER BY created_at DESC LIMIT 80')
+        .all(this.channelId) as any[];
+      previous = rows
+        .map((r) => {
+          try {
+            return String(JSON.parse(r.shot_briefs_json)?.[0]?.video_prompt || '');
+          } catch {
+            return '';
+          }
+        })
+        .filter(Boolean);
+    } catch {
+      return; // history unavailable: the page-text check above still protects
+    }
+    if (promptWasUsedBefore(prompt, previous)) {
+      throw new Error('ChatGPT returned a prompt this channel already used for an earlier video. Not using it again.');
+    }
+  }
+
+  /**
    * Step 1: Browse into ChatGPT, type "next" in the chat, wait for the new prompt to finish generating, and extract it.
    */
   public async generatePromptViaChatGPT(
@@ -949,121 +1100,40 @@ export class ChannelBrowserAgent {
       await page.bringToFront().catch(() => {});
       await page.waitForTimeout(1500);
 
-      // Snapshot existing prompts on the page BEFORE submitting "next" so we never copy an old prompt!
-      const priorData = await this.extractPromptAndTitleFromChatGpt(page);
-      console.log(
-        `[ChannelBrowserAgent] Snapshot before "next": ${priorData.promptCount} existing prompt(s) in chat (last title: "${priorData.cleanTitle}").`
-      );
+      // If ChatGPT is still writing an earlier reply, let it finish first. Otherwise the next reply could be mistaken for it.
+      for (let i = 0; i < 60 && (await this.chatGptIsWriting(page)); i++) await page.waitForTimeout(1500);
 
-      // ALWAYS submit "next" to generate a brand new Mr. Apple video prompt!
+      // Everything on the page BEFORE "next" is sent counts as OLD. ChatGPT's layout has no message containers that mark
+      // the newest reply (no <article>, no author-role attributes), so the new reply is recognised as text that was NOT
+      // on the page before. (The earlier replies must have rendered first, or "old" would be empty.)
+      let pageTextBefore = '';
+      for (let i = 0; i < 8; i++) {
+        pageTextBefore = await this.chatGptPageText(page);
+        if (pageTextBefore.includes('plain text')) break;
+        await page.waitForTimeout(1000);
+      }
+      console.log(`[ChannelBrowserAgent] Snapshot before "next": ${pageTextBefore.length} characters of earlier chat on the page.`);
+
+      // ALWAYS submit "next" to generate a brand new video prompt!
       console.log('[ChannelBrowserAgent] Submitting "next" command strictly to bottom ChatGPT chat input...');
       await this.submitChatGptPrompt(page, 'next');
+      const sentAt = Date.now();
 
-      // Wait for ChatGPT to begin and finish streaming the brand new response
-      console.log('[ChannelBrowserAgent] Waiting for ChatGPT to generate the NEW Mr. Apple prompt...');
-      const streamWaitStart = Date.now();
-      let grokPrompt = '';
-      let cleanTitle = '';
-      let cleanHook = '';
-      let lastObservedPromptLen = 0;
-      let stableTicks = 0;
-      let lastStreaming = false;
-
-      while (Date.now() - streamWaitStart < 120000) {
-        await page.waitForTimeout(1500);
-        await dismissPopups(page);
-
-        // Keep the conversation scrolled to the newest reply. Only the scroller that holds the replies is moved:
-        // scrolling every element with "scroll" in its class also scrolled the chat-history sidebar to the bottom.
-        await page.evaluate(() => {
-          const turns = Array.from(document.querySelectorAll('article, [data-testid*="conversation-turn"]'));
-          let node: HTMLElement | null = (turns[turns.length - 1] as HTMLElement | undefined) || null;
-          while (node) {
-            const overflowY = getComputedStyle(node).overflowY;
-            if ((overflowY === 'auto' || overflowY === 'scroll') && node.scrollHeight > node.clientHeight) {
-              node.scrollTop = node.scrollHeight;
-              return;
-            }
-            node = node.parentElement;
-          }
-          window.scrollTo(0, document.body.scrollHeight);
-        }).catch(() => {});
-
-        // ChatGPT is still writing while its Stop button is on screen. Class-name guesses ("streaming", "typing") are
-        // not used: they can match unrelated elements and make a finished reply look like it is still being written.
-        const isStreaming = await page.evaluate(() => {
-          const stopBtn = document.querySelector(
-            'button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"]'
-          );
-          if (!stopBtn) return false;
-          const rect = (stopBtn as HTMLElement).getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0;
-        }).catch(() => false);
-        lastStreaming = isStreaming;
-
-        if (isStreaming) {
-          stableTicks = 0;
-          continue; // Still actively streaming
-        }
-
-        const currentData = await this.extractPromptAndTitleFromChatGpt(page);
-        const hasPrompt = currentData.grokPrompt.length >= 60;
-        const isBrandNewPrompt =
-          hasPrompt &&
-          (!priorData.grokPrompt ||
-            currentData.grokPrompt !== priorData.grokPrompt ||
-            currentData.promptCount > priorData.promptCount);
-
-        if (isBrandNewPrompt) {
-          if (currentData.grokPrompt.length === lastObservedPromptLen) {
-            stableTicks++;
-          } else {
-            lastObservedPromptLen = currentData.grokPrompt.length;
-            stableTicks = 0;
-          }
-
-          if (stableTicks >= 2) {
-            // Optional: try copying via the card's native copy button to get 100% exact formatting
-            try {
-              const copyBtn = page
-                .locator('article, [data-testid*="conversation-turn"]')
-                .last()
-                .locator('button[aria-label*="copy" i], button[data-testid*="copy" i]')
-                .first();
-              if (await copyBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
-                await copyBtn.click({ force: true }).catch(() => {});
-                await page.waitForTimeout(400);
-                const clipText = execSync('pbpaste', { encoding: 'utf8' }).trim();
-                if (
-                  clipText.length >= 60 &&
-                  (clipText.includes('9:16') || clipText.includes('seconds') || clipText.includes('Vertical'))
-                ) {
-                  currentData.grokPrompt = clipText;
-                  currentData.rawText = clipText;
-                }
-              }
-            } catch (_) {}
-
-            await page.waitForTimeout(800);
-            const finalData = await this.extractPromptAndTitleFromChatGpt(page);
-            grokPrompt = currentData.grokPrompt || finalData.grokPrompt;
-            cleanTitle = finalData.cleanTitle;
-            cleanHook = finalData.cleanHook;
-            console.log(
-              `[ChannelBrowserAgent-${this.channelId}] Brand new ChatGPT prompt finished streaming (${grokPrompt.length} chars)! Title: "${cleanTitle}"`
-            );
-            break;
-          }
-        }
-      }
+      // Wait for ChatGPT to begin and finish writing the brand new reply
+      console.log('[ChannelBrowserAgent] Waiting for ChatGPT to generate the NEW prompt...');
+      const reply = await this.waitForNewChatGptReply(page, pageTextBefore, sentAt, screenshotPath);
+      const grokPrompt = reply.grokPrompt;
+      const cleanTitle = reply.cleanTitle;
+      const cleanHook = reply.cleanHook;
+      const lastStreaming = reply.stillWriting;
 
       await page.screenshot({ path: screenshotPath }).catch(() => {});
       if (context !== this.activeInteractiveContext) {
         await context.close().catch(() => {});
       }
 
-      // STRICT VALIDATION: Must be a brand new, non-empty prompt!
-      if (!grokPrompt || grokPrompt.length < 60 || (priorData.grokPrompt && grokPrompt === priorData.grokPrompt)) {
+      // STRICT VALIDATION: Must be a brand new, non-empty prompt! Never one that was already on the page before "next".
+      if (!grokPrompt || grokPrompt.length < 60 || isOldPrompt(grokPrompt, pageTextBefore)) {
         // Keep the page markup next to the screenshot so a change in ChatGPT's layout can be diagnosed from the files.
         await page.content().then((html) => fs.writeFileSync(screenshotPath.replace(/\.png$/, '.html'), html.slice(0, 2_000_000))).catch(() => {});
         throw new Error(
@@ -1072,6 +1142,8 @@ export class ChannelBrowserAgent {
           `Aborting before Grok so an old or incomplete prompt is never used.`
         );
       }
+      // Second safety net: never reuse a prompt this channel has already made a video from.
+      this.assertPromptNotUsedBefore(grokPrompt);
 
       console.log(
         `[ChannelBrowserAgent] SUCCESS: Extracted brand new Grok Prompt (${grokPrompt.length} chars)! Title: "${cleanTitle}"`
@@ -3421,6 +3493,27 @@ export class ChannelBrowserAgent {
 
 /** Errors a second attempt cannot fix: a stop, a sign-in that needs a person, a usage or upload limit. */
 const NOT_RETRYABLE = /not signed in|requires login|sign into|signed out|usage limit|weekly limit|credits?|quota|upgrade|daily upload limit|already being produced|server failed|no longer exists|missing from disk|nothing to post/i;
+
+/** Lower-case, collapse whitespace: lets two readings of the same prompt compare equal. */
+export function normalizePromptText(text: string): string {
+  return (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/** How much of a prompt's beginning identifies it. (Prompts differ in the very first sentence: the guest animal.) */
+const PROMPT_KEY_CHARS = 300;
+
+/** True if this prompt was already on the page before "next" was sent, i.e. it belongs to an OLD reply. */
+export function isOldPrompt(candidate: string, pageTextBeforeNormalized: string): boolean {
+  const key = normalizePromptText(candidate).slice(0, PROMPT_KEY_CHARS);
+  return key.length >= 60 && pageTextBeforeNormalized.includes(key);
+}
+
+/** True if a prompt with the same beginning was already used for one of these earlier videos. */
+export function promptWasUsedBefore(candidate: string, previousPrompts: string[]): boolean {
+  const key = normalizePromptText(candidate).slice(0, PROMPT_KEY_CHARS);
+  if (key.length < 60) return false;
+  return previousPrompts.some((p) => normalizePromptText(p).slice(0, PROMPT_KEY_CHARS) === key);
+}
 
 export function isRetryableError(err: any): boolean {
   if (!err) return false;
