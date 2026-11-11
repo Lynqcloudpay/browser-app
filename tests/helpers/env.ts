@@ -1,0 +1,24 @@
+/**
+ * Import this FIRST in every test file. It points the app at a fresh temp storage folder before any server module
+ * (which reads these variables when it loads) is imported, so tests never touch the real database, channels,
+ * browser profiles or videos.
+ */
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
+export const TEST_STORAGE = fs.mkdtempSync(path.join(os.tmpdir(), 'kindred-test-'));
+process.env.KINDRED_STORAGE_DIR = TEST_STORAGE;
+process.env.DATABASE_PATH = path.join(TEST_STORAGE, 'kindred_studio.db');
+delete process.env.KINDRED_CHANNELS_DIR;
+// Never write to ~/Library/LaunchAgents or call launchctl from a test.
+process.env.KINDRED_NO_LAUNCHD = '1';
+
+/** Removes the temp storage folder. Call once at the end of each test file. */
+export function cleanup(): void {
+  try {
+    fs.rmSync(TEST_STORAGE, { recursive: true, force: true });
+  } catch {
+    // best effort
+  }
+}

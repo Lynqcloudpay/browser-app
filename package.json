@@ -1,33 +1,32 @@
 {
   "name": "kindred-studio",
-  "version": "1.0.0",
-  "description": "Autonomous AI Children's Media Studio & Discovery Engine powered by TypeSafe Jev",
+  "version": "2.0.0",
+  "description": "Mac-local studio that makes short character videos (ChatGPT prompt, Grok video) and posts them to TikTok and YouTube Shorts by driving a real browser.",
   "main": "server/index.ts",
   "scripts": {
-    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev": "concurrently -k -n api,web -c green,magenta \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite",
     "build": "vite build",
     "start": "tsx server/index.ts",
-    "test": "DATABASE_PATH=./storage/test_kindred_studio.db tsx tests/safety_and_loop.test.ts",
-    "test:channels": "DATABASE_PATH=./storage/test_kindred_studio.db tsx tests/channels.test.ts",
-    "demo": "tsx scripts/demo.ts",
-    "smoke": "tsx scripts/smoke.ts",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p tsconfig.client.json",
+    "test": "tsx tests/run-all.ts",
+    "check": "npm run typecheck && npm test && npm run build",
     "daily": "tsx scripts/dailyRun.ts",
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/setup.mjs --check",
     "youtube:test": "tsx scripts/youtubeTest.ts"
   },
   "keywords": [
-    "childrens-media",
-    "family-coviewing",
-    "typesafe-jev",
-    "openai",
-    "xai-grok-video",
-    "buffer-tiktok",
-    "ai-automation"
+    "short-video",
+    "tiktok",
+    "youtube-shorts",
+    "playwright",
+    "browser-automation",
+    "chatgpt",
+    "grok-imagine"
   ],
-  "author": "Claude & Lead Engineer",
+  "author": "Lynqcloudpay",
   "license": "MIT",
   "type": "commonjs",
   "dependencies": {
@@ -47,6 +46,8 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.3.0",
     "autoprefixer": "^10.6.2",
     "concurrently": "^10.0.7",
@@ -59,5 +60,6 @@
   },
   "engines": {
     "node": ">=20"
-  }
+  },
+  "private": true
 }

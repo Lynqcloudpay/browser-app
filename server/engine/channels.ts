@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import db from '../db/database';
 import { normalizeTimes, removeChannelLaunchAgent } from './dailySchedule';
+import { STORAGE_ROOT, LOGS_DIR } from '../paths';
 
 export interface Channel {
   id: number;
@@ -20,10 +21,21 @@ export interface Channel {
   updated_at: string;
 }
 
-const ROOT_STORAGE = path.join(__dirname, '../../storage');
+/**
+ * Pre-channels files (browser_profile, browser_cookies.json, account_status.json, mr_apple_reference.jpg and the old
+ * grok/publish/schedule json) live directly in the storage root. They are only read or moved when the channels folder
+ * sits inside the real storage root and the database is the real one. Tests and relocated storage never touch them.
+ */
+function legacyPathsAllowed(): boolean {
+  const rel = path.relative(STORAGE_ROOT, path.resolve(getChannelsRoot()));
+  const insideStorage = rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  if (!insideStorage) return false;
+  const dbEnv = process.env.DATABASE_PATH;
+  return !dbEnv || path.resolve(dbEnv) === path.join(STORAGE_ROOT, 'kindred_studio.db');
+}
 
 export function getChannelsRoot(): string {
-  return process.env.KINDRED_CHANNELS_DIR || path.join(ROOT_STORAGE, 'channels');
+  return process.env.KINDRED_CHANNELS_DIR || path.join(STORAGE_ROOT, 'channels');
 }
 
 export function channelDir(id: number): string {
@@ -34,9 +46,9 @@ export function channelDir(id: number): string {
 
 export function profileDir(id: number): string {
   const cDir = path.join(getChannelsRoot(), String(id), 'browser_profile');
-  if (id === 1) {
+  if (id === 1 && legacyPathsAllowed()) {
     if (fs.existsSync(cDir)) return cDir;
-    const legacy = path.join(ROOT_STORAGE, 'browser_profile');
+    const legacy = path.join(STORAGE_ROOT, 'browser_profile');
     if (fs.existsSync(legacy)) return legacy;
   }
   return cDir;
@@ -44,9 +56,9 @@ export function profileDir(id: number): string {
 
 export function cookiesFile(id: number): string {
   const cFile = path.join(getChannelsRoot(), String(id), 'browser_cookies.json');
-  if (id === 1) {
+  if (id === 1 && legacyPathsAllowed()) {
     if (fs.existsSync(cFile)) return cFile;
-    const legacy = path.join(ROOT_STORAGE, 'browser_cookies.json');
+    const legacy = path.join(STORAGE_ROOT, 'browser_cookies.json');
     if (fs.existsSync(legacy)) return legacy;
   }
   return cFile;
@@ -59,8 +71,8 @@ export function referenceImagePath(id: number): string | null {
     const p = path.join(dir, `reference${ext}`);
     if (fs.existsSync(p)) return p;
   }
-  if (id === 1) {
-    const legacy = path.join(ROOT_STORAGE, 'mr_apple_reference.jpg');
+  if (id === 1 && legacyPathsAllowed()) {
+    const legacy = path.join(STORAGE_ROOT, 'mr_apple_reference.jpg');
     if (fs.existsSync(legacy)) return legacy;
   }
   return null;
@@ -68,8 +80,8 @@ export function referenceImagePath(id: number): string | null {
 
 export function accountStatusFile(id: number): string {
   const file = path.join(channelDir(id), 'account_status.json');
-  if (id === 1 && !fs.existsSync(file)) {
-    const legacy = path.join(ROOT_STORAGE, 'account_status.json');
+  if (id === 1 && !fs.existsSync(file) && legacyPathsAllowed()) {
+    const legacy = path.join(STORAGE_ROOT, 'account_status.json');
     if (fs.existsSync(legacy)) return legacy;
   }
   return file;
@@ -80,9 +92,8 @@ export function scheduleStateFile(id: number): string {
 }
 
 export function channelLogFile(id: number): string {
-  const logsDir = path.join(ROOT_STORAGE, 'logs');
-  fs.mkdirSync(logsDir, { recursive: true });
-  return path.join(logsDir, `channel_${id}.log`);
+  fs.mkdirSync(LOGS_DIR, { recursive: true });
+  return path.join(LOGS_DIR, `channel_${id}.log`);
 }
 
 function rowToChannel(row: any): Channel {
@@ -235,24 +246,26 @@ export function deleteChannel(id: number): void {
 
   // Remove any registered LaunchAgent schedule
   try {
-    removeChannelLaunchAgent(id).catch(() => {});
+    Promise.resolve(removeChannelLaunchAgent(id)).catch((e: any) =>
+      console.warn(`[channels] Error removing LaunchAgent for channel ${id}:`, e?.message)
+    );
   } catch (e: any) {
     console.warn(`[channels] Error removing LaunchAgent for channel ${id}:`, e.message);
   }
 
-  // Run delete hooks
+  // Run delete hooks (they may be async; a failing hook must not block the delete)
   for (const hook of channelDeleteHooks) {
     try {
-      hook(id);
+      Promise.resolve(hook(id)).catch((e: any) => console.warn(`[channels] Delete hook error for channel ${id}:`, e?.message));
     } catch (e: any) {
       console.warn(`[channels] Delete hook error for channel ${id}:`, e.message);
     }
   }
 
-  // Delete DB row
+  // Delete DB row. Jobs are kept as history; they keep their channel_id.
   db.prepare('DELETE FROM channels WHERE id = ?').run(id);
 
-  // Safely move storage to _deleted
+  // Move the channel's folder (browser profile, cookies, reference image) aside instead of destroying it.
   const src = path.join(getChannelsRoot(), String(id));
   if (fs.existsSync(src)) {
     const deletedDir = path.join(getChannelsRoot(), '_deleted');
@@ -261,7 +274,9 @@ export function deleteChannel(id: number): void {
     try {
       fs.renameSync(src, dest);
     } catch {
-      // If rename fails (e.g. cross-device), copy & remove
+      // Rename can fail across devices: copy, then remove the original.
+      fs.cpSync(src, dest, { recursive: true });
+      fs.rmSync(src, { recursive: true, force: true });
     }
   }
 }
@@ -271,33 +286,47 @@ export function seedDefaultChannelIfNeeded(): void {
   if (countRow?.n > 0) return;
 
   console.log('[Channels] Initializing default channel 1 (Mr. Apple)...');
-  const settings = (db.prepare('SELECT chatgpt_chat_url FROM settings WHERE id = 1').get() as any) || {};
+
+  // One-time migration of the pre-channels layout. Only ever touches the real storage folder: a test or a
+  // relocated channels folder must never move or copy the real browser profile, cookies or account files.
+  const allowLegacy = legacyPathsAllowed();
+
+  let settingsUrl = '';
+  try {
+    const settings = db.prepare('SELECT chatgpt_chat_url FROM settings WHERE id = 1').get() as any;
+    settingsUrl = settings?.chatgpt_chat_url || '';
+  } catch {
+    // fresh databases have no legacy settings table
+  }
 
   let grokRes: '480p' | '720p' = '720p';
   let grokDur: 6 | 10 | 15 = 15;
-  try {
-    const grokRaw = JSON.parse(fs.readFileSync(path.join(ROOT_STORAGE, 'grok_settings.json'), 'utf8'));
-    if (grokRaw.resolution === '480p') grokRes = '480p';
-    if ([6, 10, 15].includes(Number(grokRaw.duration))) grokDur = Number(grokRaw.duration) as 6 | 10 | 15;
-  } catch {}
-
   let postTiktok = true;
   let postYoutube = true;
   let ytKids = true;
-  try {
-    const targets = JSON.parse(fs.readFileSync(path.join(ROOT_STORAGE, 'publish_targets.json'), 'utf8'));
-    if (typeof targets.tiktok === 'boolean') postTiktok = targets.tiktok;
-    if (typeof targets.youtube === 'boolean') postYoutube = targets.youtube;
-    if (typeof targets.youtubeMadeForKids === 'boolean') ytKids = targets.youtubeMadeForKids;
-  } catch {}
-
   let schedEnabled = false;
   let schedTimes: string[] = ['10:00'];
-  try {
-    const sched = JSON.parse(fs.readFileSync(path.join(ROOT_STORAGE, 'schedule.json'), 'utf8'));
-    if (typeof sched.enabled === 'boolean') schedEnabled = sched.enabled;
-    if (Array.isArray(sched.times) && sched.times.length) schedTimes = sched.times;
-  } catch {}
+
+  if (allowLegacy) {
+    try {
+      const grokRaw = JSON.parse(fs.readFileSync(path.join(STORAGE_ROOT, 'grok_settings.json'), 'utf8'));
+      if (grokRaw.resolution === '480p') grokRes = '480p';
+      if ([6, 10, 15].includes(Number(grokRaw.duration))) grokDur = Number(grokRaw.duration) as 6 | 10 | 15;
+    } catch {}
+
+    try {
+      const targets = JSON.parse(fs.readFileSync(path.join(STORAGE_ROOT, 'publish_targets.json'), 'utf8'));
+      if (typeof targets.tiktok === 'boolean') postTiktok = targets.tiktok;
+      if (typeof targets.youtube === 'boolean') postYoutube = targets.youtube;
+      if (typeof targets.youtubeMadeForKids === 'boolean') ytKids = targets.youtubeMadeForKids;
+    } catch {}
+
+    try {
+      const sched = JSON.parse(fs.readFileSync(path.join(STORAGE_ROOT, 'schedule.json'), 'utf8'));
+      if (typeof sched.enabled === 'boolean') schedEnabled = sched.enabled;
+      if (Array.isArray(sched.times) && sched.times.length) schedTimes = sched.times;
+    } catch {}
+  }
 
   db.prepare(`
     INSERT INTO channels (
@@ -310,7 +339,7 @@ export function seedDefaultChannelIfNeeded(): void {
       ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
     )
   `).run(
-    settings.chatgpt_chat_url || process.env.CHATGPT_MR_APPLE_URL || '',
+    settingsUrl || process.env.CHATGPT_MR_APPLE_URL || '',
     grokRes,
     grokDur,
     postTiktok ? 1 : 0,
@@ -320,10 +349,15 @@ export function seedDefaultChannelIfNeeded(): void {
     JSON.stringify(schedTimes)
   );
 
+  if (!allowLegacy) {
+    // Test or relocated storage: skip the file migration entirely.
+    return;
+  }
+
   const ch1Dir = channelDir(1);
 
   // Copy reference image to channel 1
-  const legacyRef = path.join(ROOT_STORAGE, 'mr_apple_reference.jpg');
+  const legacyRef = path.join(STORAGE_ROOT, 'mr_apple_reference.jpg');
   const ch1Ref = path.join(ch1Dir, 'reference.jpg');
   if (fs.existsSync(legacyRef) && !fs.existsSync(ch1Ref)) {
     try {
@@ -332,7 +366,7 @@ export function seedDefaultChannelIfNeeded(): void {
   }
 
   // Copy account status if present
-  const legacyAcc = path.join(ROOT_STORAGE, 'account_status.json');
+  const legacyAcc = path.join(STORAGE_ROOT, 'account_status.json');
   const ch1Acc = path.join(ch1Dir, 'account_status.json');
   if (fs.existsSync(legacyAcc) && !fs.existsSync(ch1Acc)) {
     try {
@@ -341,7 +375,7 @@ export function seedDefaultChannelIfNeeded(): void {
   }
 
   // Attempt migration of profile and cookies if unlocked
-  const legacyProfile = path.join(ROOT_STORAGE, 'browser_profile');
+  const legacyProfile = path.join(STORAGE_ROOT, 'browser_profile');
   const ch1Profile = path.join(ch1Dir, 'browser_profile');
   const lockFile = path.join(legacyProfile, 'SingletonLock');
   if (fs.existsSync(legacyProfile) && !fs.existsSync(ch1Profile)) {
@@ -357,7 +391,7 @@ export function seedDefaultChannelIfNeeded(): void {
     }
   }
 
-  const legacyCookies = path.join(ROOT_STORAGE, 'browser_cookies.json');
+  const legacyCookies = path.join(STORAGE_ROOT, 'browser_cookies.json');
   const ch1Cookies = path.join(ch1Dir, 'browser_cookies.json');
   if (fs.existsSync(legacyCookies) && !fs.existsSync(ch1Cookies)) {
     try {

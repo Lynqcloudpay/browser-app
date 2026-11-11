@@ -1,74 +1,72 @@
-import React from 'react';
-import { X, Film, Download } from 'lucide-react';
+import { useEffect, useId, useRef } from 'react';
+import { Download, X } from 'lucide-react';
 
 interface VideoPlayerModalProps {
-  videoUrl: string;
+  url: string;
   title: string;
-  captionsUrl?: string;
   onClose: () => void;
 }
 
-export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
-  videoUrl,
-  title,
-  captionsUrl,
-  onClose,
-}) => {
+export function VideoPlayerModal({ url, title, onClose }: VideoPlayerModalProps) {
+  const titleId = useId();
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
+
+  useEffect(() => {
+    const back = document.activeElement;
+    closeRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCloseRef.current();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      if (back instanceof HTMLElement) back.focus();
+    };
+  }, []);
+
+  const fileName = `${title.replace(/[^a-zA-Z0-9]/g, '_') || 'video'}.mp4`;
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-4">
-      <div className="relative bg-slate-900 border border-slate-800 rounded-3xl max-w-sm w-full p-4 shadow-2xl flex flex-col items-center">
-        {/* Header */}
-        <div className="w-full flex items-center justify-between pb-3 border-b border-slate-800 text-xs">
-          <div className="flex items-center gap-2 truncate pr-2">
-            <Film className="w-4 h-4 text-amber-400 shrink-0" />
-            <span className="font-bold text-white truncate">{title}</span>
-          </div>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/60 p-4">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="ks-enter w-full max-w-sm rounded-[14px] bg-sheet p-4 shadow-[0_12px_40px_rgba(22,48,43,0.2)]"
+      >
+        <div className="flex items-center justify-between gap-3">
+          <h2 id={titleId} className="min-w-0 truncate text-[16px] font-bold">
+            {title}
+          </h2>
           <button
-            onClick={onClose}
-            className="text-slate-400 hover:text-white transition p-1"
+            ref={closeRef}
+            type="button"
+            onClick={() => onCloseRef.current()}
+            aria-label="Close player"
+            className="shrink-0 rounded-md p-1 text-ink-soft hover:text-ink"
           >
-            <X className="w-5 h-5" />
+            <X className="size-5" aria-hidden="true" />
           </button>
         </div>
-
-        {/* 9:16 Player */}
-        <div className="w-full aspect-[9/16] bg-black rounded-2xl overflow-hidden my-3 shadow-inner">
-          <video
-            src={videoUrl}
-            controls
-            autoPlay
-            playsInline
-            crossOrigin="anonymous"
-            className="w-full h-full object-contain"
-          >
-            {captionsUrl && (
-              <track
-                default
-                kind="subtitles"
-                src={captionsUrl}
-                srcLang="en"
-                label="English Captions"
-              />
-            )}
-            Your browser does not support HTML5 video.
-          </video>
-        </div>
-
-        {/* Footer with Download */}
-        <div className="w-full flex items-center justify-between pt-2 text-xs text-slate-400">
-          <span className="text-[11px]">1080x1920 • 30fps H.264</span>
+        <video src={url} controls autoPlay playsInline className="mt-3 aspect-[9/16] w-full rounded-[10px] bg-ink object-contain">
+          Your browser does not support HTML5 video.
+        </video>
+        <div className="mt-3 flex justify-end">
           <a
-            href={videoUrl}
-            download={`${title.replace(/[^a-zA-Z0-9]/g, '_')}.mp4`}
-            className="flex items-center gap-1 text-amber-400 hover:underline font-semibold text-[11px]"
+            href={url}
+            download={fileName}
+            className="inline-flex items-center gap-2 rounded-md text-[14px] font-semibold text-ink underline underline-offset-4"
           >
-            <Download className="w-3.5 h-3.5" /> Download MP4
+            <Download className="size-4" aria-hidden="true" />
+            Download MP4
           </a>
         </div>
       </div>
     </div>
   );
-};
-
-export default VideoPlayerModal;
-
+}

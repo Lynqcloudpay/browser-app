@@ -1,57 +1,91 @@
 @import "tailwindcss";
 
+@theme {
+  --color-paper: #EEF3EF;
+  --color-sheet: #FFFFFF;
+  --color-ink: #16302B;
+  --color-ink-soft: #4C635D;
+  --color-line: #D5DFD9;
+  --color-track: #7D918B;
+  --color-apple: #D7263D;
+  --color-apple-deep: #A81B2E;
+  --color-apple-wash: #FBE9EB;
+  --color-leaf: #23804A;
+  --color-leaf-ink: #1D6A3D;
+  --color-leaf-wash: #E4F3EA;
+  --color-honey: #B7791F;
+  --color-honey-ink: #7A4A0C;
+  --color-honey-wash: #FBF1DA;
+  --font-display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --radius-card: 14px;
+  --radius-control: 10px;
+}
+
 @layer base {
-  :root {
-    --accent-color: #f59e0b;
-    --font-kids: 'Fredoka', cursive, sans-serif;
-    --font-ui: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  html {
+    background-color: var(--color-paper);
+  }
+  body {
+    background-color: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    line-height: 1.15;
+  }
+  :focus-visible {
+    outline: 3px solid var(--color-ink);
+    outline-offset: 2px;
   }
 }
 
-body {
-  font-family: var(--font-ui);
-}
-
-.font-kids {
-  font-family: var(--font-kids);
-}
-
-/* Modern switch progressive enhancement styling compliant with modern-web-guidance */
-input[type="checkbox"][switch] {
-  accent-color: var(--accent-color);
-  margin: 0;
-  cursor: pointer;
-  appearance: auto;
-}
-
-input[type="checkbox"][switch]:focus-visible {
-  outline: 3px solid #f59e0b;
-  outline-offset: 4px;
-}
-
-/* Custom fallback switch styling for non-supporting browsers */
-@supports not (selector(:has([switch]))) {
-  .custom-switch {
-    position: relative;
-    display: inline-block;
-    width: 48px;
-    height: 26px;
+/* Motion: only the active-station pulse, the track fill, and modal/toast entry. */
+@keyframes ks-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-apple) 50%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 9px transparent;
   }
 }
 
-/* Custom scrollbars */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-::-webkit-scrollbar-track {
-  background: #0f172a;
-}
-::-webkit-scrollbar-thumb {
-  background: #334155;
-  border-radius: 9999px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #475569;
+@keyframes ks-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
+.ks-pulse {
+  animation: ks-pulse 1.8s ease-out infinite;
+}
+
+.ks-enter {
+  animation: ks-enter 180ms ease-out;
+}
+
+.ks-track-fill {
+  transition: width 600ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

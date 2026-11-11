@@ -1,19 +1,14 @@
-import { Router, raw } from 'express';
-import crypto from 'crypto';
+import { Router, raw, Request } from 'express';
 import path from 'path';
 import fs from 'fs';
-import { exec } from 'child_process';
-import db, { resetContentCatalog } from '../db/database';
-import { startRun, getRunStatus } from '../engine/dailyRunner';
-import {
-  getSchedule,
-  setSchedule,
-  getChannelSchedule,
-  setChannelSchedule,
-  syncChannelLaunchAgent,
-} from '../engine/dailySchedule';
-import { getPublishTargets, setPublishTargets } from '../engine/publishTargets';
-import { getGrokSettings, setGrokSettings } from '../engine/grokSettings';
+import { HttpError } from '../httpError';
+import { route } from './helpers';
+import { libraryRouter } from './library';
+import { systemRouter } from './system';
+import { listRuns, lastRun } from '../engine/runs';
+import { startRun, getRunStatus, cancelRun, postedTodayCount } from '../engine/dailyRunner';
+import db from '../db/database';
+import { getChannelSchedule, setChannelSchedule, syncChannelLaunchAgent } from '../engine/dailySchedule';
 import { getAccountsOverview, startCheck, startSwitch, cancelAccountOp } from '../engine/accounts';
 import { AccountKey } from '../engine/accountStatus';
 import {
@@ -24,515 +19,92 @@ import {
   deleteChannel,
   referenceImagePath,
   channelDir,
+  Channel,
 } from '../engine/channels';
-import ProductionWorker from '../engine/worker';
-import MonetizationEngine from '../engine/monetizationEngine';
-import Scheduler from '../engine/scheduler';
-import JevEngine from '../engine/jevEngine';
-import OpenAIWriter from '../engine/openaiWriter';
-import GrokVideoGenerator from '../engine/xaiVideoGenerator';
-import KidsSafetyQAInspector from '../engine/qaInspector';
-import JevBrowserAgent from '../engine/jevBrowserAutomation';
 import { getAgent } from '../engine/agentRegistry';
+import { REPO_ROOT } from '../paths';
 
 export const apiRouter = Router();
 
-// GET /api/status - Studio state, settings, connections, and active alerts
-apiRouter.get('/status', (req, res) => {
-  const settings = db.prepare('SELECT * FROM settings WHERE id = 1').get() as any;
-  const connections = db.prepare('SELECT provider, name, account_identifier, status, last_tested_at, last_error FROM account_connections').all();
-  const heldJobsCount = (db.prepare("SELECT COUNT(*) as count FROM jobs WHERE state = 'held_for_review'").get() as any).count;
-  const activeJobsCount = (db.prepare("SELECT COUNT(*) as count FROM jobs WHERE state IN ('planned', 'scripting', 'rendering', 'qa_inspection', 'ready_to_publish')").get() as any).count;
-  const publishedTodayCount = (db.prepare("SELECT COUNT(*) as count FROM jobs WHERE state = 'published' AND created_at >= date('now')").get() as any).count;
-
-  res.json({
-    settings,
-    connections,
-    metrics: {
-      heldJobsCount,
-      activeJobsCount,
-      publishedTodayCount,
-    },
-  });
-});
-
-// POST /api/settings - Update operator configuration
-apiRouter.post('/settings', (req, res) => {
-  const {
-    is_automation_running,
-    daily_posts_target,
-    daily_budget_usd,
-    age_band,
-    language,
-    timezone,
-    demo_mode,
-    revenue_creator_rewards_enabled,
-    revenue_educational_licensing_enabled,
-    revenue_brand_partnerships_enabled,
-    chatgpt_chat_url,
-  } = req.body || {};
-
-  db.prepare(`
-    UPDATE settings
-    SET is_automation_running = COALESCE(?, is_automation_running),
-        daily_posts_target = COALESCE(?, daily_posts_target),
-        daily_budget_usd = COALESCE(?, daily_budget_usd),
-        age_band = COALESCE(?, age_band),
-        language = COALESCE(?, language),
-        timezone = COALESCE(?, timezone),
-        demo_mode = COALESCE(?, demo_mode),
-        revenue_creator_rewards_enabled = COALESCE(?, revenue_creator_rewards_enabled),
-        revenue_educational_licensing_enabled = COALESCE(?, revenue_educational_licensing_enabled),
-        revenue_brand_partnerships_enabled = COALESCE(?, revenue_brand_partnerships_enabled),
-        chatgpt_chat_url = COALESCE(?, chatgpt_chat_url),
-        updated_at = CURRENT_TIMESTAMP
-    WHERE id = 1
-  `).run(
-    is_automation_running !== undefined ? (is_automation_running ? 1 : 0) : null,
-    daily_posts_target,
-    daily_budget_usd,
-    age_band,
-    language,
-    timezone,
-    demo_mode !== undefined ? (demo_mode ? 1 : 0) : null,
-    revenue_creator_rewards_enabled !== undefined ? (revenue_creator_rewards_enabled ? 1 : 0) : null,
-    revenue_educational_licensing_enabled !== undefined ? (revenue_educational_licensing_enabled ? 1 : 0) : null,
-    revenue_brand_partnerships_enabled !== undefined ? (revenue_brand_partnerships_enabled ? 1 : 0) : null,
-    chatgpt_chat_url !== undefined ? chatgpt_chat_url : null
-  );
-
-  res.json({ success: true, settings: db.prepare('SELECT * FROM settings WHERE id = 1').get() });
-});
-
-// POST /api/connections - Save credentials
-apiRouter.post('/connections', (req, res) => {
-  const { provider, api_key, account_identifier } = req.body || {};
-  if (!provider) return res.status(400).json({ error: 'Provider is required' });
-
-  const status = api_key && api_key.trim().length > 0 ? 'connected' : 'disconnected';
-  db.prepare(`
-    UPDATE account_connections
-    SET api_key = ?,
-        account_identifier = COALESCE(?, account_identifier),
-        status = ?,
-        last_tested_at = CURRENT_TIMESTAMP,
-        last_error = NULL
-    WHERE provider = ?
-  `).run(api_key, account_identifier, status, provider);
-
-  res.json({ success: true, provider, status });
-});
-
-// GET /api/slots - Publishing schedule
-apiRouter.get('/slots', (req, res) => {
-  Scheduler.ensureDailySlots();
-  Scheduler.sanitizeMissedSlots();
-  const slots = db.prepare(`
-    SELECT ps.*, j.concept_title, j.state as job_state, j.video_path, j.thumbnail_path, j.tiktok_share_url
-    FROM publishing_slots ps
-    LEFT JOIN jobs j ON ps.assigned_job_id = j.id
-    ORDER BY ps.slot_date DESC, ps.target_time ASC
-  `).all();
-  res.json({ slots });
-});
-
-// GET /api/series - Content Catalog
-apiRouter.get('/series', (req, res) => {
-  const series = db.prepare('SELECT * FROM series ORDER BY created_at DESC').all();
-  res.json({ series });
-});
-
-// POST /api/series/pilot - Commission fresh pilot series with Jev
-apiRouter.post('/series/pilot', async (req, res) => {
+const startedAt = new Date().toISOString();
+const packageVersion: string = (() => {
   try {
-    const settings = db.prepare('SELECT * FROM settings WHERE id = 1').get() as any;
-    const format = req.body.format || 'visual_puzzle';
-
-    const state = `Operator requested commissioning a new pilot series in format: ${format}.
-Target Age Band: ${settings.age_band}.
-Evaluate original concept options and originate fresh characters and design sheet.`;
-
-    const jevRes = await JevEngine.decide(state, {
-      pilot_concept: {
-        type: 'choice',
-        instructions: 'Select concept angle for the new pilot series.',
-        criteria: {
-          concept_a: 'Original visual puzzle: geometric animal silhouette deductions with step reveal.',
-          concept_b: 'Everyday physical wonder: micro nature patterns and gentle curiosity.',
-          concept_c: 'Social-emotional cooperative story: helping forest friends solve small dilemmas.',
-        },
-      },
-    }, { decisionType: 'originate_pilot_series' });
-
-    const newSeriesId = 'ser_' + Date.now().toString(36);
-    const title = format === 'visual_puzzle' ? 'Origami Shadow Explorers' : (format === 'simple_science' ? 'Curious Micro Lab' : 'Forest Meadow Friends');
-
-    db.prepare(`
-      INSERT INTO series (
-        id, title, format, age_band, learning_goal, description,
-        design_sheet, pronunciation_notes, palette_hex, narrator_style,
-        continuity_notes, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pilot')
-    `).run(
-      newSeriesId,
-      title,
-      format,
-      settings.age_band,
-      'Early childhood cognitive reasoning and observation.',
-      `Brand new original series originated by Jev (${jevRes.chosenId}).`,
-      JSON.stringify({ style: 'Handmade tactile papercraft aesthetic', palette: 'High contrast pastel' }),
-      'Cheerful, gentle, clear enunciation.',
-      JSON.stringify(['#2A9D8F', '#E76F51', '#F4A261']),
-      'Warm encouraging educator.',
-      'Always 9:16 vertical framing with clear reveal payoff.'
-    );
-
-    res.json({ success: true, seriesId: newSeriesId });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    return require(path.join(REPO_ROOT, 'package.json')).version || '0.0.0';
+  } catch {
+    return '0.0.0';
   }
-});
+})();
 
-// POST /api/series/creator-rewards-pilot - Long-form (>60s) episode with upfront budget lock
-apiRouter.post('/series/creator-rewards-pilot', async (req, res) => {
-  try {
-    const settings = db.prepare('SELECT * FROM settings WHERE id = 1').get() as any;
-    const series = db.prepare("SELECT * FROM series WHERE status IN ('pilot', 'active') LIMIT 1").get() as any;
-    if (!series) {
-      return res.status(400).json({ error: 'No active series found. Originate a pilot first.' });
-    }
+/** Parses the `:id` route parameter as a positive integer. Anything else is a 400. */
+export function channelIdParam(req: Request): number {
+  const text = String(req.params.id ?? '');
+  if (!/^\d+$/.test(text)) throw new HttpError(400, 'Invalid channel id');
+  const id = Number(text);
+  if (!Number.isSafeInteger(id) || id <= 0) throw new HttpError(400, 'Invalid channel id');
+  return id;
+}
 
-    // Creator Rewards Experiment: Verify duration requirement (> 60s) & budget complete story before render
-    const estRenderCost = 0.25; // estimated 4 shots
-    const reserved = Scheduler.reserveSpend(estRenderCost);
-    if (!reserved) {
-      return res.status(400).json({ error: 'Insufficient daily budget cap to commission Creator Rewards long-form video.' });
-    }
+/** Parses `:id` and makes sure the channel exists. Unknown channel is a 404. */
+function existingChannel(req: Request): { id: number; channel: Channel } {
+  const id = channelIdParam(req);
+  const channel = getChannel(id);
+  if (!channel) throw new HttpError(404, 'Channel not found');
+  return { id, channel };
+}
 
-    const state = `Creator Rewards Experiment: Commissioning >60-second episode for Series "${series.title}".
-Format: ${series.format}. Multi-step progression with 4 distinct scenes.`;
+/** Next scheduled slot as an ISO time (today if one is still ahead, else the first one tomorrow). */
+export function nextRunAt(channel: Channel, now = new Date()): string | null {
+  if (!channel.schedule_enabled || !channel.schedule_times.length) return null;
+  const candidates = channel.schedule_times
+    .map((t) => /^(\d{1,2}):(\d{2})$/.exec(t))
+    .filter((m): m is RegExpExecArray => !!m)
+    .flatMap((m) => [0, 1].map((dayOffset) => {
+      const d = new Date(now);
+      d.setDate(d.getDate() + dayOffset);
+      d.setHours(Number(m[1]), Number(m[2]), 0, 0);
+      return d;
+    }))
+    .filter((d) => d.getTime() > now.getTime())
+    .sort((a, b) => a.getTime() - b.getTime());
+  return candidates.length ? candidates[0].toISOString() : null;
+}
 
-    const jevChoice = await JevEngine.decide(state, {
-      creator_rewards_approval: {
-        type: 'choice',
-        instructions: 'Confirm eligibility and approve Creator Rewards long-form storyboard budget.',
-        criteria: {
-          approve_long_form: 'Approve 65-second episode with 4 distinct scenes and upfront budget lock.',
-          defer_test: 'Defer test to next cycle.',
-        },
-      },
-    }, { seriesId: series.id, decisionType: 'creator_rewards_authorization' });
-
-    const script = await OpenAIWriter.writeContent({
-      format: series.format,
-      ageBand: series.age_band,
-      language: settings.language,
-      learningGoal: series.learning_goal,
-      targetDurationSec: 65,
-      seriesTitle: series.title,
-    });
-
-    const jobId = 'job_cr_' + Date.now().toString(36);
-    db.prepare(`
-      INSERT INTO jobs (
-        id, series_id, concept_title, format, age_band, hook, hypothesis,
-        script_text, shot_briefs_json, captions_json, state, estimated_cost_usd,
-        spend_reserved_usd, is_demo_job
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scripting', ?, ?, ?)
-    `).run(
-      jobId,
-      series.id,
-      `Creator Rewards: ${script.concept_title}`,
-      series.format,
-      series.age_band,
-      script.hook,
-      'Episodes >60s with multi-step progression qualify for Creator Rewards pool and generate higher RPM.',
-      script.script_text,
-      JSON.stringify(script.shot_briefs),
-      JSON.stringify(script.captions),
-      estRenderCost,
-      estRenderCost,
-      settings.demo_mode
-    );
-
-    res.json({
-      success: true,
-      jobId,
-      title: script.concept_title,
-      durationTarget: '65s (>60s Creator Rewards Qualified)',
-      jevChoice: jevChoice.chosenId,
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /api/jobs - Production jobs list
-apiRouter.get('/jobs', (req, res) => {
-  const { state, channel_id } = req.query;
-  let query = 'SELECT j.*, c.name as channel_name FROM jobs j LEFT JOIN channels c ON j.channel_id = c.id';
-  const conditions: string[] = [];
-  const params: any[] = [];
-  if (state) {
-    conditions.push('j.state = ?');
-    params.push(state);
-  }
-  if (channel_id) {
-    conditions.push('j.channel_id = ?');
-    params.push(Number(channel_id));
-  }
-  if (conditions.length > 0) {
-    query += ' WHERE ' + conditions.join(' AND ');
-  }
-  query += ' ORDER BY j.created_at DESC LIMIT 50';
-  const jobs = db.prepare(query).all(...params);
-  res.json({ jobs });
-});
-
-// GET /api/jobs/:id - Single job details with QA inspection
-apiRouter.get('/jobs/:id', (req, res) => {
-  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(req.params.id) as any;
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-
-  const qa = db.prepare('SELECT * FROM qa_inspections WHERE job_id = ? ORDER BY reviewed_at DESC LIMIT 1').get(job.id);
-  const decisions = db.prepare('SELECT * FROM decisions_log WHERE job_id = ? ORDER BY created_at ASC').all(job.id);
-  const ledger = db.prepare('SELECT * FROM financial_ledger WHERE job_id = ?').all(job.id);
-
-  res.json({
-    job,
-    qa,
-    decisions,
-    ledger,
-  });
-});
-
-// POST /api/jobs/:id/action - Manual QA disposition or retry
-apiRouter.post('/jobs/:id/action', (req, res) => {
-  const { action } = req.body;
-  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(req.params.id) as any;
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-
-  if (action === 'approve_held') {
-    db.prepare("UPDATE jobs SET state = 'ready_to_publish', hold_reason = NULL WHERE id = ?").run(job.id);
-    db.prepare("UPDATE qa_inspections SET reviewer_action = 'manually_approved' WHERE job_id = ?").run(job.id);
-  } else if (action === 'discard') {
-    db.prepare("UPDATE jobs SET state = 'rejected' WHERE id = ?").run(job.id);
-    db.prepare("UPDATE qa_inspections SET reviewer_action = 'discarded' WHERE job_id = ?").run(job.id);
-  }
-
-  res.json({ success: true, state: action === 'approve_held' ? 'ready_to_publish' : 'rejected' });
-});
-
-// GET /api/decisions - Trace Log of Jev Choices
-apiRouter.get('/decisions', (req, res) => {
-  const decisions = db.prepare('SELECT * FROM decisions_log ORDER BY created_at DESC LIMIT 100').all();
-  res.json({ decisions });
-});
-
-// GET /api/economics - Full Studio Financials & Series P&L
-apiRouter.get('/economics', (req, res) => {
-  MonetizationEngine.seedWeeklyExperiments();
-  const summary = MonetizationEngine.getFinancialSummary();
-  const experiments = db.prepare('SELECT * FROM experiments ORDER BY created_at DESC').all();
-
-  res.json({
-    summary,
-    experiments,
-  });
-});
-
-// POST /api/economics/revenue - Record confirmed platform or licensing payout
-apiRouter.post('/economics/revenue', (req, res) => {
-  const { seriesId, category, amountUsd, notes } = req.body;
-  if (!seriesId || !amountUsd || !category) {
-    return res.status(400).json({ error: 'seriesId, category, and amountUsd are required.' });
-  }
-
-  const ledId = 'led_rev_' + crypto.randomUUID().slice(0, 8);
-  db.prepare(`
-    INSERT INTO financial_ledger (
-      id, series_id, category, amount_usd, is_revenue, status, is_demo_data, notes, created_at
-    ) VALUES (?, ?, ?, ?, 1, 'confirmed', 0, ?, CURRENT_TIMESTAMP)
-  `).run(ledId, seriesId, category, parseFloat(amountUsd), notes || 'Manual revenue entry');
-
-  db.prepare(`
-    UPDATE series
-    SET gross_earnings_usd = gross_earnings_usd + ?
-    WHERE id = ?
-  `).run(parseFloat(amountUsd), seriesId);
-
-  res.json({ success: true, id: ledId, seriesId, amountUsd });
-});
-
-// GET /api/economics/export - CSV Export of Itemized Financial Ledger
-apiRouter.get('/economics/export', (req, res) => {
-  const rows = db.prepare(`
-    SELECT fl.id, fl.created_at, fl.series_id, s.title as series_title,
-           fl.category, fl.amount_usd, fl.is_revenue, fl.status, fl.is_demo_data, fl.notes
-    FROM financial_ledger fl
-    LEFT JOIN series s ON fl.series_id = s.id
-    ORDER BY fl.created_at DESC
-  `).all() as any[];
-
-  let csv = 'ID,Date,SeriesID,SeriesTitle,Category,AmountUSD,IsRevenue,Status,IsDemo,Notes\n';
-  for (const r of rows) {
-    csv += `"${r.id}","${r.created_at}","${r.series_id || ''}","${(r.series_title || '').replace(/"/g, '""')}","${r.category}",${r.amount_usd},${r.is_revenue},"${r.status}",${r.is_demo_data},"${(r.notes || '').replace(/"/g, '""')}"\n`;
-  }
-
-  res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', 'attachment; filename="KindredStudio_Financial_Ledger.csv"');
-  res.send(csv);
-});
-
-// POST /api/worker/tick - Trigger worker cycle manually
-apiRouter.post('/worker/tick', async (req, res) => {
-  const result = await ProductionWorker.executeCycle();
-  res.json(result);
-});
-
-// POST /api/catalog/reset - Reset content catalog to empty state
-apiRouter.post('/catalog/reset', (req, res) => {
-  resetContentCatalog();
-  res.json({ success: true, message: 'Content catalog has been completely emptied.' });
-});
-
-// POST /browser/open - Open visible browser window to authenticate ChatGPT & Grok
-apiRouter.post('/browser/open', async (req, res) => {
-  try {
-    const result = await JevBrowserAgent.openInteractiveSession();
-    res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /browser/inspect - Inspect active tabs and elements
-apiRouter.get('/browser/inspect', async (req, res) => {
-  try {
-    const result = await JevBrowserAgent.inspectSession();
-    res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// POST /browser/detect-chatgpt - Detect and pin "Create Mr Apple Videos" conversation from ChatGPT sidebar
-apiRouter.post('/browser/detect-chatgpt', async (req, res) => {
-  try {
-    const result = await JevBrowserAgent.detectAndSetChatGptUrl();
-    res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// POST /browser/set-chatgpt-url - Explicitly configure the ChatGPT conversation URL
-apiRouter.post('/browser/set-chatgpt-url', (req, res) => {
-  try {
-    const { url } = req.body || {};
-    if (!url || typeof url !== 'string' || !url.startsWith('http')) {
-      return res.status(400).json({ error: 'A valid ChatGPT conversation URL starting with https:// is required.' });
-    }
-    JevBrowserAgent.saveChatGptUrl(url.trim());
-    res.json({ success: true, url: url.trim(), message: 'ChatGPT conversation URL updated and saved.' });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// POST /browser/run - ONE button: opens the browser, signs in only if needed, then ChatGPT -> Grok -> TikTok.
-// Runs in the background; poll GET /browser/run-status.
-apiRouter.post('/browser/run', (req, res) => {
-  const trigger = req.body?.trigger === 'schedule' ? 'schedule' : 'button';
-  const targetDurationSec = req.body?.targetDurationSec !== undefined ? Number(req.body.targetDurationSec) : undefined;
-  const targetResolution = req.body?.targetResolution === '480p' || req.body?.targetResolution === '720p' ? req.body.targetResolution : undefined;
-  const result = startRun(trigger, 1, targetDurationSec, targetResolution);
-  if (!result.started) return res.status(409).json({ error: result.reason, ...getRunStatus(1) });
-  res.status(202).json({ started: true, ...getRunStatus(1) });
-});
-
-// Grok video settings: quality (480p/720p) and duration (6s/10s/15s)
-apiRouter.get('/grok/settings', (req, res) => {
-  res.json(getGrokSettings());
-});
-
-apiRouter.post('/grok/settings', (req, res) => {
-  try {
-    res.json(setGrokSettings(req.body || {}));
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// "I'm already signed in — continue": stops the run from waiting on a sign-in it wrongly thinks is needed.
-apiRouter.post('/browser/skip-login', (req, res) => {
-  JevBrowserAgent.skipLoginWait();
-  res.json({ success: true });
-});
-
-apiRouter.get('/browser/run-status', (req, res) => {
-  res.json(getRunStatus());
-});
-
-// Accounts: see which platforms are signed in, and switch each one to a different account.
-apiRouter.get('/accounts', (req, res) => {
-  res.json(getAccountsOverview());
-});
-
-apiRouter.post('/accounts/check', (req, res) => {
-  const r = startCheck();
-  if (!r.started) return res.status(409).json({ error: r.reason, ...getAccountsOverview() });
-  res.status(202).json(getAccountsOverview());
-});
-
-apiRouter.post('/accounts/cancel', (req, res) => {
-  cancelAccountOp();
-  res.json({ success: true });
-});
-
-apiRouter.post('/accounts/:site/switch', (req, res) => {
-  const r = startSwitch(req.params.site as AccountKey);
-  if (!r.started) return res.status(409).json({ error: r.reason, ...getAccountsOverview() });
-  res.status(202).json(getAccountsOverview());
-});
-
-// Where videos are posted (TikTok / YouTube) and YouTube's made-for-kids answer (YouTube is always public)
-apiRouter.get('/publish-targets', (req, res) => {
-  res.json(getPublishTargets());
-});
-
-apiRouter.post('/publish-targets', (req, res) => {
-  try {
-    res.json(setPublishTargets(req.body || {}));
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// Daily automatic posting (macOS LaunchAgent)
-apiRouter.get('/schedule', (req, res) => {
-  res.json(getSchedule());
-});
-
-apiRouter.post('/schedule', async (req, res) => {
-  try {
-    const enabled = !!req.body?.enabled;
-    const times: string[] = Array.isArray(req.body?.times) ? req.body.times.map(String) : [String(req.body?.time || '10:00')];
-    res.json(await setSchedule(enabled, times));
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// Channels CRUD & reference picture management
-apiRouter.get('/channels', (req, res) => {
-  const channels = listChannels().map((c) => ({
+function channelView(c: Channel) {
+  const count = (where: string) =>
+    (db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE channel_id = ? ${where}`).get(c.id) as { n: number }).n;
+  return {
     ...c,
     hasReferenceImage: Boolean(referenceImagePath(c.id)),
     runStatus: getRunStatus(c.id),
     accounts: getAccountsOverview(c.id),
-  }));
-  res.json({ channels });
+    stats: {
+      postedToday: postedTodayCount(c.id),
+      totalVideos: count(''),
+      heldForReview: count("AND state = 'held_for_review'"),
+    },
+    lastRun: lastRun(c.id),
+    nextRunAt: nextRunAt(c),
+  };
+}
+
+apiRouter.use(systemRouter);
+apiRouter.use(libraryRouter);
+
+apiRouter.get('/health', (req, res) => {
+  res.json({
+    ok: true,
+    name: 'kindred-studio',
+    version: packageVersion,
+    startedAt,
+    uptimeSec: Math.round(process.uptime()),
+    pid: process.pid,
+  });
+});
+
+// ───────────────────────── Channels ─────────────────────────
+
+apiRouter.get('/channels', (req, res) => {
+  res.json({ channels: listChannels().map(channelView) });
 });
 
 apiRouter.post('/channels', (req, res) => {
@@ -545,85 +117,107 @@ apiRouter.post('/channels', (req, res) => {
 });
 
 apiRouter.get('/channels/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const c = getChannel(id);
-  if (!c) return res.status(404).json({ error: 'Channel not found' });
-  res.json({
-    ...c,
-    hasReferenceImage: Boolean(referenceImagePath(c.id)),
-    runStatus: getRunStatus(id),
-    accounts: getAccountsOverview(id),
-  });
+  res.json(channelView(existingChannel(req).channel));
 });
 
-apiRouter.patch('/channels/:id', async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const updated = updateChannel(id, req.body || {});
+apiRouter.patch(
+  '/channels/:id',
+  route(async (req, res) => {
+    const { id } = existingChannel(req);
+    let updated: Channel;
+    try {
+      updated = updateChannel(id, req.body || {});
+    } catch (err: any) {
+      throw new HttpError(400, err.message);
+    }
     if (req.body?.schedule_enabled !== undefined || req.body?.schedule_times !== undefined) {
-      await syncChannelLaunchAgent(id, updated.schedule_enabled, updated.schedule_times).catch((e) => {
+      try {
+        await syncChannelLaunchAgent(id, updated.schedule_enabled, updated.schedule_times);
+      } catch (e: any) {
+        // The channel is saved. Tell the client the schedule did not get installed.
         console.warn(`[api] Could not sync LaunchAgent for channel ${id}:`, e.message);
-      });
+        return res.json({ ...updated, scheduleWarning: `Saved, but the daily schedule could not be installed: ${e.message}` });
+      }
     }
     res.json(updated);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
-apiRouter.get('/channels/:id/schedule', (req, res) => {
-  try {
-    const id = Number(req.params.id);
+apiRouter.get(
+  '/channels/:id/schedule',
+  route((req, res) => {
+    const { id } = existingChannel(req);
     res.json(getChannelSchedule(id));
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
-apiRouter.post('/channels/:id/schedule', async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const enabled = !!req.body?.enabled;
-    const times: string[] = Array.isArray(req.body?.times)
-      ? req.body.times.map(String)
-      : [String(req.body?.time || '10:00')];
-    res.json(await setChannelSchedule(id, enabled, times));
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+apiRouter.post(
+  '/channels/:id/schedule',
+  route(async (req, res) => {
+    const { id } = existingChannel(req);
+    try {
+      const enabled = !!req.body?.enabled;
+      const times: string[] = Array.isArray(req.body?.times)
+        ? req.body.times.map(String)
+        : [String(req.body?.time || '10:00')];
+      res.json(await setChannelSchedule(id, enabled, times));
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  })
+);
 
-apiRouter.delete('/channels/:id', (req, res) => {
-  try {
-    deleteChannel(Number(req.params.id));
+apiRouter.delete(
+  '/channels/:id',
+  route((req, res) => {
+    const { id } = existingChannel(req);
+    try {
+      deleteChannel(id);
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message });
+    }
     res.json({ success: true });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  })
+);
+
+// ───────────────────────── Reference image ─────────────────────────
+
+/** Detects JPEG, PNG or WebP from the file's first bytes. The content-type header is not trusted. */
+export function detectImageExtension(buf: Buffer): '.jpg' | '.png' | '.webp' | null {
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg';
+  const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (buf.length >= 8 && buf.subarray(0, 8).equals(pngSignature)) return '.png';
+  if (buf.length >= 12 && buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WEBP') {
+    return '.webp';
   }
-});
+  return null;
+}
 
-apiRouter.get('/channels/:id/reference-image', (req, res) => {
-  const img = referenceImagePath(Number(req.params.id));
-  if (!img || !fs.existsSync(img)) return res.status(404).json({ error: 'No reference image found' });
-  res.setHeader('Cache-Control', 'no-store');
-  res.sendFile(path.resolve(img));
-});
+apiRouter.get(
+  '/channels/:id/reference-image',
+  route((req, res) => {
+    const { id } = existingChannel(req);
+    const img = referenceImagePath(id);
+    if (!img || !fs.existsSync(img)) return res.status(404).json({ error: 'No reference image found' });
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(path.resolve(img));
+  })
+);
 
-apiRouter.post('/channels/:id/reference-image', raw({ type: ['image/*', 'application/octet-stream'], limit: '15mb' }), (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const channel = getChannel(id);
-    if (!channel) return res.status(404).json({ error: 'Channel not found' });
+apiRouter.post(
+  '/channels/:id/reference-image',
+  raw({ type: ['image/*', 'application/octet-stream'], limit: '15mb' }),
+  route((req, res) => {
+    const { id } = existingChannel(req);
 
     const buf = req.body;
     if (!buf || !Buffer.isBuffer(buf) || buf.length < 100) {
       return res.status(400).json({ error: 'Invalid image data' });
     }
-
-    const ct = (req.headers['content-type'] || '').toLowerCase();
-    let ext = '.jpg';
-    if (ct.includes('png')) ext = '.png';
-    else if (ct.includes('webp')) ext = '.webp';
+    const ext = detectImageExtension(buf);
+    if (!ext) {
+      return res.status(400).json({ error: 'Unsupported image type. Use JPEG, PNG or WebP.' });
+    }
 
     const dir = channelDir(id);
     // Remove existing reference files
@@ -640,182 +234,111 @@ apiRouter.post('/channels/:id/reference-image', raw({ type: ['image/*', 'applica
     fs.renameSync(tmp, target);
 
     res.json({ success: true, path: target });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
+  })
+);
 
-// Channel-specific run and status
-apiRouter.post('/channels/:id/run', (req, res) => {
-  const id = Number(req.params.id);
-  const trigger = req.body?.trigger === 'schedule' ? 'schedule' : 'button';
-  const targetDurationSec = req.body?.targetDurationSec !== undefined ? Number(req.body.targetDurationSec) : undefined;
-  const targetResolution = req.body?.targetResolution === '480p' || req.body?.targetResolution === '720p' ? req.body.targetResolution : undefined;
-  const result = startRun(trigger, id, targetDurationSec, targetResolution);
-  if (!result.started) return res.status(409).json({ error: result.reason, ...getRunStatus(id) });
-  res.status(202).json({ started: true, ...getRunStatus(id) });
-});
+// ───────────────────────── Run ─────────────────────────
 
-apiRouter.get('/channels/:id/run-status', (req, res) => {
-  res.json(getRunStatus(Number(req.params.id)));
-});
+apiRouter.post(
+  '/channels/:id/run',
+  route((req, res) => {
+    const { id } = existingChannel(req);
+    const trigger = req.body?.trigger === 'schedule' ? 'schedule' : 'button';
+    const targetDurationSec = req.body?.targetDurationSec !== undefined ? Number(req.body.targetDurationSec) : undefined;
+    const targetResolution = req.body?.targetResolution === '480p' || req.body?.targetResolution === '720p' ? req.body.targetResolution : undefined;
+    const result = startRun(trigger, id, targetDurationSec, targetResolution);
+    if (!result.started) return res.status(409).json({ error: result.reason, ...getRunStatus(id) });
+    res.status(202).json({ started: true, ...getRunStatus(id) });
+  })
+);
 
-apiRouter.post('/channels/:id/skip-login', (req, res) => {
-  getAgent(Number(req.params.id)).skipLoginWait();
-  res.json({ success: true });
-});
+apiRouter.post(
+  '/channels/:id/cancel-run',
+  route(async (req, res) => {
+    const { id } = existingChannel(req);
+    res.json(await cancelRun(id));
+  })
+);
 
-apiRouter.get('/channels/:id/accounts', (req, res) => {
-  res.json(getAccountsOverview(Number(req.params.id)));
-});
+apiRouter.get(
+  '/runs',
+  route((req, res) => {
+    const channelId = req.query.channel_id ? Number(req.query.channel_id) : undefined;
+    if (channelId !== undefined && (!Number.isInteger(channelId) || channelId <= 0)) throw new HttpError(400, 'Invalid channel id');
+    res.json({ runs: listRuns({ channelId, limit: Number(req.query.limit) || 50 }) });
+  })
+);
 
-apiRouter.post('/channels/:id/accounts/check', (req, res) => {
-  const id = Number(req.params.id);
-  const r = startCheck(id);
-  if (!r.started) return res.status(409).json({ error: r.reason, ...getAccountsOverview(id) });
-  res.status(202).json(getAccountsOverview(id));
-});
+apiRouter.get(
+  '/channels/:id/run-status',
+  route((req, res) => {
+    const { id } = existingChannel(req);
+    res.json(getRunStatus(id));
+  })
+);
 
-apiRouter.post('/channels/:id/accounts/cancel', (req, res) => {
-  cancelAccountOp(Number(req.params.id));
-  res.json({ success: true });
-});
+apiRouter.post(
+  '/channels/:id/skip-login',
+  route((req, res) => {
+    const { id } = existingChannel(req);
+    getAgent(id).skipLoginWait();
+    res.json({ success: true });
+  })
+);
 
-apiRouter.post('/channels/:id/accounts/:site/switch', (req, res) => {
-  const id = Number(req.params.id);
-  const r = startSwitch(req.params.site as AccountKey, id);
-  if (!r.started) return res.status(409).json({ error: r.reason, ...getAccountsOverview(id) });
-  res.status(202).json(getAccountsOverview(id));
-});
+// ───────────────────────── Accounts ─────────────────────────
 
-apiRouter.post('/channels/:id/open-browser', async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const result = await getAgent(id).openInteractiveSession();
-    res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
+apiRouter.get(
+  '/channels/:id/accounts',
+  route((req, res) => {
+    const { id } = existingChannel(req);
+    res.json(getAccountsOverview(id));
+  })
+);
 
-apiRouter.post('/channels/:id/detect-chatgpt-url', async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const result = await getAgent(id).detectAndSetChatGptUrl();
-    res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
+apiRouter.post(
+  '/channels/:id/accounts/check',
+  route((req, res) => {
+    const { id } = existingChannel(req);
+    const r = startCheck(id);
+    if (!r.started) return res.status(409).json({ error: r.reason, ...getAccountsOverview(id) });
+    res.status(202).json(getAccountsOverview(id));
+  })
+);
 
-// Storage Management Endpoints (View, Open in Finder, Clean to free space)
-apiRouter.post('/storage/open-videos-folder', (req, res) => {
-  const videosDir = path.join(__dirname, '../../storage/videos');
-  if (!fs.existsSync(videosDir)) fs.mkdirSync(videosDir, { recursive: true });
-  exec(`open "${videosDir}"`, (err) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json({ success: true, path: videosDir });
-  });
-});
+apiRouter.post(
+  '/channels/:id/accounts/cancel',
+  route((req, res) => {
+    const { id } = existingChannel(req);
+    cancelAccountOp(id);
+    res.json({ success: true });
+  })
+);
 
-apiRouter.get('/storage/status', (req, res) => {
-  const storageDir = path.join(__dirname, '../../storage');
-  const videosDir = path.join(storageDir, 'videos');
-  const framesDir = path.join(storageDir, 'frames');
-  const thumbsDir = path.join(storageDir, 'thumbnails');
+apiRouter.post(
+  '/channels/:id/accounts/:site/switch',
+  route((req, res) => {
+    const { id } = existingChannel(req);
+    const r = startSwitch(req.params.site as AccountKey, id);
+    if (!r.started) return res.status(409).json({ error: r.reason, ...getAccountsOverview(id) });
+    res.status(202).json(getAccountsOverview(id));
+  })
+);
 
-  const getDirSize = (dir: string) => {
-    if (!fs.existsSync(dir)) return 0;
-    return fs.readdirSync(dir).reduce((acc, file) => {
-      try {
-        const stats = fs.statSync(path.join(dir, file));
-        return acc + stats.size;
-      } catch {
-        return acc;
-      }
-    }, 0);
-  };
+// ───────────────────────── Browser helpers ─────────────────────────
 
-  const videosSizeBytes = getDirSize(videosDir);
-  const framesSizeBytes = getDirSize(framesDir);
-  const thumbsSizeBytes = getDirSize(thumbsDir);
-  const totalSizeBytes = videosSizeBytes + framesSizeBytes + thumbsSizeBytes;
+apiRouter.post(
+  '/channels/:id/open-browser',
+  route(async (req, res) => {
+    const { id } = existingChannel(req);
+    res.json(await getAgent(id).openInteractiveSession());
+  })
+);
 
-  const videoFiles = fs.existsSync(videosDir)
-    ? fs.readdirSync(videosDir)
-      .filter(f => f.endsWith('.mp4'))
-      .map(f => {
-        const stats = fs.statSync(path.join(videosDir, f));
-        return {
-          fileName: f,
-          sizeBytes: stats.size,
-          sizeMb: (stats.size / (1024 * 1024)).toFixed(2),
-          createdAt: stats.birthtime,
-          isFinal: f.startsWith('final_'),
-          isShot: f.startsWith('shot_'),
-        };
-      })
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-    : [];
-
-  res.json({
-    videosFolder: videosDir,
-    totalSizeBytes,
-    totalSizeMb: (totalSizeBytes / (1024 * 1024)).toFixed(1),
-    videosSizeMb: (videosSizeBytes / (1024 * 1024)).toFixed(1),
-    framesSizeMb: (framesSizeBytes / (1024 * 1024)).toFixed(1),
-    thumbsSizeMb: (thumbsSizeBytes / (1024 * 1024)).toFixed(1),
-    videoFiles,
-  });
-});
-
-apiRouter.delete('/storage/videos/:fileName', (req, res) => {
-  const fileName = path.basename(req.params.fileName);
-  const filePath = path.join(__dirname, '../../storage/videos', fileName);
-  if (fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
-    return res.json({ success: true, message: `Deleted ${fileName}` });
-  }
-  res.status(404).json({ error: 'File not found' });
-});
-
-apiRouter.post('/storage/clean-temp-files', (req, res) => {
-  const storageDir = path.join(__dirname, '../../storage');
-  const videosDir = path.join(storageDir, 'videos');
-  const framesDir = path.join(storageDir, 'frames');
-  let deletedCount = 0;
-  let freedBytes = 0;
-
-  if (fs.existsSync(videosDir)) {
-    for (const f of fs.readdirSync(videosDir)) {
-      if (f.startsWith('shot_') || f.endsWith('.srt') || f.endsWith('.vtt') || f.endsWith('.m4a') || f.endsWith('.aiff') || f.includes('dummy')) {
-        try {
-          const fp = path.join(videosDir, f);
-          freedBytes += fs.statSync(fp).size;
-          fs.unlinkSync(fp);
-          deletedCount++;
-        } catch { }
-      }
-    }
-  }
-
-  if (fs.existsSync(framesDir)) {
-    for (const f of fs.readdirSync(framesDir)) {
-      if (f.endsWith('.png') || f.endsWith('.jpg')) {
-        try {
-          const fp = path.join(framesDir, f);
-          freedBytes += fs.statSync(fp).size;
-          fs.unlinkSync(fp);
-          deletedCount++;
-        } catch { }
-      }
-    }
-  }
-
-  res.json({
-    success: true,
-    deletedCount,
-    freedMb: (freedBytes / (1024 * 1024)).toFixed(2),
-    message: `Cleaned up ${deletedCount} temporary files, freeing ${(freedBytes / (1024 * 1024)).toFixed(2)} MB!`,
-  });
-});
+apiRouter.post(
+  '/channels/:id/detect-chatgpt-url',
+  route(async (req, res) => {
+    const { id } = existingChannel(req);
+    res.json(await getAgent(id).detectAndSetChatGptUrl());
+  })
+);

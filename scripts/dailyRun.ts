@@ -17,7 +17,7 @@ const chArgIdx = process.argv.indexOf('--channel');
 const CHANNEL_ID = chArgIdx !== -1 && process.argv[chArgIdx + 1] ? Number(process.argv[chArgIdx + 1]) || 1 : 1;
 
 const PORT = Number(process.env.SERVER_PORT) || 3000;
-const BASE = `http://localhost:${PORT}`;
+const BASE = `http://127.0.0.1:${PORT}`;
 
 const log = (msg: string) => console.log(`[${new Date().toLocaleString()}] [daily-ch${CHANNEL_ID}] ${msg}`);
 
@@ -55,6 +55,7 @@ async function runViaRunningApp(): Promise<{ ok: boolean; message: string }> {
     }
     if (st.state === 'done') return { ok: true, message: st.step };
     if (st.state === 'error') return { ok: false, message: st.error || st.step };
+    if (st.state === 'cancelled') return { ok: false, message: 'The run was stopped from the app.' };
   }
   return { ok: false, message: 'Timed out after 90 minutes.' };
 }
@@ -64,6 +65,7 @@ async function runDirect(): Promise<{ ok: boolean; message: string; stage?: stri
   const { initDatabase } = await import('../server/db/database');
   const { startRun, waitForRun, getRunStatus } = await import('../server/engine/dailyRunner');
   initDatabase();
+  (await import('../server/engine/runs')).closeInterruptedRuns();
 
   const started = startRun('schedule', CHANNEL_ID);
   if (!started.started) return { ok: false, message: started.reason || 'Could not start.' };

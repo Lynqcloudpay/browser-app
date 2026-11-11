@@ -6,17 +6,14 @@ import { promisify } from 'util';
 import { chromium, BrowserContext, Page, FileChooser } from 'playwright';
 
 const execFileAsync = promisify(execFile);
-import JevEngine from './jevEngine';
-import { ScriptPackage, ShotBrief } from './openaiWriter';
 import db from '../db/database';
-import GrokVideoGenerator from './xaiVideoGenerator';
-import KidsSafetyQAInspector from './qaInspector';
-import BufferTikTokPublisher from './bufferPublisher';
-import { getPublishTargets, PublishTargets } from './publishTargets';
+import { inspectJob } from './qaInspector';
+import { ScriptPackage, GrokResolution } from './types';
 import { ACCOUNT_KEYS, AccountKey, recordAccountStatus } from './accountStatus';
-import { getGrokSettings } from './grokSettings';
 import { withClipboard } from './clipboardLock';
 import { withGrokSlot } from './grokSemaphore';
+import { isValidVideoBuffer, isValidVideoFile } from './videoFile';
+import { FRAMES_DIR, THUMBNAILS_DIR, VIDEOS_DIR } from '../paths';
 import {
   getChannel,
   updateChannel,
@@ -42,6 +39,35 @@ export interface GrokVideoSpec {
 }
 const GROK_DURATIONS: GrokVideoSpec['durationSec'][] = [6, 10, 15];
 
+export interface PipelineOptions {
+  targetDurationSec?: number;
+  targetResolution?: GrokResolution;
+  onProgress?: (step: string, kind?: 'running' | 'waiting_login') => void;
+  /** Called once the video's row exists in the database, with its id. */
+  onJob?: (jobId: string) => void;
+}
+
+export interface PipelineResult {
+  success: boolean;
+  jobId: string;
+  title: string;
+  hook: string;
+  videoPath: string;
+  thumbnailPath?: string;
+  durationSeconds: number;
+  qaPassed: boolean;
+  tiktokStatus: string;
+  tiktokVerified: boolean;
+  tiktokUrl?: string;
+  youtubeStatus: string;
+  youtubeVerified: boolean;
+  youtubeUrl?: string;
+  postedEverywhere: boolean;
+  /** True when at least one platform accepted the post (confirmed or not). */
+  postedAnywhere: boolean;
+  message: string;
+}
+
 export class ChannelBrowserAgent {
   public readonly channelId: number;
   private userProfileDir: string;
@@ -53,6 +79,7 @@ export class ChannelBrowserAgent {
   private pipelineRunning = false;
   private skipLogin = false;
   private accountCancel = false;
+  private cancelRequested = false;
 
   constructor(channelId = 1) {
     this.channelId = channelId;
@@ -181,98 +208,6 @@ export class ChannelBrowserAgent {
   }
 
   /**
-   * Jev Ultrafast Autonomous Decision Step (Powered by browser-use/jev-ultrafast)
-   * Takes a DOM snapshot using snapshot.js, feeds the indexed element table to TypeSafe Jev,
-   * and executes the selected operation (CLICK or TYPE_TEXT) on the live DOM node.
-   */
-  public async executeJevUltrafastStep(
-    page: Page,
-    goal: string,
-    textToFill?: string
-  ): Promise<{ success: boolean; operation?: string; targetLabel?: string; latencyMs: number }> {
-    const startTime = Date.now();
-    try {
-      const snapshotPath = path.join(__dirname, '../../vendor/jev-ultrafast/jev_ultrafast/snapshot.js');
-      if (!fs.existsSync(snapshotPath)) {
-        return { success: false, latencyMs: Date.now() - startTime };
-      }
-      const snapshotCode = fs.readFileSync(snapshotPath, 'utf8');
-
-      // 1. Evaluate snapshot.js inside page context to get indexed action table
-      const snapshot = await page.evaluate((code) => {
-        return eval(code);
-      }, snapshotCode);
-
-      if (!snapshot || !snapshot.actions || snapshot.actions.length === 0) {
-        return { success: false, latencyMs: Date.now() - startTime };
-      }
-
-      // 2. Map actions to candidate choices for Jev
-      const candidates: Record<string, string> = {};
-      const actionMap = new Map<string, any>();
-
-      snapshot.actions.slice(0, 30).forEach((a: any, idx: number) => {
-        const key = `elem_${idx + 1}`;
-        candidates[key] = `[${a.role}] ${a.label || a.kind}`;
-        actionMap.set(key, a);
-      });
-
-      // 3. Ask TypeSafe Jev to pick the control that achieves the goal
-      const jevDecision = await JevEngine.decide(
-        `Jev Ultrafast Navigation: Goal is "${goal}". Page Title: "${await page.title()}". Available interactive controls:\n${Object.entries(candidates).map(([k, v]) => `${k}: ${v}`).join('\n')}`,
-        {
-          action_target: {
-            type: 'choice',
-            instructions: `Select the single element index that best advances the goal: "${goal}".`,
-            criteria: candidates,
-          },
-        },
-        { decisionType: 'jev_ultrafast_step' }
-      );
-
-      const chosenKey = jevDecision.chosenId;
-      const targetAction = actionMap.get(chosenKey);
-
-      if (!targetAction) {
-        return { success: false, latencyMs: Date.now() - startTime };
-      }
-
-      console.log(`[JevUltrafast] Jev chose: ${chosenKey} (${candidates[chosenKey]}) with confidence ${jevDecision.confidence} in ${Date.now() - startTime}ms`);
-
-      // 4. Dispatch the action directly to the cached DOM node via window.__jevFast
-      if (targetAction.kind === 'fill' && textToFill) {
-        await page.evaluate(({ nodeId, val }) => {
-          const node = (window as any).__jevFast?.nodes?.get(nodeId);
-          if (node) {
-            node.focus();
-            if ('value' in node) node.value = val;
-            node.dispatchEvent(new Event('input', { bubbles: true }));
-            node.dispatchEvent(new Event('change', { bubbles: true }));
-          }
-        }, { nodeId: targetAction.node, val: textToFill });
-      } else {
-        await page.evaluate((nodeId) => {
-          const node = (window as any).__jevFast?.nodes?.get(nodeId);
-          if (node) {
-            node.scrollIntoView({ block: 'center', inline: 'center' });
-            node.click();
-          }
-        }, targetAction.node);
-      }
-
-      return {
-        success: true,
-        operation: targetAction.kind,
-        targetLabel: targetAction.label,
-        latencyMs: Date.now() - startTime,
-      };
-    } catch (err: any) {
-      console.warn('[JevUltrafast] Step error:', err.message);
-      return { success: false, latencyMs: Date.now() - startTime };
-    }
-  }
-
-  /**
    * Get the active or configured ChatGPT conversation URL for this channel.
    */
   public getConfiguredChatGptUrl(): string {
@@ -286,8 +221,15 @@ export class ChannelBrowserAgent {
         return u;
       }
       if (this.channelId === 1) {
-        const row = db.prepare('SELECT chatgpt_chat_url FROM settings WHERE id = 1').get() as any;
-        const legacy = row?.chatgpt_chat_url?.trim() || process.env.CHATGPT_MR_APPLE_URL?.trim() || '';
+        // Legacy single-row settings table: absent on fresh databases, so a failure here means "no legacy URL".
+        let legacyUrl = '';
+        try {
+          const row = db.prepare('SELECT chatgpt_chat_url FROM settings WHERE id = 1').get() as any;
+          legacyUrl = row?.chatgpt_chat_url?.trim() || '';
+        } catch {
+          legacyUrl = '';
+        }
+        const legacy = legacyUrl || process.env.CHATGPT_MR_APPLE_URL?.trim() || '';
         if (legacy && !legacy.includes('6af2935e-bb8c-83ea-817b-3f4c6bfe7999')) {
           return legacy;
         }
@@ -306,7 +248,11 @@ export class ChannelBrowserAgent {
     try {
       updateChannel(this.channelId, { chatgpt_chat_url: url.trim() });
       if (this.channelId === 1) {
-        db.prepare('UPDATE settings SET chatgpt_chat_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1').run(url.trim());
+        try {
+          db.prepare('UPDATE settings SET chatgpt_chat_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1').run(url.trim());
+        } catch {
+          // legacy settings table is absent on fresh databases; the channel row is the source of truth
+        }
       }
       console.log(`[ChannelBrowserAgent-${this.channelId}] Persisted new ChatGPT URL for channel ${this.channelId}: ${url.trim()}`);
     } catch (err: any) {
@@ -439,7 +385,7 @@ export class ChannelBrowserAgent {
     screenshotPath?: string
   ): Promise<string> {
     const configuredUrl = this.getConfiguredChatGptUrl();
-    const framesDir = path.join(__dirname, '../../storage/frames');
+    const framesDir = FRAMES_DIR;
     if (!fs.existsSync(framesDir)) fs.mkdirSync(framesDir, { recursive: true });
     const localScreenshotPath = screenshotPath || path.join(framesDir, `chatgpt_state_${Date.now()}.png`);
 
@@ -599,7 +545,7 @@ export class ChannelBrowserAgent {
    * Explicitly avoids any Canvas, artifact, voice/microphone buttons, or inline message boxes.
    */
   public async submitChatGptPrompt(page: Page, promptText: string): Promise<boolean> {
-    console.log(`[JevBrowserAgent] Locating bottom chat composer to submit "${promptText}"...`);
+    console.log(`[ChannelBrowserAgent] Locating bottom chat composer to submit "${promptText}"...`);
     await page.bringToFront().catch(() => {});
     await page.waitForTimeout(300);
 
@@ -685,7 +631,7 @@ export class ChannelBrowserAgent {
     await page.waitForTimeout(100);
 
     // Type the prompt natively into the focused input
-    console.log(`[JevBrowserAgent] Typing "${promptText}" into bottom chat composer...`);
+    console.log(`[ChannelBrowserAgent] Typing "${promptText}" into bottom chat composer...`);
     await page.keyboard.type(promptText, { delay: 50 });
     await page.waitForTimeout(300);
 
@@ -696,14 +642,14 @@ export class ChannelBrowserAgent {
 
     // If typing didn't populate the contenteditable node (e.g. React controlled component):
     if (!enteredText.toLowerCase().includes(promptText.toLowerCase())) {
-      console.log('[JevBrowserAgent] Inserting text via keyboard.insertText to chat composer...');
+      console.log('[ChannelBrowserAgent] Inserting text via keyboard.insertText to chat composer...');
       await element.click({ force: true });
       await page.keyboard.insertText(promptText);
       await page.waitForTimeout(300);
     }
 
     // Submit prompt: Press Enter natively
-    console.log(`[JevBrowserAgent] Submitting prompt via Enter key...`);
+    console.log(`[ChannelBrowserAgent] Submitting prompt via Enter key...`);
     await page.keyboard.press('Enter');
     await page.waitForTimeout(600);
 
@@ -714,7 +660,7 @@ export class ChannelBrowserAgent {
     if (sendBtn) {
       const isDisabled = await sendBtn.getAttribute('disabled');
       if (isDisabled === null) {
-        console.log('[JevBrowserAgent] Clicking bottom Send button...');
+        console.log('[ChannelBrowserAgent] Clicking bottom Send button...');
         await sendBtn.click({ force: true }).catch(() => {});
         await page.waitForTimeout(500);
       }
@@ -938,14 +884,6 @@ export class ChannelBrowserAgent {
    * Step 1: Browse into ChatGPT, type "next" in the chat, wait for the new prompt to finish generating, and extract it.
    */
   public async generatePromptViaChatGPT(
-    brief: {
-      format: string;
-      ageBand: string;
-      seriesTitle: string;
-      learningGoal: string;
-      creativeTopic?: string;
-      targetDurationSec: number;
-    },
     headless = false
   ): Promise<{ scriptPackage: ScriptPackage; screenshotPath?: string }> {
     const context = await this.launchContext(headless);
@@ -963,15 +901,15 @@ export class ChannelBrowserAgent {
     await page.bringToFront().catch(() => {});
     await page.waitForTimeout(600);
 
-    const framesDir = path.join(__dirname, '../../storage/frames');
+    const framesDir = FRAMES_DIR;
     if (!fs.existsSync(framesDir)) fs.mkdirSync(framesDir, { recursive: true });
 
     const screenshotPath = path.join(framesDir, `chatgpt_state_${Date.now()}.png`);
 
     try {
-      console.log('[JevBrowserAgent] Navigating to ChatGPT "Create Mr Apple Videos" master prompt chat...');
+      console.log('[ChannelBrowserAgent] Navigating to ChatGPT "Create Mr Apple Videos" master prompt chat...');
       const targetChatUrl = await this.navigateToMrAppleConversation(page, screenshotPath);
-      console.log(`[JevBrowserAgent] Successfully connected to active master prompt chat: ${targetChatUrl}`);
+      console.log(`[ChannelBrowserAgent] Successfully connected to active master prompt chat: ${targetChatUrl}`);
 
       await page.bringToFront().catch(() => {});
       await page.waitForTimeout(1500);
@@ -979,20 +917,19 @@ export class ChannelBrowserAgent {
       // Snapshot existing prompts on the page BEFORE submitting "next" so we never copy an old prompt!
       const priorData = await this.extractPromptAndTitleFromChatGpt(page);
       console.log(
-        `[JevBrowserAgent] Snapshot before "next": ${priorData.promptCount} existing prompt(s) in chat (last title: "${priorData.cleanTitle}").`
+        `[ChannelBrowserAgent] Snapshot before "next": ${priorData.promptCount} existing prompt(s) in chat (last title: "${priorData.cleanTitle}").`
       );
 
       // ALWAYS submit "next" to generate a brand new Mr. Apple video prompt!
-      console.log('[JevBrowserAgent] Submitting "next" command strictly to bottom ChatGPT chat input...');
+      console.log('[ChannelBrowserAgent] Submitting "next" command strictly to bottom ChatGPT chat input...');
       await this.submitChatGptPrompt(page, 'next');
 
       // Wait for ChatGPT to begin and finish streaming the brand new response
-      console.log('[JevBrowserAgent] Waiting for ChatGPT to generate the NEW Mr. Apple prompt...');
+      console.log('[ChannelBrowserAgent] Waiting for ChatGPT to generate the NEW Mr. Apple prompt...');
       const streamWaitStart = Date.now();
       let grokPrompt = '';
       let cleanTitle = '';
       let cleanHook = '';
-      let rawCopiedText = '';
       let lastObservedPromptLen = 0;
       let stableTicks = 0;
 
@@ -1070,7 +1007,6 @@ export class ChannelBrowserAgent {
             grokPrompt = currentData.grokPrompt || finalData.grokPrompt;
             cleanTitle = finalData.cleanTitle;
             cleanHook = finalData.cleanHook;
-            rawCopiedText = currentData.rawText || finalData.rawText;
             console.log(
               `[ChannelBrowserAgent-${this.channelId}] Brand new ChatGPT prompt finished streaming (${grokPrompt.length} chars)! Title: "${cleanTitle}"`
             );
@@ -1093,40 +1029,26 @@ export class ChannelBrowserAgent {
       }
 
       console.log(
-        `[JevBrowserAgent] SUCCESS: Extracted brand new Grok Prompt (${grokPrompt.length} chars)! Title: "${cleanTitle}"`
+        `[ChannelBrowserAgent] SUCCESS: Extracted brand new Grok Prompt (${grokPrompt.length} chars)! Title: "${cleanTitle}"`
       );
-
-      const parsedHook = cleanHook;
-      const parsedNarration = rawCopiedText ? rawCopiedText.slice(0, 200) : grokPrompt.slice(0, 200);
 
       const shotBriefs = [
         {
           shot_number: 1,
           duration_seconds: 15,
-          scene_description: 'Scene 1: Mr. Apple Master Prompt Dance Battle',
+          scene_description: 'Single shot from the ChatGPT prompt',
           video_prompt: grokPrompt,
-          visual_focus: 'Mr. Apple and supporting character dance battle',
-          continuity_notes: 'Exact Mr. Apple character design from master prompt and reference image',
+          visual_focus: 'Single shot from the ChatGPT prompt',
+          continuity_notes: 'Use the ChatGPT prompt exactly as written, with the channel reference image',
         },
-      ];
-
-      const captions = [
-        { start_sec: 0.5, end_sec: 4.5, text: parsedHook },
-        { start_sec: 5.0, end_sec: 9.5, text: "Can you spot the clue? Look closely!" },
-        { start_sec: 10.0, end_sec: 14.8, text: "You solved it! Outstanding detective work!" },
       ];
 
       return {
         scriptPackage: {
           concept_title: cleanTitle,
-          hook: parsedHook,
-          hypothesis: 'Focused 15-second whimsical educational loop with Mr. Apple optimizes retention and pattern recognition.',
-          script_text: parsedNarration,
+          hook: cleanHook,
+          script_text: grokPrompt,
           shot_briefs: shotBriefs,
-          captions: captions,
-          thinking_pause_seconds: 2.5,
-          tokens_used: 0,
-          cost_usd: 0.0,
         },
         screenshotPath,
       };
@@ -1142,44 +1064,17 @@ export class ChannelBrowserAgent {
   }
 
   /**
-   * Strictly validate that a buffer is a genuine MP4/WebM video (>= 250KB, valid container magic bytes, never JPEG/PNG/WebP).
+   * Strictly validate that a buffer is a genuine MP4/WebM video. Implemented in videoFile.ts.
    */
   public static isValidVideoBuffer(buf: Buffer | null | undefined): boolean {
-    if (!buf || buf.length < 250000) return false;
-    // Reject JPEG (FF D8 FF)
-    if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return false;
-    // Reject PNG (89 50 4E 47)
-    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return false;
-    const headStr = buf.slice(0, 16).toString('ascii');
-    if (headStr.startsWith('RIFF') && headStr.includes('WEBP')) return false;
-    if (headStr.startsWith('GIF8')) return false;
-    const isMp4 = buf.slice(4, 8).toString('ascii') === 'ftyp' || headStr.includes('ftyp') || headStr.includes('moov');
-    const isWebm = buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3;
-    return isMp4 || isWebm;
+    return isValidVideoBuffer(buf);
   }
 
   /**
-   * Strictly validate that a file on disk is a genuine MP4/WebM video file.
+   * Strictly validate that a file on disk is a genuine MP4/WebM video file. Implemented in videoFile.ts.
    */
   public static isValidVideoFile(filePath: string): boolean {
-    try {
-      if (!filePath || !fs.existsSync(filePath)) return false;
-      const stat = fs.statSync(filePath);
-      if (stat.size < 250000) return false;
-      const fd = fs.openSync(filePath, 'r');
-      const header = Buffer.alloc(32);
-      fs.readSync(fd, header, 0, 32, 0);
-      fs.closeSync(fd);
-      if (header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) return false;
-      if (header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4e && header[3] === 0x47) return false;
-      const headStr = header.slice(0, 16).toString('ascii');
-      if (headStr.startsWith('RIFF') && headStr.includes('WEBP')) return false;
-      const isMp4 = header.slice(4, 8).toString('ascii') === 'ftyp' || headStr.includes('ftyp') || headStr.includes('moov');
-      const isWebm = header[0] === 0x1a && header[1] === 0x45 && header[2] === 0xdf && header[3] === 0xa3;
-      return isMp4 || isWebm;
-    } catch {
-      return false;
-    }
+    return isValidVideoFile(filePath);
   }
 
   /**
@@ -1235,7 +1130,7 @@ export class ChannelBrowserAgent {
       const seen = await page.locator('[role="radio"]').evaluateAll((els) =>
         els.map((e) => `${(e.textContent || e.getAttribute('aria-label') || '').trim()}=${e.getAttribute('aria-checked')}${(e as HTMLButtonElement).disabled ? '(disabled)' : ''}`).join(', ')
       ).catch(() => '');
-      console.warn(`[JevBrowserAgent] Could not select "${by.text}". Grok options seen: ${seen}`);
+      console.warn(`[ChannelBrowserAgent] Could not select "${by.text}". Grok options seen: ${seen}`);
     }
     return checked;
   }
@@ -1272,7 +1167,7 @@ export class ChannelBrowserAgent {
    */
   public async configureGrokVideoMode(page: Page, spec: GrokVideoSpec): Promise<void> {
     if (!(await this.selectGrokRadio(page, { label: 'Video' }, 15000))) {
-      const shot = path.join(__dirname, '../../storage/frames', `grok_no_video_toggle_${Date.now()}.png`);
+      const shot = path.join(FRAMES_DIR, `grok_no_video_toggle_${Date.now()}.png`);
       await page.screenshot({ path: shot }).catch(() => {});
       throw new Error(`Could not switch Grok Imagine to Video mode (the "Video" toggle beside the prompt box was not found). Screenshot: ${shot}`);
     }
@@ -1284,7 +1179,7 @@ export class ChannelBrowserAgent {
       (await this.selectGrokRadio(page, { text: `${spec.durationSec}s` }, 1500));
     if (!durationOk || !resolutionOk) {
       console.warn(
-        `[JevBrowserAgent] Grok would not let us select ${!durationOk ? spec.durationSec + 's' : ''}${!durationOk && !resolutionOk ? ' / ' : ''}${!resolutionOk ? spec.resolution : ''}. ` +
+        `[ChannelBrowserAgent] Grok would not let us select ${!durationOk ? spec.durationSec + 's' : ''}${!durationOk && !resolutionOk ? ' / ' : ''}${!resolutionOk ? spec.resolution : ''}. ` +
         'Grok will use whatever length/quality it already has selected. Check the Grok tab if the video comes out short or low-resolution.'
       );
     }
@@ -1304,7 +1199,7 @@ export class ChannelBrowserAgent {
       }
     }
     console.log(
-      `[JevBrowserAgent] Grok set to Video • ${spec.durationSec}s${durationOk ? '' : ' (not found)'} • ${spec.resolution}${resolutionOk ? '' : ' (not found)'} • ${spec.aspect}${aspectOk ? '' : ' (not found)'}`
+      `[ChannelBrowserAgent] Grok set to Video • ${spec.durationSec}s${durationOk ? '' : ' (not found)'} • ${spec.resolution}${resolutionOk ? '' : ' (not found)'} • ${spec.aspect}${aspectOk ? '' : ' (not found)'}`
     );
   }
 
@@ -1346,13 +1241,13 @@ export class ChannelBrowserAgent {
         throw new Error(`Uploading the reference image navigated Grok away from the prompt composer (${page.url()}).`);
       }
       if ((await countThumbs()) > before) {
-        console.log('[JevBrowserAgent] Mr. Apple reference image attached to Grok prompt.');
+        console.log('[ChannelBrowserAgent] Mr. Apple reference image attached to Grok prompt.');
         await page.waitForTimeout(800); // let the upload finish before submitting
         return;
       }
       await page.waitForTimeout(400);
     }
-    console.warn('[JevBrowserAgent] Could not visually confirm the reference image thumbnail; continuing.');
+    console.warn('[ChannelBrowserAgent] Could not visually confirm the reference image thumbnail; continuing.');
   }
 
   /**
@@ -1374,8 +1269,8 @@ export class ChannelBrowserAgent {
     const page = context.pages().find((p) => p.url().includes('grok.com')) || (await context.newPage());
     await page.bringToFront().catch(() => {});
 
-    const storageVideos = path.join(__dirname, '../../storage/videos');
-    const framesDir = path.join(__dirname, '../../storage/frames');
+    const storageVideos = VIDEOS_DIR;
+    const framesDir = FRAMES_DIR;
     fs.mkdirSync(storageVideos, { recursive: true });
     fs.mkdirSync(framesDir, { recursive: true });
 
@@ -1488,7 +1383,7 @@ export class ChannelBrowserAgent {
       }
 
       // 4. Paste the EXACT ChatGPT prompt
-      console.log(`[JevBrowserAgent] Pasting exact ChatGPT prompt into Grok (${grokPrompt.length} chars)...`);
+      console.log(`[ChannelBrowserAgent] Pasting exact ChatGPT prompt into Grok (${grokPrompt.length} chars)...`);
       await textbox.click();
       await page.keyboard.press('Meta+A');
       await page.keyboard.press('Backspace');
@@ -1516,7 +1411,7 @@ export class ChannelBrowserAgent {
         await textbox.click();
         await page.keyboard.press('Enter');
       }
-      console.log(`[JevBrowserAgent] Submitted Shot ${shotNumber} to Grok. Waiting for the video...`);
+      console.log(`[ChannelBrowserAgent] Submitted Shot ${shotNumber} to Grok. Waiting for the video...`);
 
       // 6. Wait for the finished video (main/largest <video>, new src, expected length)
       // Grok may hide the duration options once an image is attached (it then picks its own length, e.g. 6s),
@@ -1592,7 +1487,7 @@ export class ChannelBrowserAgent {
         }
         if (Date.now() - lastLog > 10000) {
           lastLog = Date.now();
-          console.log(`[JevBrowserAgent] Shot ${shotNumber}: ${state.progress ? state.progress + '%' : 'rendering'} (${Math.round((Date.now() - start) / 1000)}s)`);
+          console.log(`[ChannelBrowserAgent] Shot ${shotNumber}: ${state.progress ? state.progress + '%' : 'rendering'} (${Math.round((Date.now() - start) / 1000)}s)`);
         }
         if (state.video && !state.progress) {
           stableTicks = state.video.src === lastSrc ? stableTicks + 1 : 0;
@@ -1605,9 +1500,9 @@ export class ChannelBrowserAgent {
 
       if (!main) await fail(`Grok did not finish a ${spec.durationSec}s video for Shot ${shotNumber} within 6 minutes.`);
       const sizeNote = main!.w && main!.h ? `${main!.w}x${main!.h}` : 'size unknown';
-      console.log(`[JevBrowserAgent] Grok video ready (${main!.duration.toFixed(1)}s, ${sizeNote}): ${main!.src.slice(0, 90)}`);
+      console.log(`[ChannelBrowserAgent] Grok video ready (${main!.duration.toFixed(1)}s, ${sizeNote}): ${main!.src.slice(0, 90)}`);
       if (spec.resolution === '720p' && main!.h && Math.min(main!.w || 0, main!.h) < 700) {
-        console.warn(`[JevBrowserAgent] WARNING: this video is ${sizeNote} — lower than 720p. Grok did not apply the 720p setting.`);
+        console.warn(`[ChannelBrowserAgent] WARNING: this video is ${sizeNote} — lower than 720p. Grok did not apply the 720p setting.`);
       }
 
       // 7. Download the exact video that is on screen
@@ -1636,7 +1531,7 @@ export class ChannelBrowserAgent {
       }
       if (!saved) await fail('Grok finished the video but it could not be downloaded.');
       fs.writeFileSync(outputVideoPath, saved!);
-      console.log(`[JevBrowserAgent] Shot ${shotNumber} saved (${saved!.length} bytes): ${outputVideoPath}`);
+      console.log(`[ChannelBrowserAgent] Shot ${shotNumber} saved (${saved!.length} bytes): ${outputVideoPath}`);
 
       // Thumbnail: a frame of the finished video
       await page.locator('video[data-kindred-main]').first().screenshot({ path: outputImagePath, timeout: 5000 }).catch(() => {});
@@ -1711,21 +1606,21 @@ export class ChannelBrowserAgent {
       });
 
       // Open a second tab for Grok Imagine (Media & Video Generation)
-      console.log('[JevBrowserAgent] Opening Tab 2 for https://grok.com/imagine...');
+      console.log('[ChannelBrowserAgent] Opening Tab 2 for https://grok.com/imagine...');
       const grokPage = await context.newPage();
       grokPage.goto('https://grok.com/imagine', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((err) => {
-        console.warn('[JevBrowserAgent] Grok background navigation note:', err.message);
+        console.warn('[ChannelBrowserAgent] Grok background navigation note:', err.message);
       });
 
       // Open a third tab for TikTok Studio
-      console.log('[JevBrowserAgent] Opening Tab 3 for https://www.tiktok.com/tiktokstudio/upload...');
+      console.log('[ChannelBrowserAgent] Opening Tab 3 for https://www.tiktok.com/tiktokstudio/upload...');
       const tiktokPage = await context.newPage();
       tiktokPage.goto('https://www.tiktok.com/tiktokstudio/upload', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((err) => {
-        console.warn('[JevBrowserAgent] TikTok background navigation note:', err.message);
+        console.warn('[ChannelBrowserAgent] TikTok background navigation note:', err.message);
       });
 
       // Explicitly bring Tab 1 (ChatGPT) to the front so operator immediately sees ChatGPT on launch
-      console.log('[JevBrowserAgent] Focusing Tab 1 (ChatGPT) to front...');
+      console.log('[ChannelBrowserAgent] Focusing Tab 1 (ChatGPT) to front...');
       await chatGptPage.bringToFront().catch(() => {});
       await chatGptPage.waitForTimeout(500);
 
@@ -1822,7 +1717,7 @@ export class ChannelBrowserAgent {
       fs.writeFileSync(this.cookiesFile, JSON.stringify(cookies), { mode: 0o600 });
       fs.chmodSync(this.cookiesFile, 0o600);
     } catch (err: any) {
-      console.warn('[JevBrowserAgent] Could not save login cookies:', err.message);
+      console.warn('[ChannelBrowserAgent] Could not save login cookies:', err.message);
     }
   }
 
@@ -1841,9 +1736,9 @@ export class ChannelBrowserAgent {
       } catch {
         for (const c of missing) await context.addCookies([c]).catch(() => {});
       }
-      console.log(`[JevBrowserAgent] Restored ${missing.length} saved login cookies.`);
+      console.log(`[ChannelBrowserAgent] Restored ${missing.length} saved login cookies.`);
     } catch (err: any) {
-      console.warn('[JevBrowserAgent] Could not restore login cookies:', err.message);
+      console.warn('[ChannelBrowserAgent] Could not restore login cookies:', err.message);
     }
   }
 
@@ -1967,19 +1862,23 @@ export class ChannelBrowserAgent {
   public async ensureLoggedIn(
     context: BrowserContext,
     say: (step: string, kind?: 'running' | 'waiting_login') => void,
-    targets: PublishTargets,
-    maxWaitMs = 10 * 60 * 1000
+    targets: { tiktok: boolean; youtube: boolean },
+    maxWaitMs = 10 * 60 * 1000,
+    /** False when only posting an existing video: ChatGPT and Grok are not needed then. */
+    needCreationSites = true
   ): Promise<{ skipped: Array<'youtube'> }> {
     type SiteKey = 'chatgpt' | 'grok' | 'tiktok' | 'youtube';
-    const sites: Array<{ key: SiteKey; name: string; url: string; host: string; optional?: boolean }> = [
-      { key: 'chatgpt', name: 'ChatGPT', url: this.getConfiguredChatGptUrl() || 'https://chatgpt.com/', host: 'chatgpt.com' },
-      { key: 'grok', name: 'Grok', url: 'https://grok.com/imagine', host: 'grok.com' },
-    ];
+    const sites: Array<{ key: SiteKey; name: string; url: string; host: string; optional?: boolean }> = needCreationSites
+      ? [
+          { key: 'chatgpt', name: 'ChatGPT', url: this.getConfiguredChatGptUrl() || 'https://chatgpt.com/', host: 'chatgpt.com' },
+          { key: 'grok', name: 'Grok', url: 'https://grok.com/imagine', host: 'grok.com' },
+        ]
+      : [];
     if (targets.tiktok) sites.push({ key: 'tiktok', name: 'TikTok', url: 'https://www.tiktok.com/tiktokstudio/upload', host: 'tiktok.com' });
     // YouTube is optional: if nobody signs in, the run still makes the video and posts to TikTok.
     if (targets.youtube) sites.push({ key: 'youtube', name: 'YouTube', url: 'https://studio.youtube.com/', host: 'youtube.com', optional: true });
     const skipped: Array<'youtube'> = [];
-    const framesDir = path.join(__dirname, '../../storage/frames');
+    const framesDir = FRAMES_DIR;
     fs.mkdirSync(framesDir, { recursive: true });
     this.skipLogin = false;
 
@@ -2298,16 +2197,16 @@ export class ChannelBrowserAgent {
   }
 
   private async makeCoverImage(videoPath: string, jobId: string): Promise<string | null> {
-    const outPath = path.join(__dirname, '../../storage/thumbnails', `thumb_${jobId}.jpg`);
+    const outPath = path.join(THUMBNAILS_DIR, `thumb_${jobId}.jpg`);
     let page: Page | null = null;
     try {
       const context = await this.launchContext(false);
       page = await context.newPage();
       const r = await this.extractCoverFrame(page, videoPath, outPath);
-      console.log(`[JevBrowserAgent] Cover frame chosen at ${r.timeSec.toFixed(1)}s of ${r.durationSec.toFixed(1)}s: ${outPath}`);
+      console.log(`[ChannelBrowserAgent] Cover frame chosen at ${r.timeSec.toFixed(1)}s of ${r.durationSec.toFixed(1)}s: ${outPath}`);
       return outPath;
     } catch (err: any) {
-      console.warn('[JevBrowserAgent] Could not pick a cover frame (TikTok will use its automatic cover):', err.message);
+      console.warn('[ChannelBrowserAgent] Could not pick a cover frame (TikTok will use its automatic cover):', err.message);
       return null;
     } finally {
       await page?.close().catch(() => {});
@@ -2319,7 +2218,7 @@ export class ChannelBrowserAgent {
    * Best effort: if TikTok's layout differs, we save screenshots for debugging, back out, and post with the automatic cover.
    */
   private async setTikTokCover(page: Page, coverPath: string): Promise<boolean> {
-    const framesDir = path.join(__dirname, '../../storage/frames');
+    const framesDir = FRAMES_DIR;
     const snap = (tag: string) => page.screenshot({ path: path.join(framesDir, `tiktok_cover_${tag}_${Date.now()}.png`) }).catch(() => {});
     let chooserHandled = false;
     const onChooser = async (chooser: FileChooser) => {
@@ -2331,7 +2230,7 @@ export class ChannelBrowserAgent {
       const edit = page.getByText(/^\s*Edit cover\s*$/i).filter({ visible: true }).first();
       if (!(await edit.waitFor({ state: 'visible', timeout: 15000 }).then(() => true).catch(() => false))) {
         await snap('no_edit_button');
-        console.warn('[JevBrowserAgent] TikTok "Edit cover" button not found; using the automatic cover.');
+        console.warn('[ChannelBrowserAgent] TikTok "Edit cover" button not found; using the automatic cover.');
         return false;
       }
       await edit.click();
@@ -2362,11 +2261,11 @@ export class ChannelBrowserAgent {
       await confirm.waitFor({ state: 'visible', timeout: 10000 });
       await confirm.click({ timeout: 5000 });
       await dialog.waitFor({ state: 'hidden', timeout: 15000 });
-      console.log('[JevBrowserAgent] Custom cover image set on TikTok.');
+      console.log('[ChannelBrowserAgent] Custom cover image set on TikTok.');
       return true;
     } catch (err: any) {
       await snap('failed');
-      console.warn('[JevBrowserAgent] Could not set a custom TikTok cover (continuing with the automatic one):', err.message);
+      console.warn('[ChannelBrowserAgent] Could not set a custom TikTok cover (continuing with the automatic one):', err.message);
       await page.keyboard.press('Escape').catch(() => {});
       await page.waitForTimeout(500);
       return false;
@@ -2395,7 +2294,7 @@ export class ChannelBrowserAgent {
     const page = context.pages().find((p) => !p.isClosed() && p.url().includes('youtube.com')) || (await context.newPage());
     await page.bringToFront().catch(() => {});
 
-    const framesDir = path.join(__dirname, '../../storage/frames');
+    const framesDir = FRAMES_DIR;
     fs.mkdirSync(framesDir, { recursive: true });
     const snap = (tag: string) => page.screenshot({ path: path.join(framesDir, `youtube_${tag}_${Date.now()}.png`) }).catch(() => {});
     const visible = async (loc: ReturnType<Page['locator']>, ms = 1500) =>
@@ -2406,7 +2305,7 @@ export class ChannelBrowserAgent {
       await page.waitForTimeout(2500);
       const skip = page.getByText(/skip to youtube studio/i).first();
       if (await skip.isVisible().catch(() => false)) {
-        console.log('[JevBrowserAgent] YouTube showed its browser-support page — skipping it.');
+        console.log('[ChannelBrowserAgent] YouTube showed its browser-support page — skipping it.');
         await skip.click().catch(() => {});
         await page.waitForTimeout(3000);
       }
@@ -2423,7 +2322,7 @@ export class ChannelBrowserAgent {
       if (!this.isValidVideoFile(videoPath)) return { success: false, message: 'Refusing to upload: the video file is missing or not a valid MP4.' };
 
       // 1. Open the upload dialog.
-      console.log('[JevBrowserAgent] Opening YouTube Studio upload...');
+      console.log('[ChannelBrowserAgent] Opening YouTube Studio upload...');
       await page.evaluate('window.onbeforeunload = null;').catch(() => {});
       await page.goto('https://www.youtube.com/upload', { waitUntil: 'domcontentloaded', timeout: 45000 });
       await skipInterstitial();
@@ -2448,7 +2347,7 @@ export class ChannelBrowserAgent {
       }
 
       // 2. Choose the video file (this starts the upload).
-      console.log('[JevBrowserAgent] Sending the video file to YouTube...');
+      console.log('[ChannelBrowserAgent] Sending the video file to YouTube...');
       await fileInput.setInputFiles(videoPath);
       if (await visible(page.getByText(/daily upload limit|upload limit reached/i), 4000)) {
         await snap('limit');
@@ -2475,7 +2374,7 @@ export class ChannelBrowserAgent {
       const kidsByRole = page.getByRole('radio', { name: opts.madeForKids ? /^Yes, it'?s made for kids/i : /^No, it'?s not made for kids/i }).first();
       if (await visible(kidsRadio, 5000)) await kidsRadio.click();
       else if (await visible(kidsByRole, 3000)) await kidsByRole.click();
-      else console.warn('[JevBrowserAgent] YouTube: could not find the "made for kids" choice.');
+      else console.warn('[ChannelBrowserAgent] YouTube: could not find the "made for kids" choice.');
 
       // "Altered content": cartoon characters are not realistic people/places, so the honest answer is "No" (best effort).
       const alteredNo = page.locator('[name="VIDEO_HAS_ALTERED_CONTENT_NO"]').first();
@@ -2516,7 +2415,7 @@ export class ChannelBrowserAgent {
       await snap('visibility');
 
       // 6. Publish — the button stays disabled until the upload itself has finished.
-      console.log('[JevBrowserAgent] Waiting for the YouTube upload to finish, then publishing...');
+      console.log('[ChannelBrowserAgent] Waiting for the YouTube upload to finish, then publishing...');
       await page
         .waitForFunction(() => {
           const b = document.querySelector('#done-button');
@@ -2535,13 +2434,13 @@ export class ChannelBrowserAgent {
       await page.getByRole('button', { name: /^Close$/i }).first().click({ timeout: 4000 }).catch(() => {});
 
       if (published) {
-        console.log(`[JevBrowserAgent] Video published on YouTube: ${shareUrl}`);
+        console.log(`[ChannelBrowserAgent] Video published on YouTube: ${shareUrl}`);
         return { success: true, verified: true, shareUrl: shareUrl || undefined, message: 'Video published on YouTube.' };
       }
       return { success: true, verified: false, message: 'Publish was clicked, but YouTube did not show its confirmation (check YouTube Studio).' };
     } catch (err: any) {
       await snap('failed');
-      console.warn('[JevBrowserAgent] YouTube upload error:', err.message);
+      console.warn('[ChannelBrowserAgent] YouTube upload error:', err.message);
       return { success: false, message: err.message };
     } finally {
       page.off('filechooser', onChooser);
@@ -2573,7 +2472,7 @@ export class ChannelBrowserAgent {
             'div:has-text("Are you sure you want to exit") button:has-text("Cancel"), div[role="dialog"] button:has-text("Cancel"), button:text-is("Cancel")'
           );
           if (exitCancelBtn) {
-            console.log('[JevBrowserAgent] Auto-dismissing TikTok exit modal with Cancel to stay on upload page...');
+            console.log('[ChannelBrowserAgent] Auto-dismissing TikTok exit modal with Cancel to stay on upload page...');
             await exitCancelBtn.click({ force: true }).catch(() => { });
             await page.waitForTimeout(500);
           }
@@ -2583,7 +2482,7 @@ export class ChannelBrowserAgent {
       await dismissExitModal();
 
       // Always load a fresh TikTok Studio upload form so any previous staged file is cleared
-      console.log('[JevBrowserAgent] Navigating to fresh TikTok Studio Upload...');
+      console.log('[ChannelBrowserAgent] Navigating to fresh TikTok Studio Upload...');
       await page.evaluate(() => {
         window.onbeforeunload = null;
       }).catch(() => {});
@@ -2595,7 +2494,7 @@ export class ChannelBrowserAgent {
       // Check for login requirement
       const loginRequired = await page.$('a[href*="/login"], button:has-text("Log in"), button:has-text("Use QR code")');
       if (loginRequired) {
-        console.warn('[JevBrowserAgent] TikTok requires sign-in in browser tab.');
+        console.warn('[ChannelBrowserAgent] TikTok requires sign-in in browser tab.');
         return {
           success: false,
           message: 'TikTok upload awaiting sign-in in Tab 3.',
@@ -2604,7 +2503,7 @@ export class ChannelBrowserAgent {
 
       // Strict Guard: Refuse upload if video is missing or not a valid MP4/WebM file (>= 250KB, valid header)
       if (!this.isValidVideoFile(videoPath)) {
-        console.warn('[JevBrowserAgent] Invalid or non-MP4 video file on disk. Refusing to upload to TikTok:', videoPath);
+        console.warn('[ChannelBrowserAgent] Invalid or non-MP4 video file on disk. Refusing to upload to TikTok:', videoPath);
         return {
           success: false,
           message: 'Refusing to upload: Video file is missing or not a valid MP4 video.',
@@ -2615,7 +2514,7 @@ export class ChannelBrowserAgent {
       await page.waitForSelector('input[type="file"], input[accept*="video"]', { state: 'attached', timeout: 15000 }).catch(() => null);
       const fileInput = await page.$('input[type="file"], input[accept*="video"]');
       if (fileInput) {
-        console.log('[JevBrowserAgent] Uploading genuine MP4 video file to TikTok Studio:', videoPath);
+        console.log('[ChannelBrowserAgent] Uploading genuine MP4 video file to TikTok Studio:', videoPath);
         await fileInput.setInputFiles(videoPath);
         await page.waitForTimeout(3500);
 
@@ -2628,7 +2527,7 @@ export class ChannelBrowserAgent {
           // Having ANY 'filechooser' listener stops Chrome from opening the Mac's native "choose a file" window on this tab.
           page.on('filechooser', () => {});
           page.on('dialog', async (dialog) => {
-            console.log('[JevBrowserAgent] Handling TikTok browser dialog:', dialog.message());
+            console.log('[ChannelBrowserAgent] Handling TikTok browser dialog:', dialog.message());
             await dialog.accept().catch(() => { });
           });
         }
@@ -2667,7 +2566,7 @@ export class ChannelBrowserAgent {
         } catch { }
 
         // 4. Wait for video upload & processing status to be 100% complete
-        console.log('[JevBrowserAgent] Waiting for TikTok video upload to show Uploaded (100%)...');
+        console.log('[ChannelBrowserAgent] Waiting for TikTok video upload to show Uploaded (100%)...');
         await page.getByText(/^\s*Uploaded\b/i).first().waitFor({ state: 'visible', timeout: 120000 }).catch(() => null);
         await page.waitForTimeout(2000);
 
@@ -2681,7 +2580,7 @@ export class ChannelBrowserAgent {
         await dismissExitModal();
 
         // 6. Scroll down to expose the Post button
-        console.log('[JevBrowserAgent] Scrolling to bottom and checking TikTok Post button status...');
+        console.log('[ChannelBrowserAgent] Scrolling to bottom and checking TikTok Post button status...');
         await page.evaluate(() => {
           window.scrollTo(0, document.body.scrollHeight);
           const scrollables = document.querySelectorAll('div, main, section');
@@ -2727,14 +2626,14 @@ export class ChannelBrowserAgent {
           while (Date.now() - waitPostStart < 120000) {
             const isDisabled = await targetPostBtn.evaluate((el: HTMLButtonElement) => el.disabled || el.getAttribute('aria-disabled') === 'true').catch(() => false);
             if (!isDisabled) {
-              console.log('[JevBrowserAgent] TikTok Post button is ready and enabled!');
+              console.log('[ChannelBrowserAgent] TikTok Post button is ready and enabled!');
               break;
             }
-            console.log('[JevBrowserAgent] Waiting for TikTok copyright & content checks to complete before clicking Post...');
+            console.log('[ChannelBrowserAgent] Waiting for TikTok copyright & content checks to complete before clicking Post...');
             await page.waitForTimeout(2000);
           }
 
-          console.log('[JevBrowserAgent] Clicking genuine red TikTok Post button now...');
+          console.log('[ChannelBrowserAgent] Clicking genuine red TikTok Post button now...');
           await targetPostBtn.click({ force: true });
           // Native event fallback
           await targetPostBtn.evaluate((el: HTMLElement) => el.click()).catch(() => { });
@@ -2745,16 +2644,16 @@ export class ChannelBrowserAgent {
             'div[role="dialog"] button:has-text("Post now"), div[role="dialog"] button:has-text("Post"), div[role="dialog"] button:has-text("Confirm"), button:text-is("Post now")'
           );
           if (confirmBtn) {
-            console.log('[JevBrowserAgent] Confirming TikTok publication popup dialog...');
+            console.log('[ChannelBrowserAgent] Confirming TikTok publication popup dialog...');
             await confirmBtn.click({ force: true }).catch(() => { });
             await page.waitForTimeout(3000);
           }
         } else {
-          console.warn('[JevBrowserAgent] Could not find bottom Post button.');
+          console.warn('[ChannelBrowserAgent] Could not find bottom Post button.');
         }
 
         // 8. Monitor TikTok for publication confirmation
-        console.log('[JevBrowserAgent] Monitoring TikTok for publication confirmation...');
+        console.log('[ChannelBrowserAgent] Monitoring TikTok for publication confirmation...');
         let isPublished = false;
         const confirmStart = Date.now();
 
@@ -2787,7 +2686,7 @@ export class ChannelBrowserAgent {
         }
 
         if (isPublished) {
-          console.log('[JevBrowserAgent] Video successfully posted to TikTok!');
+          console.log('[ChannelBrowserAgent] Video successfully posted to TikTok!');
           return {
             success: true,
             verified: true,
@@ -2795,10 +2694,10 @@ export class ChannelBrowserAgent {
             shareUrl: 'https://www.tiktok.com/tiktokstudio/content',
           };
         } else {
-          const framesDir = path.join(__dirname, '../../storage/frames');
+          const framesDir = FRAMES_DIR;
           const errSnap = path.join(framesDir, `tiktok_post_state_${Date.now()}.png`);
           await page.screenshot({ path: errSnap }).catch(() => { });
-          console.warn('[JevBrowserAgent] TikTok post pending confirmation. Screenshot saved:', errSnap);
+          console.warn('[ChannelBrowserAgent] TikTok post pending confirmation. Screenshot saved:', errSnap);
           return {
             success: true, // Post was clicked, but TikTok never showed a confirmation
             verified: false,
@@ -2813,110 +2712,264 @@ export class ChannelBrowserAgent {
         message: 'TikTok file upload element staged; awaiting operator confirmation.',
       };
     } catch (err: any) {
-      console.warn('[JevBrowserAgent] TikTok browser upload note:', err.message);
+      console.warn('[ChannelBrowserAgent] TikTok browser upload note:', err.message);
       return { success: false, message: err.message };
     }
   }
 
-  /**
-   * FULL AUTONOMOUS SEQUENCE (ChatGPT -> Grok -> Video Assembly -> QA -> TikTok)
-   * Controls the browser automatically through all three steps continuously without manual intervention.
-   */
+  // ───────────────────────── Pipeline ─────────────────────────
 
-  public async runFullAutonomousPipeline(
-    options: Parameters<typeof ChannelBrowserAgent.prototype.runPipelineOnce>[0]
-  ): ReturnType<typeof ChannelBrowserAgent.prototype.runPipelineOnce> {
+  /** Thrown out of a run that the operator stopped. */
+  private cancelledError(): Error {
+    const err: any = new Error('Run stopped.');
+    err.code = 'RUN_CANCELLED';
+    return err;
+  }
+
+  private throwIfCancelled(): void {
+    if (this.cancelRequested) throw this.cancelledError();
+  }
+
+  /**
+   * "Stop": closes the browser window, which makes whatever step is in flight fail, and marks the run as stopped.
+   * If the Post button was already clicked, the platform may still publish the video.
+   */
+  public async requestCancel(): Promise<boolean> {
+    if (!this.pipelineRunning) return false;
+    this.cancelRequested = true;
+    await this.shutdown().catch(() => {});
+    return true;
+  }
+
+  /** Runs one pipeline function with the single-run lock, cancel handling and cookie saving around it. */
+  private async withPipelineLock<T extends { postedEverywhere: boolean }>(
+    onProgress: PipelineOptions['onProgress'],
+    fn: () => Promise<T>
+  ): Promise<T> {
     if (this.pipelineRunning) {
       throw new Error('A video is already being produced. Wait for it to finish before starting another.');
     }
     this.pipelineRunning = true;
+    this.cancelRequested = false;
     try {
-      const result = await this.runPipelineOnce(options);
+      const result = await fn();
       if (result.postedEverywhere) {
         // Every place we posted to confirmed it: close the window so the next video starts from a clean browser.
-        options.onProgress?.('Posted. Closing the browser so it is fresh for the next video…');
-        console.log('[JevBrowserAgent] All posts verified — closing the browser window.');
+        onProgress?.('Posted. Closing the browser so it is fresh for the next video…');
+        console.log(`[ChannelBrowserAgent-${this.channelId}] All posts verified — closing the browser window.`);
         await new Promise((r) => setTimeout(r, 3000));
         await this.shutdown();
       }
       return result;
+    } catch (err) {
+      // A stop closes the browser under the running step, so that step fails with some Playwright error: report the stop.
+      if (this.cancelRequested) throw this.cancelledError();
+      throw err;
     } finally {
       this.pipelineRunning = false;
+      this.cancelRequested = false;
       if (this.activeInteractiveContext) await this.saveCookies(this.activeInteractiveContext);
     }
   }
 
-  private async runPipelineOnce(options: {
-    format: string;
-    ageBand: string;
-    seriesTitle: string;
-    learningGoal: string;
-    creativeTopic?: string;
-    targetDurationSec?: number;
-    targetResolution?: '480p' | '720p';
-    onProgress?: (step: string, kind?: 'running' | 'waiting_login') => void;
-  }): Promise<{
-    success: boolean;
+  /** Full sequence: sign-in check → ChatGPT prompt → Grok video → safety check → post. */
+  public async runFullAutonomousPipeline(options: PipelineOptions): Promise<PipelineResult> {
+    return this.withPipelineLock(options.onProgress, () => this.runPipelineOnce(options));
+  }
+
+  /**
+   * Posts a video that already exists on disk (made earlier, but held, failed or never confirmed).
+   * Only platforms that are switched on for the channel and have no confirmed post yet are attempted.
+   */
+  public async publishExistingVideo(jobId: string, options: Pick<PipelineOptions, 'onProgress' | 'onJob'> = {}): Promise<PipelineResult> {
+    return this.withPipelineLock(options.onProgress, async () => {
+      const say = (step: string, kind: 'running' | 'waiting_login' = 'running') => options.onProgress?.(step, kind);
+      const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as any;
+      if (!job) throw new Error('That video no longer exists.');
+      if (!isValidVideoFile(job.video_path)) throw new Error('The video file is missing from disk, so it cannot be posted.');
+      options.onJob?.(jobId);
+
+      const ch = getChannel(this.channelId);
+      const wantTikTok = (ch ? !!ch.post_tiktok : true) && job.tiktok_status !== 'published';
+      const wantYouTube = (ch ? !!ch.post_youtube : true) && job.youtube_status !== 'published';
+      if (!wantTikTok && !wantYouTube) {
+        throw new Error('Nothing to post: every platform switched on for this channel already has this video.');
+      }
+
+      const browser = await this.launchContext(false);
+      const login = await this.ensureLoggedIn(browser, say, { tiktok: wantTikTok, youtube: wantYouTube }, 10 * 60 * 1000, false);
+      this.throwIfCancelled();
+
+      const coverPath = job.thumbnail_path && fs.existsSync(job.thumbnail_path) ? job.thumbnail_path : null;
+      const posted = await this.postVideo({
+        jobId,
+        videoPath: job.video_path,
+        title: job.concept_title,
+        hook: job.hook || '',
+        coverPath,
+        tiktok: wantTikTok,
+        youtube: wantYouTube && !login.skipped.includes('youtube'),
+        youtubeMadeForKids: ch ? !!ch.youtube_made_for_kids : true,
+        previous: { tiktokStatus: job.tiktok_status, tiktokUrl: job.tiktok_share_url, youtubeStatus: job.youtube_status, youtubeUrl: job.youtube_share_url },
+        say,
+      });
+
+      return {
+        success: true,
+        jobId,
+        title: job.concept_title,
+        hook: job.hook || '',
+        videoPath: job.video_path,
+        thumbnailPath: coverPath || undefined,
+        durationSeconds: Number(job.duration_seconds) || 0,
+        qaPassed: true,
+        ...posted,
+        message: `Existing video -> TikTok: ${posted.tiktokStatus} -> YouTube: ${posted.youtubeStatus}`,
+      };
+    });
+  }
+
+  /**
+   * Uploads one finished video to the requested platforms and writes the outcome to its job row.
+   * A platform that is not attempted keeps whatever status it already had.
+   */
+  private async postVideo(input: {
     jobId: string;
+    videoPath: string;
     title: string;
     hook: string;
-    videoPath: string;
-    thumbnailPath?: string;
-    durationSeconds: number;
-    qaPassed: boolean;
-    tiktokStatus: string;
-    tiktokVerified: boolean;
-    tiktokUrl?: string;
-    youtubeStatus: string;
-    youtubeVerified: boolean;
-    youtubeUrl?: string;
-    postedEverywhere: boolean;
-    message: string;
-  }> {
+    coverPath: string | null;
+    tiktok: boolean;
+    youtube: boolean;
+    youtubeMadeForKids: boolean;
+    previous?: { tiktokStatus?: string | null; tiktokUrl?: string | null; youtubeStatus?: string | null; youtubeUrl?: string | null };
+    say: (step: string, kind?: 'running' | 'waiting_login') => void;
+  }): Promise<Pick<PipelineResult, 'tiktokStatus' | 'tiktokVerified' | 'tiktokUrl' | 'youtubeStatus' | 'youtubeVerified' | 'youtubeUrl' | 'postedEverywhere' | 'postedAnywhere'>> {
+    const { say } = input;
+    let tiktokStatus = input.previous?.tiktokStatus || 'off';
+    let tiktokUrl: string | undefined = input.previous?.tiktokUrl || undefined;
+    let tiktokVerified = tiktokStatus === 'published';
+    let youtubeStatus = input.previous?.youtubeStatus || 'off';
+    let youtubeUrl: string | undefined = input.previous?.youtubeUrl || undefined;
+    let youtubeVerified = youtubeStatus === 'published';
+
+    if (input.tiktok) {
+      this.throwIfCancelled();
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Uploading the video to TikTok...`);
+      say('Uploading to TikTok and posting…');
+      tiktokStatus = 'failed';
+      try {
+        const uploadRes = await this.uploadToTikTokViaBrowser(input.videoPath, input.title, input.hook, input.coverPath || undefined);
+        if (uploadRes.success) {
+          tiktokVerified = !!uploadRes.verified;
+          tiktokStatus = tiktokVerified ? 'published' : 'submitted'; // 'submitted' = Post clicked, TikTok has not confirmed
+          tiktokUrl = uploadRes.shareUrl || tiktokUrl;
+        } else {
+          console.warn('[ChannelBrowserAgent] TikTok browser upload did not complete:', uploadRes.message);
+          say(`TikTok upload failed: ${uploadRes.message}`);
+        }
+      } catch (ttErr: any) {
+        console.warn('[ChannelBrowserAgent] TikTok browser upload error:', ttErr.message);
+      }
+    }
+
+    if (input.youtube) {
+      this.throwIfCancelled();
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Uploading the video to YouTube...`);
+      say('Uploading to YouTube…');
+      youtubeStatus = 'failed';
+      try {
+        const cleanTitle = input.title.replace(/\s*#\w+/g, '').trim();
+        const yt = await this.uploadToYouTubeViaBrowser(input.videoPath, cleanTitle, `${input.hook}\n\n#Shorts`, {
+          coverPath: input.coverPath || undefined,
+          madeForKids: input.youtubeMadeForKids,
+        });
+        if (yt.success) {
+          youtubeVerified = !!yt.verified;
+          youtubeStatus = youtubeVerified ? 'published' : 'submitted';
+          youtubeUrl = yt.shareUrl || youtubeUrl;
+        } else {
+          console.warn('[ChannelBrowserAgent] YouTube upload did not complete:', yt.message);
+          say(`YouTube upload failed: ${yt.message}`);
+        }
+      } catch (ytErr: any) {
+        console.warn('[ChannelBrowserAgent] YouTube upload error:', ytErr.message);
+      }
+    }
+    this.throwIfCancelled();
+
+    const attempted = [input.tiktok ? tiktokVerified : null, input.youtube ? youtubeVerified : null].filter((v) => v !== null);
+    // The browser window may close only when every place we posted to in this pass confirmed the post.
+    const postedEverywhere = attempted.length > 0 && attempted.every(Boolean);
+    const anyPublished = tiktokStatus === 'published' || youtubeStatus === 'published';
+    const anySubmitted = tiktokStatus === 'submitted' || youtubeStatus === 'submitted';
+    // 'scheduled' = Post was clicked somewhere but no platform confirmed; 'failed' = the video exists and nothing went out.
+    const finalState = anyPublished ? 'published' : anySubmitted ? 'scheduled' : 'failed';
+
+    db.prepare(`
+      UPDATE jobs
+      SET state = ?, tiktok_status = ?, youtube_status = ?, tiktok_share_url = ?, youtube_share_url = ?,
+          hold_reason = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      finalState,
+      tiktokStatus,
+      youtubeStatus,
+      tiktokUrl || null,
+      youtubeUrl || null,
+      finalState === 'failed' ? 'The video was made, but posting did not go through. Use "Post now" to try again.' : null,
+      input.jobId
+    );
+
+    return {
+      tiktokStatus,
+      tiktokVerified,
+      tiktokUrl,
+      youtubeStatus,
+      youtubeVerified,
+      youtubeUrl,
+      postedEverywhere,
+      postedAnywhere: anyPublished || anySubmitted,
+    };
+  }
+
+  private async runPipelineOnce(options: PipelineOptions): Promise<PipelineResult> {
     const jobId = 'job_' + crypto.randomUUID().slice(0, 10);
-    console.log(`[JevBrowserAgent] Starting full autonomous pipeline for Job ${jobId}...`);
+    console.log(`[ChannelBrowserAgent-${this.channelId}] Starting full autonomous pipeline for Job ${jobId}...`);
     const say = (step: string, kind: 'running' | 'waiting_login' = 'running') => options.onProgress?.(step, kind);
 
     // 0. Open the browser (once) and make sure ChatGPT, Grok and TikTok are signed in — waits for the operator if not.
     const browser = await this.launchContext(false);
     const ch = getChannel(this.channelId);
     const targets = {
-      tiktok: ch ? ch.post_tiktok : true,
-      youtube: ch ? ch.post_youtube : true,
-      youtubeMadeForKids: ch ? ch.youtube_made_for_kids : true,
+      tiktok: ch ? !!ch.post_tiktok : true,
+      youtube: ch ? !!ch.post_youtube : true,
+      youtubeMadeForKids: ch ? !!ch.youtube_made_for_kids : true,
     };
-    const login = await this.ensureLoggedIn(browser, say, targets);
+    const login = await this.ensureLoggedIn(browser, say, { tiktok: targets.tiktok, youtube: targets.youtube });
     const youtubeOn = targets.youtube && !login.skipped.includes('youtube');
-
+    this.throwIfCancelled();
 
     // 1. ChatGPT: Generate prompt & script
-    console.log('[JevBrowserAgent] SEQUENCE STEP 1: Creating prompt and script in ChatGPT...');
-    say('Writing a new Mr. Apple prompt in ChatGPT…');
-    const chatGptResult = await this.generatePromptViaChatGPT({
-      format: options.format,
-      ageBand: options.ageBand,
-      seriesTitle: options.seriesTitle,
-      creativeTopic: options.creativeTopic,
-      learningGoal: options.learningGoal,
-      targetDurationSec: options.targetDurationSec || 15,
-    }, false);
+    console.log('[ChannelBrowserAgent] SEQUENCE STEP 1: Creating prompt and script in ChatGPT...');
+    say('Writing a new prompt in ChatGPT…');
+    const chatGptResult = await this.generatePromptViaChatGPT(false);
 
     const scriptPkg = chatGptResult.scriptPackage;
     const grokPrompt = scriptPkg.shot_briefs[0]?.video_prompt;
     if (!grokPrompt || grokPrompt.length < 50) {
       throw new Error(`Master prompt from ChatGPT is empty or too short (${grokPrompt?.length || 0} chars). Aborting.`);
     }
-    console.log(`[JevBrowserAgent] SEQUENCE STEP 1 SUCCESS: "${scriptPkg.concept_title}". Copied Grok prompt (${grokPrompt.length} chars).`);
+    console.log(`[ChannelBrowserAgent] SEQUENCE STEP 1 SUCCESS: "${scriptPkg.concept_title}". Copied Grok prompt (${grokPrompt.length} chars).`);
+    this.throwIfCancelled();
 
-    // 2. Grok: one video from the exact ChatGPT prompt + Mr. Apple reference image
-    console.log('[JevBrowserAgent] SEQUENCE STEP 2: Generating the video in Grok Imagine...');
+    // 2. Grok: one video from the exact ChatGPT prompt + the channel's reference image
+    console.log('[ChannelBrowserAgent] SEQUENCE STEP 2: Generating the video in Grok Imagine...');
     say('Generating the video in Grok (about 1–3 minutes)…');
-    const series = db.prepare("SELECT * FROM series WHERE status IN ('pilot', 'active') LIMIT 1").get() as any;
     // If Grok's server fails ("Server failed to respond"), stop and say so. No automatic retry: it fails the same way at
     // 480p and 720p, and every attempt may use Grok credits.
-    const chInfo = getChannel(this.channelId);
-    const effDuration = options.targetDurationSec || chInfo?.grok_duration || 15;
-    const effResolution = options.targetResolution || chInfo?.grok_resolution || '720p';
+    const effDuration = options.targetDurationSec || ch?.grok_duration || 15;
+    const effResolution: GrokResolution = options.targetResolution || ch?.grok_resolution || '720p';
 
     let grokRes: Awaited<ReturnType<typeof ChannelBrowserAgent.prototype.createVideoViaGrok>>;
     try {
@@ -2930,165 +2983,85 @@ export class ChannelBrowserAgent {
       }
       throw err;
     }
-    if (!this.isValidVideoFile(grokRes.videoPath)) {
-      throw new Error('Grok Imagine did not produce a valid video. Pipeline halted; nothing was uploaded to TikTok.');
+    if (!isValidVideoFile(grokRes.videoPath)) {
+      throw new Error('Grok Imagine did not produce a valid video. Pipeline halted; nothing was uploaded.');
     }
 
-    const captions = scriptPkg.captions || [];
     const safeSlug = scriptPkg.concept_title.replace(/[^a-zA-Z0-9]+/g, '_').slice(0, 30) || 'Episode';
     const finalVideoPath = path.join(path.dirname(grokRes.videoPath), `${safeSlug}_${jobId}.mp4`);
 
     // Raw Grok video with its original audio — no FFmpeg processing.
     fs.renameSync(grokRes.videoPath, finalVideoPath);
-    console.log(`[JevBrowserAgent] Video ready (${grokRes.durationSec}s, original Grok audio): ${finalVideoPath}`);
+    console.log(`[ChannelBrowserAgent] Video ready (${grokRes.durationSec}s, original Grok audio): ${finalVideoPath}`);
 
     const videoDuration = grokRes.durationSec;
-    const framesDir = path.join(__dirname, '../../storage/frames');
-    say('Picking a cover frame…');
-    const existingSnap = path.join(framesDir, `shot_${jobId}_1.png`);
-    const coverPath = await this.makeCoverImage(finalVideoPath, jobId);
-    const thumbnailPath = coverPath || (fs.existsSync(existingSnap) ? existingSnap : null);
+    const existingSnap = path.join(FRAMES_DIR, `shot_${jobId}_1.png`);
 
-    // 4. BIND TO OPEN PUBLISHING SLOT & INSERT JOB FIRST (Satisfies FOREIGN KEY constraint for qa_inspections)
-    const openSlot = db.prepare("SELECT * FROM publishing_slots WHERE status = 'unassigned' LIMIT 1").get() as any;
-    const slotId = openSlot ? openSlot.id : null;
-
-    console.log('[JevBrowserAgent] Registering job in database before QA audit...');
+    // 3. Register the video as soon as it exists, so it is never lost if a later step fails or the run is stopped.
     db.prepare(`
       INSERT INTO jobs (
-        id, series_id, slot_id, concept_title, format, age_band,
+        id, channel_id, series_id, slot_id, concept_title, format, age_band,
         hook, hypothesis, script_text, shot_briefs_json, captions_json,
-        state, video_path, thumbnail_path, duration_seconds, actual_cost_usd,
-        is_ai_generated, tiktok_share_url, is_demo_job, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'rendering', ?, ?, ?, 0.05, 1, NULL, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        state, video_path, thumbnail_path, duration_seconds,
+        is_ai_generated, is_demo_job, created_at, updated_at
+      ) VALUES (?, ?, NULL, NULL, ?, 'short', 'all', ?, '', ?, ?, '[]', 'rendering', ?, ?, ?, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `).run(
       jobId,
-      series?.id || null,
-      slotId,
+      this.channelId,
       scriptPkg.concept_title,
-      options.format,
-      options.ageBand,
       scriptPkg.hook,
-      scriptPkg.hypothesis,
       scriptPkg.script_text,
       JSON.stringify(scriptPkg.shot_briefs),
-      JSON.stringify(scriptPkg.captions),
       finalVideoPath,
-      thumbnailPath,
+      fs.existsSync(existingSnap) ? existingSnap : null,
       videoDuration
     );
+    options.onJob?.(jobId);
 
-    // 5. Kids Safety QA Inspection (FOREIGN KEY constraint satisfied!)
-    console.log('[JevBrowserAgent] Running multi-stage Kids Safety & COPPA QA Inspection...');
+    say('Picking a cover frame…');
+    const coverPath = await this.makeCoverImage(finalVideoPath, jobId);
+    const thumbnailPath = coverPath || (fs.existsSync(existingSnap) ? existingSnap : null);
+    db.prepare('UPDATE jobs SET thumbnail_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(thumbnailPath, jobId);
+
+    // 4. Kids Safety QA Inspection
+    console.log('[ChannelBrowserAgent] Running kids-safety QA inspection...');
     say('Running the kids-safety check…');
-    const qaResult = await KidsSafetyQAInspector.inspectJob(
-      jobId,
-      scriptPkg.script_text,
-      captions.map((c: any) => c.text).join(' '),
-      videoDuration,
-      finalVideoPath,
-      []
-    );
+    const qaResult = await inspectJob(jobId, {
+      title: scriptPkg.concept_title,
+      hook: scriptPkg.hook,
+      prompt: grokPrompt,
+      videoPath: finalVideoPath,
+      coverPath: thumbnailPath,
+    });
+    this.throwIfCancelled();
 
-    // 6. Post — ONLY when QA passed. TikTok first (browser; Buffer only as a fallback, never both), then YouTube.
-    let tiktokStatus = targets.tiktok ? 'held_for_review' : 'off';
-    let tiktokUrl: string | undefined;
-    let browserPosted = false; // Post was clicked in the browser — never also send through Buffer
-    let tiktokVerified = false; // TikTok showed its "published" confirmation
-    let youtubeStatus = youtubeOn ? 'held_for_review' : targets.youtube ? 'skipped' : 'off';
-    let youtubeUrl: string | undefined;
-    let youtubeVerified = false;
-
+    // 5. Post — ONLY when QA passed. TikTok first, then YouTube.
+    let posted: Awaited<ReturnType<typeof ChannelBrowserAgent.prototype.postVideo>>;
     if (qaResult.passed) {
-      if (targets.tiktok) {
-        console.log('[JevBrowserAgent] SEQUENCE STEP 3: Uploading finished video to TikTok...');
-        say('Uploading to TikTok and posting…');
-        tiktokStatus = 'ready_to_publish';
-        try {
-          const uploadRes = await this.uploadToTikTokViaBrowser(finalVideoPath, scriptPkg.concept_title, scriptPkg.hook, coverPath || undefined);
-          if (uploadRes.success) {
-            browserPosted = true;
-            tiktokVerified = !!uploadRes.verified;
-            tiktokStatus = tiktokVerified ? 'published' : 'scheduled'; // 'scheduled' = Post clicked, awaiting TikTok's receipt
-            tiktokUrl = uploadRes.shareUrl;
-          } else {
-            console.warn('[JevBrowserAgent] TikTok browser upload did not complete:', uploadRes.message);
-          }
-        } catch (ttErr: any) {
-          console.warn('[JevBrowserAgent] TikTok browser upload error:', ttErr.message);
-        }
-
-        if (!browserPosted) {
-          try {
-            const pubRes = await BufferTikTokPublisher.publishVideoPost(
-              jobId, scriptPkg.concept_title, scriptPkg.hook, finalVideoPath, thumbnailPath || undefined
-            );
-            if (pubRes.status === 'published' || pubRes.status === 'scheduled') {
-              tiktokStatus = pubRes.status;
-              tiktokUrl = pubRes.shareUrl || tiktokUrl;
-            }
-          } catch { }
-        }
-      }
-
-      if (youtubeOn) {
-        console.log('[JevBrowserAgent] SEQUENCE STEP 4: Uploading finished video to YouTube...');
-        say('Uploading to YouTube…');
-        youtubeStatus = 'failed';
-        try {
-          const cleanTitle = scriptPkg.concept_title.replace(/\s*#\w+/g, '').trim();
-          const yt = await this.uploadToYouTubeViaBrowser(
-            finalVideoPath,
-            cleanTitle,
-            `${scriptPkg.hook}\n\n#Shorts`,
-            { coverPath: coverPath || undefined, madeForKids: targets.youtubeMadeForKids }
-          );
-          if (yt.success) {
-            youtubeVerified = !!yt.verified;
-            youtubeStatus = youtubeVerified ? 'published' : 'submitted';
-            youtubeUrl = yt.shareUrl;
-          } else {
-            console.warn('[JevBrowserAgent] YouTube upload did not complete:', yt.message);
-            say(`YouTube upload failed: ${yt.message}`);
-          }
-        } catch (ytErr: any) {
-          console.warn('[JevBrowserAgent] YouTube upload error:', ytErr.message);
-        }
-      }
+      posted = await this.postVideo({
+        jobId,
+        videoPath: finalVideoPath,
+        title: scriptPkg.concept_title,
+        hook: scriptPkg.hook,
+        coverPath,
+        tiktok: targets.tiktok,
+        youtube: youtubeOn,
+        youtubeMadeForKids: targets.youtubeMadeForKids,
+        previous: { youtubeStatus: targets.youtube && !youtubeOn ? 'skipped' : 'off' },
+        say,
+      });
     } else {
-      console.warn('[JevBrowserAgent] QA did not pass — video held for review and NOT uploaded anywhere.');
-    }
-
-    // The browser window may close only when every place we meant to post to confirmed the post.
-    const postedEverywhere =
-      qaResult.passed && (tiktokVerified || youtubeVerified) && (!targets.tiktok || tiktokVerified) && (!youtubeOn || youtubeVerified);
-
-    // 7. Update Job and Slot final states in database
-    const anyPublished = tiktokStatus === 'published' || youtubeStatus === 'published';
-    const anySubmitted = tiktokStatus === 'scheduled' || youtubeStatus === 'submitted';
-    const finalState = !qaResult.passed
-      ? 'held_for_review'
-      : anyPublished ? 'published' : anySubmitted ? 'scheduled' : 'ready_to_publish';
-    db.prepare(`
-      UPDATE jobs
-      SET state = ?,
-          tiktok_share_url = ?,
-          youtube_share_url = ?,
-          video_path = ?,
-          thumbnail_path = ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(
-      finalState,
-      tiktokUrl || null,
-      youtubeUrl || null,
-      finalVideoPath,
-      thumbnailPath,
-      jobId
-    );
-
-    if (slotId) {
-      db.prepare("UPDATE publishing_slots SET status = 'ready', assigned_job_id = ? WHERE id = ?").run(jobId, slotId);
+      console.warn('[ChannelBrowserAgent] QA did not pass — video held for review and NOT uploaded anywhere.');
+      posted = {
+        tiktokStatus: targets.tiktok ? 'held_for_review' : 'off',
+        tiktokVerified: false,
+        tiktokUrl: undefined,
+        youtubeStatus: targets.youtube ? 'held_for_review' : 'off',
+        youtubeVerified: false,
+        youtubeUrl: undefined,
+        postedEverywhere: false,
+        postedAnywhere: false,
+      };
     }
 
     return {
@@ -3100,69 +3073,8 @@ export class ChannelBrowserAgent {
       thumbnailPath: thumbnailPath || undefined,
       durationSeconds: videoDuration,
       qaPassed: qaResult.passed,
-      tiktokStatus,
-      tiktokVerified,
-      tiktokUrl,
-      youtubeStatus,
-      youtubeVerified,
-      youtubeUrl,
-      postedEverywhere,
-      message: `ChatGPT prompt -> Grok video (${videoDuration}s${grokRes.width && grokRes.height ? ', ' + grokRes.width + 'x' + grokRes.height : ''}, original sound) -> QA ${qaResult.passed ? 'passed' : 'held'} -> TikTok: ${tiktokStatus} -> YouTube: ${youtubeStatus}`,
+      ...posted,
+      message: `ChatGPT prompt -> Grok video (${videoDuration}s${grokRes.width && grokRes.height ? ', ' + grokRes.width + 'x' + grokRes.height : ''}, original sound) -> QA ${qaResult.passed ? 'passed' : 'held'} -> TikTok: ${posted.tiktokStatus} -> YouTube: ${posted.youtubeStatus}`,
     };
   }
 }
-
-// Backward-compatibility facade that delegates to Channel 1 (Mr. Apple)
-import { getAgent } from './agentRegistry';
-
-export class JevBrowserAgent {
-  public static readonly ACCOUNT_SITES = ChannelBrowserAgent.ACCOUNT_SITES;
-  public static isValidVideoBuffer = ChannelBrowserAgent.isValidVideoBuffer;
-  public static isValidVideoFile = ChannelBrowserAgent.isValidVideoFile;
-  public static parseVideoSpec = ChannelBrowserAgent.parseVideoSpec;
-  public static async extractCoverFrame(page: Page, videoPath: string, outPath: string) {
-    return getAgent(1).extractCoverFrame(page, videoPath, outPath);
-  }
-
-  public static isPipelineRunning(): boolean {
-    return getAgent(1).isPipelineRunning();
-  }
-  public static skipLoginWait(): void {
-    getAgent(1).skipLoginWait();
-  }
-  public static cancelAccountWait(): void {
-    getAgent(1).cancelAccountWait();
-  }
-  public static async shutdown(): Promise<void> {
-    return getAgent(1).shutdown();
-  }
-  public static async checkAccounts(say: (step: string) => void): Promise<void> {
-    return getAgent(1).checkAccounts(say);
-  }
-  public static async switchAccount(key: AccountKey, say: (step: string, kind?: 'running' | 'waiting_login') => void): Promise<string> {
-    return getAgent(1).switchAccount(key, say);
-  }
-  public static async openInteractiveSession(): Promise<{ success: boolean; message: string }> {
-    return getAgent(1).openInteractiveSession();
-  }
-  public static async inspectSession(): Promise<any> {
-    return getAgent(1).inspectSession();
-  }
-  public static async detectAndSetChatGptUrl(): Promise<{ success: boolean; url?: string; title?: string; message: string }> {
-    return getAgent(1).detectAndSetChatGptUrl();
-  }
-  public static saveChatGptUrl(url: string): void {
-    getAgent(1).saveChatGptUrl(url);
-  }
-  public static async runFullAutonomousPipeline(options: any): Promise<any> {
-    return getAgent(1).runFullAutonomousPipeline(options);
-  }
-  public static async uploadToYouTubeViaBrowser(videoPath: string, title: string, description: string, options?: any) {
-    return getAgent(1).uploadToYouTubeViaBrowser(videoPath, title, description, options);
-  }
-  public static async uploadToTikTokViaBrowser(videoPath: string, title: string, hook: string, options?: any) {
-    return getAgent(1).uploadToTikTokViaBrowser(videoPath, title, hook, options);
-  }
-}
-
-export default JevBrowserAgent;

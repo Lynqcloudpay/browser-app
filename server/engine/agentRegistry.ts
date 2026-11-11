@@ -31,3 +31,28 @@ export function isChannelBusy(channelId: number): { busy: boolean; reason?: stri
 // Hook into channels.ts so deleteChannel cannot delete an active channel
 registerChannelBusyChecker(isChannelBusy);
 
+
+/**
+ * Shuts down every browser agent that was created (closes its Playwright context). Each shutdown is isolated so one
+ * failure cannot block the others, and the whole wait is capped so a hung browser cannot hang the server exit.
+ */
+export async function shutdownAllAgents(timeoutMs = 8000): Promise<void> {
+  const all = [...agents.values()];
+  agents.clear();
+  const work = Promise.all(
+    all.map((agent) =>
+      Promise.resolve()
+        .then(() => agent.shutdown())
+        .catch((err: any) => console.warn(`[agents] shutdown failed for channel ${agent.channelId}:`, err?.message))
+    )
+  );
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      console.warn(`[agents] shutdown did not finish within ${timeoutMs} ms; exiting anyway.`);
+      resolve();
+    }, timeoutMs);
+  });
+  await Promise.race([work, timeout]);
+  if (timer) clearTimeout(timer);
+}

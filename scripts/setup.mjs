@@ -156,7 +156,8 @@ try {
 
 // 7. Verification (skipped in --check mode)
 if (!CHECK_ONLY) {
-  run('Type-check', NPX, ['tsc', '--noEmit', '-p', '.'], 'A TypeScript error means the code is broken — fix it before continuing.');
+  run('Type-check (server)', NPX, ['tsc', '--noEmit', '-p', '.'], 'A TypeScript error means the code is broken — fix it before continuing.');
+  run('Type-check (web page)', NPX, ['tsc', '--noEmit', '-p', 'tsconfig.client.json'], 'A TypeScript error means the code is broken — fix it before continuing.');
   run('Tests (use their own throw-away database)', NPM, ['test'], 'Read the failing test above. Tests never touch the real database.');
   run('Build the web page', NPM, ['run', 'build'], 'Read the build error above.');
 }

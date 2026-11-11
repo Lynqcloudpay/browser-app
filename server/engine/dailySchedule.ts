@@ -9,6 +9,7 @@ import {
   scheduleStateFile,
   channelLogFile,
 } from './channels';
+import { REPO_ROOT } from '../paths';
 
 const execFileAsync = promisify(execFile);
 
@@ -20,11 +21,8 @@ const execFileAsync = promisify(execFile);
 export const LABEL = 'com.kindredstudio.daily';
 export const MAX_POSTS_PER_DAY = 8;
 export const MIN_GAP_MINUTES = 30; // one run takes ~5 minutes; keep runs from overlapping on the same browser profile
-const ROOT = path.join(__dirname, '../..');
-const CONFIG_FILE = path.join(ROOT, 'storage/schedule.json');
-const LOG_FILE = path.join(ROOT, 'storage/logs/daily.log');
-const STATE_FILE = process.env.KINDRED_STATE_FILE || path.join(ROOT, 'storage/schedule_state.json');
-const PLIST_PATH = path.join(os.homedir(), 'Library/LaunchAgents', `${LABEL}.plist`);
+/** Repo root: the launchd job runs scripts/dailyRun.ts from here. Storage files go through paths.ts / channels.ts. */
+const ROOT = REPO_ROOT;
 
 export interface ScheduleConfig {
   enabled: boolean;
@@ -120,10 +118,6 @@ ${calendar}
 `;
 }
 
-export function buildPlist(times: string[]): string {
-  return buildChannelPlist(1, times);
-}
-
 export interface LastRun {
   at: string;
   outcome: 'success' | 'failed' | 'skipped';
@@ -169,14 +163,6 @@ export function recordChannelRun(
   return st;
 }
 
-export function readState(): ScheduleState {
-  return readChannelState(1);
-}
-
-export function recordRun(outcome: LastRun['outcome'], message: string, slot?: string | null): ScheduleState {
-  return recordChannelRun(1, outcome, message, slot);
-}
-
 /**
  * Which slot should a scheduled run work on right now? The latest slot that has already come up today and has not been
  * completed yet. Returns null when there is none: either every due slot is done (-> skip) or no slot is due yet
@@ -189,22 +175,15 @@ export function pickDueSlot(times: string[], doneSlots: string[], now = new Date
   return { slot: open.length ? open[open.length - 1] : null, allDue: due };
 }
 
-function readLegacyConfig(): ScheduleConfig {
-  try {
-    const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-    const raw: string[] = Array.isArray(c.times) ? c.times : typeof c.time === 'string' ? [c.time] : [];
-    return { enabled: !!c.enabled, times: raw.length ? normalizeTimes(raw) : ['10:00'] };
-  } catch {
-    return { enabled: false, times: ['10:00'] };
-  }
-}
-
 async function launchctl(...args: string[]): Promise<void> {
   await execFileAsync('/bin/launchctl', args);
 }
 
+/** Tests set KINDRED_NO_LAUNCHD=1 so they never touch ~/Library/LaunchAgents or launchctl. */
+const launchdDisabled = () => process.env.KINDRED_NO_LAUNCHD === '1';
+
 export async function syncChannelLaunchAgent(channelId: number, enabled: boolean, times: string[]): Promise<void> {
-  if (process.platform !== 'darwin') return;
+  if (process.platform !== 'darwin' || launchdDisabled()) return;
   const clean = normalizeTimes(times);
   const domain = `gui/${os.userInfo().uid}`;
   const label = channelLabel(channelId);
@@ -227,7 +206,7 @@ export async function syncChannelLaunchAgent(channelId: number, enabled: boolean
 }
 
 export async function removeChannelLaunchAgent(channelId: number): Promise<void> {
-  if (process.platform !== 'darwin') return;
+  if (process.platform !== 'darwin' || launchdDisabled()) return;
   const domain = `gui/${os.userInfo().uid}`;
   const label = channelLabel(channelId);
   const plistPath = channelPlistPath(channelId);
@@ -275,35 +254,8 @@ export async function setChannelSchedule(
   return getChannelSchedule(channelId);
 }
 
-export function getSchedule(): ScheduleConfig & {
-  installed: boolean;
-  logFile: string;
-  platformSupported: boolean;
-  completedToday: number;
-  lastRun?: LastRun;
-} {
-  try {
-    return getChannelSchedule(1);
-  } catch {
-    const cfg = readLegacyConfig();
-    const st = readState();
-    return {
-      ...cfg,
-      completedToday: cfg.times.filter((t) => st.doneSlots.includes(t)).length,
-      lastRun: st.lastRun,
-      installed: fs.existsSync(PLIST_PATH),
-      logFile: LOG_FILE,
-      platformSupported: process.platform === 'darwin',
-    };
-  }
-}
-
-export async function setSchedule(enabled: boolean, times: string[]): Promise<ReturnType<typeof getSchedule>> {
-  return setChannelSchedule(1, enabled, times);
-}
-
 export async function migrateLegacySchedule(): Promise<void> {
-  if (process.platform !== 'darwin') return;
+  if (process.platform !== 'darwin' || launchdDisabled()) return;
   const domain = `gui/${os.userInfo().uid}`;
   const legacyPlist = path.join(os.homedir(), 'Library/LaunchAgents', 'com.kindredstudio.daily.plist');
   if (fs.existsSync(legacyPlist)) {

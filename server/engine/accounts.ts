@@ -33,14 +33,14 @@ export function isAccountOpBusy(channelId = 1): boolean {
 export function getAccountsOverview(channelId = 1) {
   const statuses = getAccountStatuses(channelId);
   const ch = getChannel(channelId);
-  const grokSettings = {
+  const grokView = {
     resolution: ch?.grok_resolution || '720p',
     duration: ch?.grok_duration || 15,
   };
   const agent = getAgent(channelId);
   return {
     sites: ACCOUNT_KEYS.map((key) => ({ key, name: agent.ACCOUNT_SITES[key].name, ...statuses[key] })),
-    grokSettings,
+    grokSettings: grokView,
     op: { ...getOp(channelId) },
   };
 }
