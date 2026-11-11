@@ -686,7 +686,8 @@ export class ChannelBrowserAgent {
     const domData = await page.evaluate((hint: string) => {
       // Helper to check whether text looks like a Grok video generation prompt
       function isVideoPromptText(text: string): boolean {
-        if (!text || text.length < 60 || text.length > 5000) return false;
+        // Real prompts run past 5,000 characters (one reached 5,382), so the ceiling is only a guard against matching the whole page.
+        if (!text || text.length < 60 || text.length > 20000) return false;
         const lower = text.toLowerCase();
         const hasAspectOrDuration =
           lower.includes('9:16') ||
@@ -779,14 +780,26 @@ export class ChannelBrowserAgent {
         }
       }
 
-      // Priority 2: If latest reply prompt still not found, search bottom-up through all page elements
+      // Priority 2: the page's markup was not recognised, so read the page as plain text instead. A prompt is the
+      // text between the last code-block label ("Plain text") and the last settings line ("10 seconds • Vertical 9:16 …").
+      // This never returns a fragment: it either finds the whole block or nothing.
       if (!latestReplyPrompt) {
-        const allCandidates = Array.from(document.querySelectorAll('pre, [data-testid*="canvas"], div, section, article'));
-        for (let i = allCandidates.length - 1; i >= 0; i--) {
-          const t = cleanPromptText((allCandidates[i] as HTMLElement).innerText || '');
-          if (isVideoPromptText(t)) {
-            latestReplyPrompt = t;
-            break;
+        const bodyText = document.body.innerText || '';
+        const settingsLine = /\d{1,2}\s*seconds?\s*[•·|][^\n]*/gi;
+        let lastEnd = -1;
+        let lastStart = -1;
+        for (const m of bodyText.matchAll(settingsLine)) {
+          if (/vertical|9:16|\d{3,4}p/i.test(m[0])) {
+            lastStart = m.index as number;
+            lastEnd = lastStart + m[0].length;
+          }
+        }
+        if (lastEnd > 0) {
+          const before = bodyText.slice(0, lastStart);
+          const label = Math.max(before.lastIndexOf('Plain text'), before.lastIndexOf('Copy code'));
+          if (label >= 0) {
+            const t = cleanPromptText(bodyText.slice(label, lastEnd));
+            if (isVideoPromptText(t)) latestReplyPrompt = t;
           }
         }
       }
@@ -932,32 +945,38 @@ export class ChannelBrowserAgent {
       let cleanHook = '';
       let lastObservedPromptLen = 0;
       let stableTicks = 0;
+      let lastStreaming = false;
 
       while (Date.now() - streamWaitStart < 120000) {
         await page.waitForTimeout(1500);
 
-        // Keep chat scrolled to bottom while streaming
+        // Keep the conversation scrolled to the newest reply. Only the scroller that holds the replies is moved:
+        // scrolling every element with "scroll" in its class also scrolled the chat-history sidebar to the bottom.
         await page.evaluate(() => {
-          window.scrollTo(0, document.body.scrollHeight);
-          const scrollables = Array.from(document.querySelectorAll('main, [class*="scroll" i], [role="presentation"]'));
-          for (const s of scrollables) {
-            if (s.scrollHeight > s.clientHeight) s.scrollTop = s.scrollHeight;
+          const turns = Array.from(document.querySelectorAll('article, [data-testid*="conversation-turn"]'));
+          let node: HTMLElement | null = (turns[turns.length - 1] as HTMLElement | undefined) || null;
+          while (node) {
+            const overflowY = getComputedStyle(node).overflowY;
+            if ((overflowY === 'auto' || overflowY === 'scroll') && node.scrollHeight > node.clientHeight) {
+              node.scrollTop = node.scrollHeight;
+              return;
+            }
+            node = node.parentElement;
           }
+          window.scrollTo(0, document.body.scrollHeight);
         }).catch(() => {});
 
-        // Check if ChatGPT is actively generating/streaming (composer stop button or streaming animation)
+        // ChatGPT is still writing while its Stop button is on screen. Class-name guesses ("streaming", "typing") are
+        // not used: they can match unrelated elements and make a finished reply look like it is still being written.
         const isStreaming = await page.evaluate(() => {
           const stopBtn = document.querySelector(
             'button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"]'
           );
-          if (stopBtn) {
-            const rect = (stopBtn as HTMLElement).getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0) return true;
-          }
-          const streamAnim = document.querySelector('.result-streaming, [class*="streaming" i], [class*="typing" i]');
-          if (streamAnim) return true;
-          return false;
+          if (!stopBtn) return false;
+          const rect = (stopBtn as HTMLElement).getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
         }).catch(() => false);
+        lastStreaming = isStreaming;
 
         if (isStreaming) {
           stableTicks = 0;
@@ -1022,8 +1041,11 @@ export class ChannelBrowserAgent {
 
       // STRICT VALIDATION: Must be a brand new, non-empty prompt!
       if (!grokPrompt || grokPrompt.length < 60 || (priorData.grokPrompt && grokPrompt === priorData.grokPrompt)) {
+        // Keep the page markup next to the screenshot so a change in ChatGPT's layout can be diagnosed from the files.
+        await page.content().then((html) => fs.writeFileSync(screenshotPath.replace(/\.png$/, '.html'), html.slice(0, 2_000_000))).catch(() => {});
         throw new Error(
-          `ChatGPT did not finish generating a new prompt after submitting "next" (extracted ${grokPrompt.length} chars). ` +
+          `ChatGPT did not finish generating a new prompt after submitting "next" (extracted ${grokPrompt.length} chars; ` +
+          `${lastStreaming ? 'ChatGPT still showed its Stop button' : 'the reply looked finished but no new video prompt was found in it'}). ` +
           `Aborting before Grok so an old or incomplete prompt is never used.`
         );
       }
