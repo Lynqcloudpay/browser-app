@@ -89,6 +89,8 @@ export class ChannelBrowserAgent {
   private grokSubmitted = false;
   /** When the Grok composer was opened and set to Video ahead of time (0: not prepared). */
   private grokPreparedAt = 0;
+  /** Set when the run stopped waiting for the preparation: it must then leave the Grok tab alone. */
+  private grokPrepAbandoned = false;
   /** When each site last looked signed in, in the window that is open now. Cleared whenever the window closes. */
   private siteVerifiedAt = new Map<AccountKey, number>();
 
@@ -2011,8 +2013,14 @@ export class ChannelBrowserAgent {
       }
       pages.push(page);
     }
+    const loadStarted = Date.now();
     await Promise.all(
-      sites.map((site, i) => pages[i].goto(site.url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {}))
+      sites.map((site, i) =>
+        pages[i]
+          .goto(site.url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+          .then(() => console.log(`[timing] ${site.name} page loaded in ${Math.round((Date.now() - loadStarted) / 1000)}s`))
+          .catch((err) => console.warn(`[timing] ${site.name} page did not finish loading in 30s: ${String(err?.message || err).split('\n')[0]}`))
+      )
     );
     await pages[0].bringToFront().catch(() => {});
     await pages[0].waitForTimeout(4000);
@@ -3187,11 +3195,15 @@ export class ChannelBrowserAgent {
       console.log(`[ChannelBrowserAgent-${this.channelId}] Preparing Grok while ChatGPT writes…`);
       const context = await this.launchContext(false);
       const page = context.pages().find((p) => !p.isClosed() && p.url().includes('grok.com')) || (await context.newPage());
-      await page.goto('https://grok.com/imagine', { waitUntil: 'domcontentloaded', timeout: 30000 });
       const textbox = this.grokComposer(page).locator('[role="textbox"], [contenteditable="true"], textarea').first();
+      // The login check usually just opened Grok's composer in this tab: reuse it instead of loading it again.
+      const alreadyThere =
+        /^https:\/\/grok\.com\/imagine\/?(\?.*)?$/.test(page.url()) &&
+        (await textbox.waitFor({ state: 'visible', timeout: 2000 }).then(() => true).catch(() => false));
+      if (!alreadyThere) await page.goto('https://grok.com/imagine', { waitUntil: 'domcontentloaded', timeout: 30000 });
       // A cold window can show a banner or promo over Grok first: clear pop-ups while waiting (up to 35 s).
       let composerShown = false;
-      for (let i = 0; i < 7 && !composerShown; i++) {
+      for (let i = 0; i < 9 && !composerShown && !this.grokPrepAbandoned; i++) {
         await dismissPopups(page);
         composerShown = await textbox.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
       }
@@ -3206,7 +3218,9 @@ export class ChannelBrowserAgent {
         resolution,
         aspect: '9:16',
       };
+      if (this.grokPrepAbandoned) return; // the Grok step has taken over the tab
       await this.configureGrokVideoMode(page, spec);
+      if (this.grokPrepAbandoned) return;
       this.grokPreparedAt = Date.now();
       console.log(`[ChannelBrowserAgent-${this.channelId}] Grok composer ready ahead of time (Video, ${spec.durationSec}s, ${spec.resolution}) in ${Math.round((Date.now() - started) / 1000)}s.`);
     } catch (err: any) {
@@ -3256,6 +3270,7 @@ export class ChannelBrowserAgent {
     const prepDuration = options.targetDurationSec || ch?.grok_duration || 15;
     const prepResolution: GrokResolution = options.targetResolution || ch?.grok_resolution || '720p';
     this.grokPreparedAt = 0;
+    this.grokPrepAbandoned = false;
     const grokReady = this.prepareGrok(prepDuration, prepResolution);
     // A retry sends "next" again, which only asks ChatGPT for another prompt: nothing is spent or posted.
     const chatGptResult = await this.retryStep('Writing the prompt in ChatGPT', say, async (n) => {
@@ -3269,7 +3284,12 @@ export class ChannelBrowserAgent {
       throw new Error(`Master prompt from ChatGPT is empty or too short (${grokPrompt?.length || 0} chars). Aborting.`);
     }
     console.log(`[ChannelBrowserAgent] SEQUENCE STEP 1 SUCCESS: "${scriptPkg.concept_title}". Copied Grok prompt (${grokPrompt.length} chars).`);
-    await grokReady;
+    // Give the preparation a few more seconds if ChatGPT was quicker, but never hold the run up for it.
+    await Promise.race([grokReady, new Promise((r) => setTimeout(r, 8000))]);
+    if (!this.grokPreparedAt) {
+      this.grokPrepAbandoned = true;
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Grok preparation not finished; the Grok step will load Grok itself.`);
+    }
     this.throwIfCancelled();
 
     // 2. Grok: one video from the exact ChatGPT prompt + the channel's reference image
