@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import db from '../db/database';
 import { normalizeTimes, removeChannelLaunchAgent } from './dailySchedule';
-import { STORAGE_ROOT, LOGS_DIR, CHANNEL_SEEDS_DIR } from '../paths';
+import { STORAGE_ROOT, LOGS_DIR, CHANNEL_SEEDS_DIR, REPO_ROOT } from '../paths';
 
 export interface Channel {
   id: number;
@@ -35,7 +35,7 @@ function legacyPathsAllowed(): boolean {
   const insideStorage = rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
   if (!insideStorage) return false;
   const dbEnv = process.env.DATABASE_PATH;
-  return !dbEnv || path.resolve(dbEnv) === path.join(STORAGE_ROOT, 'kindred_studio.db');
+  return !dbEnv || path.resolve(REPO_ROOT, dbEnv) === path.join(STORAGE_ROOT, 'kindred_studio.db');
 }
 
 export function getChannelsRoot(): string {

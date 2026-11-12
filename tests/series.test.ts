@@ -91,4 +91,20 @@ assert.throws(
 );
 console.log('ok short window refused');
 
+// 7. launchd jobs never point launchd itself at the app folder (it may sit on an external drive launchd cannot
+//    open: the job then dies with exit 78 and no log). Only node, inside the job, reads the app folder.
+{
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { buildChannelPlist, buildPlanPlist } = require('../server/engine/dailySchedule');
+  const { REPO_ROOT } = require('../server/paths');
+  for (const xml of [buildChannelPlist(2, ['15:14']), buildPlanPlist(2)] as string[]) {
+    const wd = /<key>WorkingDirectory<\/key><string>([^<]*)<\/string>/.exec(xml)![1];
+    const out = /<key>StandardOutPath<\/key><string>([^<]*)<\/string>/.exec(xml)![1];
+    assert.ok(!wd.startsWith(REPO_ROOT), 'working directory outside the app folder');
+    assert.ok(!out.startsWith(REPO_ROOT) && out.includes('Library/Logs/KindredStudio'), 'log outside the app folder');
+    assert.ok(xml.includes('<string>-e</string>'), 'inline launcher checks access first');
+  }
+}
+console.log('ok launchd jobs keep their own files off the app drive');
+
 console.log('--- ALL SERIES TESTS PASSED ---');

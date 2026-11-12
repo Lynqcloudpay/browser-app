@@ -99,7 +99,7 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
   LaunchAgent (`com.kindredstudio.channel.<id>` → `scripts/dailyRun.ts --channel <id>`). Grok generations are throttled by
   `withGrokSlot`; macOS clipboard use is serialized by `withClipboard`.
 - **Schedule:** a slot is done only when ITS video was made (`storage/channels/<id>/schedule_state.json`); a missed slot is
-  caught up once; log in `storage/logs/channel_<id>.log`.
+  caught up once; log in `~/Library/Logs/KindredStudio/channel_<id>.log`.
 - **`/media`** serves only `storage/videos`, `frames`, `thumbnails`. Channel folders hold saved logins and must never be served.
 - The browser window closes by itself after every platform confirmed the post; the next run restores cookies.
 

@@ -5,9 +5,9 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import {
   getChannel,
+  listChannels,
   updateChannel,
   scheduleStateFile,
-  channelLogFile,
   channelDir,
   saveScheduleTimes,
 } from './channels';
@@ -94,50 +94,84 @@ export const planLabel = (channelId: number) => `com.kindredstudio.plan.${channe
 export const planPlistPath = (channelId: number) =>
   path.join(os.homedir(), 'Library/LaunchAgents', `${planLabel(channelId)}.plist`);
 
-/** Runs once a night (00:05) to make tomorrow's random pattern for a channel. */
-export function buildPlanPlist(channelId: number): string {
+/**
+ * Where launchd writes a job's output. Deliberately in ~/Library/Logs, NOT in the repo: when the app lives on an
+ * external drive, macOS privacy rules stop launchd from opening files or folders there, and the job then dies with
+ * exit 78 (EX_CONFIG) before it runs a single line, leaving no log at all.
+ */
+export const LAUNCHD_LOG_DIR = path.join(os.homedir(), 'Library/Logs/KindredStudio');
+export function launchdLogFile(channelId: number, kind: 'run' | 'plan' = 'run'): string {
+  return path.join(LAUNCHD_LOG_DIR, kind === 'run' ? `channel_${channelId}.log` : `plan_${channelId}.log`);
+}
+
+/**
+ * Inline launcher (node -e) so the job's first step needs nothing from the app folder. It checks that macOS lets
+ * node read the script; if not (external drive without Full Disk Access) it logs how to fix it and shows a
+ * notification instead of failing silently. Otherwise it runs the script with tsx and passes its exit code on.
+ * Plain string, no template literals: it is embedded in the plist as text.
+ */
+const LAUNCHER_JS = [
+  "const fs=require('fs'),cp=require('child_process');",
+  'const [tsx,script,...rest]=process.argv.slice(1);',
+  'try{fs.readFileSync(script);fs.readFileSync(tsx);}catch(e){',
+  "console.log('['+new Date().toLocaleString()+'] BLOCKED: macOS did not let node read '+script+' ('+e.code+'). '+",
+  "'Fix: System Settings > Privacy & Security > Full Disk Access > + > add '+process.execPath+' and switch it on.');",
+  "try{cp.execFileSync('/usr/bin/osascript',['-e','display notification \"macOS blocked the scheduled video. Give node Full Disk Access (see ~/Library/Logs/KindredStudio).\" with title \"KindredStudio\"']);}catch(_){}",
+  'process.exit(1);}',
+  "const r=cp.spawnSync(process.execPath,[tsx,script,...rest],{stdio:'inherit'});",
+  'process.exit(r.status===null?1:r.status);',
+].join('');
+
+function buildJobPlist(opts: { label: string; script: string; channelId: number; calendar: string; logFile: string }): string {
   const tsxCli = path.join(ROOT, 'node_modules/tsx/dist/cli.mjs');
   const nodeDir = path.dirname(process.execPath);
-  const logFile = channelLogFile(channelId);
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>${planLabel(channelId)}</string>
+  <key>Label</key><string>${opts.label}</string>
   <key>ProgramArguments</key>
   <array>
     <string>${esc(process.execPath)}</string>
+    <string>-e</string>
+    <string>${esc(LAUNCHER_JS)}</string>
     <string>${esc(tsxCli)}</string>
-    <string>${esc(path.join(ROOT, 'scripts/planSeries.ts'))}</string>
+    <string>${esc(path.join(ROOT, opts.script))}</string>
     <string>--channel</string>
-    <string>${channelId}</string>
+    <string>${opts.channelId}</string>
   </array>
-  <key>WorkingDirectory</key><string>${esc(ROOT)}</string>
+  <key>WorkingDirectory</key><string>${esc(os.homedir())}</string>
   <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key><integer>0</integer>
-    <key>Minute</key><integer>5</integer>
-  </dict>
+${opts.calendar}
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>${esc(nodeDir)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
-  <key>StandardOutPath</key><string>${esc(logFile)}</string>
-  <key>StandardErrorPath</key><string>${esc(logFile)}</string>
+  <key>StandardOutPath</key><string>${esc(opts.logFile)}</string>
+  <key>StandardErrorPath</key><string>${esc(opts.logFile)}</string>
   <key>RunAtLoad</key><false/>
 </dict>
 </plist>
 `;
 }
 
+/** Runs once a night (00:05) to make tomorrow's random pattern for a channel. */
+export function buildPlanPlist(channelId: number): string {
+  return buildJobPlist({
+    label: planLabel(channelId),
+    script: 'scripts/planSeries.ts',
+    channelId,
+    calendar: `  <dict>
+    <key>Hour</key><integer>0</integer>
+    <key>Minute</key><integer>5</integer>
+  </dict>`,
+    logFile: launchdLogFile(channelId, 'plan'),
+  });
+}
+
 export function buildChannelPlist(channelId: number, times: string[]): string {
   const slots = cleanTimes(times).map(parseTime);
-  const tsxCli = path.join(ROOT, 'node_modules/tsx/dist/cli.mjs');
-  const nodeDir = path.dirname(process.execPath);
-  const logFile = channelLogFile(channelId);
-  const label = channelLabel(channelId);
-  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const calendar = slots
     .map(
       (s) => `    <dict>
@@ -146,34 +180,13 @@ export function buildChannelPlist(channelId: number, times: string[]): string {
     </dict>`
     )
     .join('\n');
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>${label}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${esc(process.execPath)}</string>
-    <string>${esc(tsxCli)}</string>
-    <string>${esc(path.join(ROOT, 'scripts/dailyRun.ts'))}</string>
-    <string>--channel</string>
-    <string>${channelId}</string>
-  </array>
-  <key>WorkingDirectory</key><string>${esc(ROOT)}</string>
-  <key>StartCalendarInterval</key>
-  <array>
-${calendar}
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>${esc(nodeDir)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-  </dict>
-  <key>StandardOutPath</key><string>${esc(logFile)}</string>
-  <key>StandardErrorPath</key><string>${esc(logFile)}</string>
-  <key>RunAtLoad</key><false/>
-</dict>
-</plist>
-`;
+  return buildJobPlist({
+    label: channelLabel(channelId),
+    script: 'scripts/dailyRun.ts',
+    channelId,
+    calendar: `  <array>\n${calendar}\n  </array>`,
+    logFile: launchdLogFile(channelId),
+  });
 }
 
 export interface LastRun {
@@ -252,7 +265,7 @@ export async function syncRunAgent(channelId: number, enabled: boolean, times: s
   const domain = `gui/${os.userInfo().uid}`;
   const label = channelLabel(channelId);
   const plistPath = channelPlistPath(channelId);
-  const logFile = channelLogFile(channelId);
+  const logFile = launchdLogFile(channelId);
 
   // Always remove the old job first (ignore "not loaded").
   await launchctl('bootout', `${domain}/${label}`).catch(() => {});
@@ -280,6 +293,7 @@ export async function syncPlanAgent(channelId: number, enabled: boolean): Promis
   await launchctl('bootout', `${domain}/${planLabel(channelId)}`).catch(() => {});
   if (enabled && readSeries(channelId)?.mode === 'random') {
     fs.mkdirSync(path.dirname(planPlist), { recursive: true });
+    fs.mkdirSync(LAUNCHD_LOG_DIR, { recursive: true });
     fs.writeFileSync(planPlist, buildPlanPlist(channelId));
     await launchctl('bootstrap', domain, planPlist);
   } else if (fs.existsSync(planPlist)) {
@@ -401,7 +415,7 @@ export function getChannelSchedule(channelId: number): ScheduleConfig & {
     completedToday: times.filter((t) => st.doneSlots.includes(t)).length,
     lastRun: st.lastRun,
     installed: fs.existsSync(plistPath),
-    logFile: channelLogFile(channelId),
+    logFile: launchdLogFile(channelId),
     platformSupported: process.platform === 'darwin',
   };
 }
@@ -433,11 +447,12 @@ export async function migrateLegacySchedule(): Promise<void> {
     }
   }
 
-  // Ensure channel 1 schedule is installed if enabled
-  const ch1 = getChannel(1);
-  if (ch1 && ch1.schedule_enabled) {
-    await syncChannelLaunchAgent(1, true, ch1.schedule_times).catch((e) => {
-      console.warn('[Schedule] Could not sync channel 1 schedule:', e.message);
+  // Reinstall every enabled channel's jobs, so plists written by an older version (log and working folder on the
+  // app's drive, which launchd may not open: exit 78) are replaced by the current format on every start.
+  for (const ch of listChannels()) {
+    if (!ch.schedule_enabled) continue;
+    await syncChannelLaunchAgent(ch.id, true, ch.schedule_times).catch((e) => {
+      console.warn(`[Schedule] Could not sync channel ${ch.id} schedule:`, e.message);
     });
   }
 }

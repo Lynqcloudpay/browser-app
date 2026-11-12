@@ -4,11 +4,16 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 import { SCHEMA_SQL, POST_MIGRATION_SQL } from './schema';
 import { seedDefaultChannelIfNeeded } from '../engine/channels';
-import { STORAGE_ROOT } from '../paths';
+import { REPO_ROOT, STORAGE_ROOT } from '../paths';
 
-dotenv.config();
+// Load the repo's .env, not whatever .env sits in the current folder: scheduled jobs (launchd) start in the home folder.
+dotenv.config({ path: path.join(REPO_ROOT, '.env') });
 
-const DB_PATH = process.env.DATABASE_PATH || path.join(STORAGE_ROOT, 'kindred_studio.db');
+// A relative DATABASE_PATH (".env" ships "./storage/kindred_studio.db") is relative to the repo, never to the current
+// folder. Otherwise a scheduled job opens a new, empty database in ~/storage and fails with "no such table".
+const DB_PATH = process.env.DATABASE_PATH
+  ? path.resolve(REPO_ROOT, process.env.DATABASE_PATH)
+  : path.join(STORAGE_ROOT, 'kindred_studio.db');
 
 // Ensure storage dir exists
 const storageDir = path.dirname(DB_PATH);
