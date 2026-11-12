@@ -107,4 +107,47 @@ console.log('ok short window refused');
 }
 console.log('ok launchd jobs keep their own files off the app drive');
 
+// 8. Channels keep 10 minutes apart
+{
+  const { findClash, minutesApart, isBlocked, CHANNEL_GAP_MINUTES } = require('../server/engine/seriesPlan');
+  assert.strictEqual(CHANNEL_GAP_MINUTES, 10);
+  assert.strictEqual(minutesApart(toMin('23:55'), toMin('00:03')), 8, 'distance wraps midnight');
+  assert.ok(isBlocked(toMin('15:20'), [toMin('15:24')]));
+  assert.ok(!isBlocked(toMin('15:14'), [toMin('15:24')]), 'exactly 10 minutes is allowed');
+  assert.deepStrictEqual(findClash(['09:00', '15:20'], [{ name: 'Mr. Apple', times: ['15:24'] }]), {
+    time: '15:20', other: 'Mr. Apple', otherTime: '15:24',
+  });
+  assert.strictEqual(findClash(['09:00', '15:14'], [{ name: 'Mr. Apple', times: ['15:24'] }]), null);
+
+  // Random plans steer clear of another channel's random plan, many nights in a row
+  const cfg = { mode: 'random' as const, start: '07:00', end: '23:00' };
+  for (let night = 0; night < 200; night++) {
+    const other = planRandomDay(cfg, new Set()).times.map(toMin);
+    const mine = planRandomDay(cfg, new Set(), Math.random, 1000, other).times;
+    for (const t of mine) assert.ok(!isBlocked(toMin(t), other), `${t} too close to the other channel`);
+    for (const g of gapsOf(mine)) assert.ok(g >= RANDOM_MIN_GAP && g <= RANDOM_MAX_GAP, `gap ${g} out of range`);
+  }
+  // Start time taken by another channel: the first video moves to the first free minute
+  const shifted = planRandomDay({ mode: 'random', start: '08:00', end: '12:00' }, new Set(), rng, 1000, [toMin('08:00')]);
+  assert.strictEqual(shifted.times[0], '08:10');
+}
+console.log('ok channels keep 10 minutes apart');
+
+// 9. The schedule refuses a manual time near another channel's video
+{
+  const { initDatabase } = require('../server/db/database');
+  const { createChannel, updateChannel } = require('../server/engine/channels');
+  const { assertNoClash, planMinute } = require('../server/engine/dailySchedule');
+  initDatabase();
+  const a = createChannel('Clash A');
+  const b = createChannel('Clash B');
+  updateChannel(a.id, { schedule_enabled: true, schedule_times: ['15:24'] });
+  assert.throws(() => assertNoClash(b.id, ['15:30']), /less than 10 minutes from Clash A's video at 15:24/);
+  assert.doesNotThrow(() => assertNoClash(b.id, ['15:34']));
+  updateChannel(a.id, { schedule_enabled: false });
+  assert.doesNotThrow(() => assertNoClash(b.id, ['15:30']), 'a paused channel does not block');
+  assert.notStrictEqual(planMinute(1), planMinute(2), 'nightly planners never start together');
+}
+console.log('ok manual time near another channel is refused');
+
 console.log('--- ALL SERIES TESTS PASSED ---');

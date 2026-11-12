@@ -1789,6 +1789,9 @@ export class ChannelBrowserAgent {
       await page.locator('video[data-kindred-main]').first().screenshot({ path: outputImagePath, timeout: 5000 }).catch(() => {});
       await page.screenshot({ path: screenshotPath }).catch(() => {});
 
+      // The finished clip loops forever on Grok's post page. It is saved now, so leave the page (never fatal).
+      await this.leaveGrokVideo(page);
+
       return {
         videoPath: outputVideoPath,
         imagePath: fs.existsSync(outputImagePath) ? outputImagePath : undefined,
@@ -1801,6 +1804,36 @@ export class ChannelBrowserAgent {
       if (listening) page.off('response', onResponse);
     }
     });
+  }
+
+  /**
+   * After the video is downloaded: stop it playing and go back out of Grok's video page, like the app's Back button.
+   * Tries Grok's own Back button, then browser history, then the Imagine home. Any failure is only logged.
+   */
+  private async leaveGrokVideo(page: Page): Promise<void> {
+    try {
+      await page
+        .evaluate(() => document.querySelectorAll('video').forEach((v) => { v.pause(); v.muted = true; }))
+        .catch(() => {});
+      const onPost = () => /\/imagine\/post\//.test(page.url());
+      if (!onPost()) return;
+      const back = page
+        .locator('button[aria-label="Back" i], a[aria-label="Back" i], button[aria-label="Go back" i], a[aria-label="Go back" i]')
+        .first();
+      if (await back.isVisible({ timeout: 1500 }).catch(() => false)) {
+        await back.click({ timeout: 3000 }).catch(() => {});
+        await page.waitForURL((u) => !/\/imagine\/post\//.test(u.toString()), { timeout: 5000 }).catch(() => {});
+      }
+      if (onPost()) {
+        await page.goBack({ waitUntil: 'domcontentloaded', timeout: 8000 }).catch(() => {});
+      }
+      if (onPost()) {
+        await page.goto('https://grok.com/imagine', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+      }
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Left the Grok video page (${onPost() ? 'still on it' : page.url()}).`);
+    } catch (err: any) {
+      console.warn(`[ChannelBrowserAgent-${this.channelId}] Could not leave the Grok video page: ${err?.message || err}`);
+    }
   }
 
   /**

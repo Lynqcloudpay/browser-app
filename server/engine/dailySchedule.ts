@@ -18,6 +18,9 @@ import {
   planEveryDay,
   planRandomDay,
   patternKey,
+  findClash,
+  toMinutes as seriesMinutes,
+  CHANNEL_GAP_MINUTES,
 } from './seriesPlan';
 import { REPO_ROOT } from '../paths';
 
@@ -156,15 +159,21 @@ ${opts.calendar}
 `;
 }
 
-/** Runs once a night (00:05) to make tomorrow's random pattern for a channel. */
+/**
+ * Planner start time, one minute apart per channel (channel 1 at 00:06, 2 at 00:07, …) so planners never run at the
+ * same moment: each one sees the patterns the channels before it just made and keeps clear of them.
+ */
+export const planMinute = (channelId: number) => (5 + channelId) % (24 * 60);
+
+/** Runs once a night (just after midnight, see planMinute) to make the day's random pattern for a channel. */
 export function buildPlanPlist(channelId: number): string {
   return buildJobPlist({
     label: planLabel(channelId),
     script: 'scripts/planSeries.ts',
     channelId,
     calendar: `  <dict>
-    <key>Hour</key><integer>0</integer>
-    <key>Minute</key><integer>5</integer>
+    <key>Hour</key><integer>${Math.floor(planMinute(channelId) / 60)}</integer>
+    <key>Minute</key><integer>${planMinute(channelId) % 60}</integer>
   </dict>`,
     logFile: launchdLogFile(channelId, 'plan'),
   });
@@ -358,10 +367,31 @@ function readHistory(channelId: number): string[] {
 }
 
 /** Today's (or tomorrow's) launch times for a series. Random days are remembered so no pattern comes back. */
+// ---- One channel at a time: every video keeps CHANNEL_GAP_MINUTES from every other channel's ----------------------
+
+/** Other channels whose schedule is on, with their current day's times. */
+function otherEnabledChannels(channelId: number): Array<{ name: string; times: string[] }> {
+  return listChannels()
+    .filter((c) => c.id !== channelId && c.schedule_enabled)
+    .map((c) => ({ name: c.name, times: c.schedule_times }));
+}
+
+/** Throws a readable error when any of these times is within CHANNEL_GAP_MINUTES of another channel's video. */
+export function assertNoClash(channelId: number, times: string[]): void {
+  const clash = findClash(times, otherEnabledChannels(channelId));
+  if (clash) {
+    throw new Error(
+      `${clash.time} is less than ${CHANNEL_GAP_MINUTES} minutes from ${clash.other}'s video at ${clash.otherTime}. ` +
+        `Channels must be at least ${CHANNEL_GAP_MINUTES} minutes apart so Grok never makes two videos at once.`
+    );
+  }
+}
+
 function planSeriesTimes(channelId: number, cfg: SeriesConfig): string[] {
   if (cfg.mode === 'every') return planEveryDay(cfg);
   const history = readHistory(channelId);
-  const { times, key } = planRandomDay(cfg, new Set(history));
+  const blocked = otherEnabledChannels(channelId).flatMap((o) => o.times.map(seriesMinutes));
+  const { times, key } = planRandomDay(cfg, new Set(history), Math.random, 1000, blocked);
   const next = [...history, key].slice(-HISTORY_LIMIT);
   fs.mkdirSync(path.dirname(seriesHistoryFile(channelId)), { recursive: true });
   fs.writeFileSync(seriesHistoryFile(channelId), JSON.stringify(next));
@@ -377,6 +407,7 @@ export async function setChannelSeries(
   if (process.platform !== 'darwin') throw new Error('Daily scheduling uses macOS launchd and only works on a Mac.');
   const cfg = parseSeries(input);
   const times = planSeriesTimes(channelId, cfg);
+  if (enabled) assertNoClash(channelId, times); // random plans already avoid others; fixed steps may not
   writeSeries(channelId, cfg);
   saveScheduleTimes(channelId, times);
   updateChannel(channelId, { schedule_enabled: enabled });
@@ -427,6 +458,7 @@ export async function setChannelSchedule(
 ): Promise<ReturnType<typeof getChannelSchedule>> {
   if (process.platform !== 'darwin') throw new Error('Daily scheduling uses macOS launchd and only works on a Mac.');
   const clean = normalizeTimes(times);
+  if (enabled) assertNoClash(channelId, clean);
   writeSeries(channelId, null); // plain times mode replaces any series pattern
   updateChannel(channelId, { schedule_enabled: enabled, schedule_times: clean });
   await syncChannelLaunchAgent(channelId, enabled, clean);

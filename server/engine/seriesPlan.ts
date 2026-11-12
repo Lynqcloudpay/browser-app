@@ -68,31 +68,80 @@ export const patternKey = (times: string[]) => times.join(',');
  * A day is rejected when its exact time list was used before, or when two gaps in a row are equal, so the same
  * pattern never comes back. `rng` is injectable for tests.
  */
+/** Minutes every channel's videos must keep from every other channel's (one Grok account, one Mac). */
+export const CHANNEL_GAP_MINUTES = 10;
+
+/** Minutes between two times of day, the short way round midnight (23:55 and 00:03 are 8 minutes apart). */
+export function minutesApart(a: number, b: number): number {
+  const d = Math.abs(a - b) % 1440;
+  return Math.min(d, 1440 - d);
+}
+
+/** True when a time is closer than CHANNEL_GAP_MINUTES to any blocked time. */
+export const isBlocked = (min: number, blocked: readonly number[]) =>
+  blocked.some((b) => minutesApart(min, b) < CHANNEL_GAP_MINUTES);
+
+/**
+ * Random chain for one day: first video at the start time (or the first free minute after it), then a random gap
+ * each time, never past the end. Every time keeps CHANNEL_GAP_MINUTES from `blocked` (other channels' times), and
+ * two gaps in a row are never equal. A day whose exact time list was used before is rejected and drawn again, so the
+ * same pattern never comes back. `rng` is injectable for tests.
+ */
 export function planRandomDay(
   cfg: Extract<SeriesConfig, { mode: 'random' }>,
   used: ReadonlySet<string>,
   rng: () => number = Math.random,
-  maxTries = 1000
+  maxTries = 1000,
+  blocked: readonly number[] = []
 ): { times: string[]; key: string } {
   const start = toMinutes(cfg.start);
   const end = toMinutes(cfg.end);
-  const span = RANDOM_MAX_GAP - RANDOM_MIN_GAP + 1;
+  let first = -1;
+  for (let m = start; m <= end && m < start + RANDOM_MAX_GAP; m++) {
+    if (!isBlocked(m, blocked)) {
+      first = m;
+      break;
+    }
+  }
+  if (first < 0) throw new Error('Other channels have videos all through the start of this window. Pick another start time.');
   for (let attempt = 0; attempt < maxTries; attempt++) {
-    const times = [formatMinutes(start)];
-    const gaps: number[] = [];
-    let t = start;
+    const times = [formatMinutes(first)];
+    let t = first;
+    let prevGap = -1;
     for (;;) {
-      const gap = RANDOM_MIN_GAP + Math.floor(rng() * span);
-      if (t + gap > end) break;
-      gaps.push(gap);
+      const options: number[] = [];
+      for (let g = RANDOM_MIN_GAP; g <= RANDOM_MAX_GAP && t + g <= end; g++) {
+        if (g !== prevGap && !isBlocked(t + g, blocked)) options.push(g);
+      }
+      if (!options.length) break;
+      const gap = options[Math.floor(rng() * options.length)];
+      prevGap = gap;
       t += gap;
       times.push(formatMinutes(t));
     }
     const key = patternKey(times);
-    const repeatedGap = gaps.some((g, i) => i > 0 && g === gaps[i - 1]);
-    if (!used.has(key) && !repeatedGap) return { times, key };
+    if (!used.has(key)) return { times, key };
   }
   throw new Error('Could not make a new random pattern for this window. Make the window longer.');
+}
+
+/**
+ * First pair where this channel's times come closer than CHANNEL_GAP_MINUTES to another channel's, or null.
+ * `others` = the other ENABLED channels with their times.
+ */
+export function findClash(
+  times: readonly string[],
+  others: ReadonlyArray<{ name: string; times: readonly string[] }>
+): { time: string; other: string; otherTime: string } | null {
+  for (const t of times) {
+    const m = toMinutes(t);
+    for (const o of others) {
+      for (const ot of o.times) {
+        if (minutesApart(m, toMinutes(ot)) < CHANNEL_GAP_MINUTES) return { time: formatMinutes(m), other: o.name, otherTime: ot };
+      }
+    }
+  }
+  return null;
 }
 
 /** Maximum number of distinct day patterns remembered, so the history file stays small. */

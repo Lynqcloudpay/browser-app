@@ -8,7 +8,15 @@ import { systemRouter } from './system';
 import { listRuns, lastRun } from '../engine/runs';
 import { startRun, getRunStatus, cancelRun, postedTodayCount, isRunBusy } from '../engine/dailyRunner';
 import db from '../db/database';
-import { getChannelSchedule, readSeries, setChannelSchedule, setChannelSeries, syncChannelLaunchAgent } from '../engine/dailySchedule';
+import {
+  assertNoClash,
+  getChannelSchedule,
+  normalizeTimes,
+  readSeries,
+  setChannelSchedule,
+  setChannelSeries,
+  syncChannelLaunchAgent,
+} from '../engine/dailySchedule';
 import { getAccountsOverview, startCheck, startSwitch, cancelAccountOp, isAccountOpBusy } from '../engine/accounts';
 import { AccountKey } from '../engine/accountStatus';
 import {
@@ -126,10 +134,25 @@ apiRouter.get('/channels/:id', (req, res) => {
 apiRouter.patch(
   '/channels/:id',
   route(async (req, res) => {
-    const { id } = existingChannel(req);
+    const { id, channel } = existingChannel(req);
+    const body = req.body || {};
+    // Turning a schedule on, or changing its times, must keep 10 minutes from every other channel's videos.
+    if (body.schedule_enabled !== undefined || body.schedule_times !== undefined) {
+      const willBeOn = body.schedule_enabled !== undefined ? Boolean(body.schedule_enabled) : channel.schedule_enabled;
+      if (willBeOn) {
+        try {
+          const times = body.schedule_times !== undefined
+            ? normalizeTimes(Array.isArray(body.schedule_times) ? body.schedule_times : [])
+            : channel.schedule_times;
+          assertNoClash(id, times);
+        } catch (err: any) {
+          throw new HttpError(400, err.message);
+        }
+      }
+    }
     let updated: Channel;
     try {
-      updated = updateChannel(id, req.body || {});
+      updated = updateChannel(id, body);
     } catch (err: any) {
       throw new HttpError(400, err.message);
     }

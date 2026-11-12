@@ -16,12 +16,24 @@ const toMin = (t: string) => {
 };
 const fmt = (min: number) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 
-/** First half-hour (starting 07:00, wrapping past midnight) that keeps MIN_GAP from every taken time. */
-function freeSlot(taken: string[]): string | null {
+// Must match CHANNEL_GAP_MINUTES (server/engine/seriesPlan.ts): channels keep this far from each other's videos.
+const CHANNEL_GAP = 10;
+const apart = (a: number, b: number) => {
+  const d = Math.abs(a - b) % 1440;
+  return Math.min(d, 1440 - d);
+};
+
+/**
+ * First half-hour (starting 07:00, wrapping past midnight) that keeps MIN_GAP from this channel's times and
+ * CHANNEL_GAP from other channels' times (`blocked`).
+ */
+function freeSlot(taken: string[], blocked: number[]): string | null {
   const used = taken.map(toMin);
   for (let i = 0; i < MAX_PER_DAY; i++) {
     const candidate = (7 * 60 + i * MIN_GAP) % (24 * 60);
-    if (used.every((u) => Math.abs(u - candidate) >= MIN_GAP)) return fmt(candidate);
+    if (used.every((u) => Math.abs(u - candidate) >= MIN_GAP) && blocked.every((b) => apart(b, candidate) >= CHANNEL_GAP)) {
+      return fmt(candidate);
+    }
   }
   return null;
 }
@@ -65,6 +77,7 @@ export function ScheduleSection({
   const [status, setStatus] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const enabled = channel.schedule_enabled;
+  const otherTimes = others.filter((o) => o.schedule_enabled).flatMap((o) => o.schedule_times.map(toMin));
 
   /** Turning posting on or off keeps the saved times and series as they are. */
   const toggle = async (nextEnabled: boolean) => {
@@ -128,7 +141,7 @@ export function ScheduleSection({
     } else {
       next = [...times];
       while (next.length < n) {
-        const slot = freeSlot(next);
+        const slot = freeSlot(next, otherTimes);
         if (!slot) {
           setWarning(`No room for ${n} videos a day with ${MIN_GAP} minutes between them. The most that fit now is ${next.length}.`);
           return;
@@ -150,8 +163,12 @@ export function ScheduleSection({
   const conflicts = enabled
     ? times.flatMap((time) =>
         others
-          .filter((o) => o.schedule_enabled && o.schedule_times.includes(time))
-          .map((o) => ({ time, name: o.name })),
+          .filter((o) => o.schedule_enabled)
+          .flatMap((o) =>
+            o.schedule_times
+              .filter((ot) => apart(toMin(ot), toMin(time)) < CHANNEL_GAP)
+              .map((ot) => ({ time, name: `${o.name} (${ot})` })),
+          ),
       )
     : [];
 
@@ -307,16 +324,16 @@ export function ScheduleSection({
       )}
       {conflicts.length > 0 && view === 'times' && (
         <div role="status" className="rounded-[10px] bg-honey-wash p-3 text-[14px] text-honey-ink">
-          <p className="font-semibold">Two channels at the same time</p>
+          <p className="font-semibold">Too close to another channel</p>
           <ul className="mt-1 list-disc pl-5">
             {conflicts.map((c, i) => (
               <li key={i}>
-                {c.time} runs at the same time as {c.name}.
+                {c.time} is less than {CHANNEL_GAP} minutes from {c.name}. Pick another time.
               </li>
             ))}
           </ul>
           <p className="mt-1.5">
-            Both channels run in separate browser windows. Grok video generation is slowed automatically to avoid rate limits.
+            Channels must be at least {CHANNEL_GAP} minutes apart so Grok never makes two videos at once.
           </p>
         </div>
       )}
