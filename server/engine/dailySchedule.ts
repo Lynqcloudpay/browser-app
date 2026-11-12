@@ -8,7 +8,17 @@ import {
   updateChannel,
   scheduleStateFile,
   channelLogFile,
+  channelDir,
+  saveScheduleTimes,
 } from './channels';
+import {
+  SeriesConfig,
+  HISTORY_LIMIT,
+  parseSeries,
+  planEveryDay,
+  planRandomDay,
+  patternKey,
+} from './seriesPlan';
 import { REPO_ROOT } from '../paths';
 
 const execFileAsync = promisify(execFile);
@@ -60,6 +70,12 @@ export function normalizeTimes(times: string[]): string[] {
   return mins.map((m) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`);
 }
 
+/** Parse and sort HH:MM times without the daily gap and count rules (used for stored and series plans). */
+export function cleanTimes(times: string[]): string[] {
+  const mins = [...new Set(times.map(toMinutes))].sort((a, b) => a - b);
+  return mins.map((m) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`);
+}
+
 /** How many of today's slots have already come up (used so a missed slot is caught up, but never more than planned). */
 export function slotsDueSoFar(times: string[], now = new Date()): number {
   const nowMin = now.getHours() * 60 + now.getMinutes();
@@ -74,8 +90,49 @@ export function channelPlistPath(channelId: number): string {
   return path.join(os.homedir(), 'Library/LaunchAgents', `${channelLabel(channelId)}.plist`);
 }
 
+export const planLabel = (channelId: number) => `com.kindredstudio.plan.${channelId}`;
+export const planPlistPath = (channelId: number) =>
+  path.join(os.homedir(), 'Library/LaunchAgents', `${planLabel(channelId)}.plist`);
+
+/** Runs once a night (00:05) to make tomorrow's random pattern for a channel. */
+export function buildPlanPlist(channelId: number): string {
+  const tsxCli = path.join(ROOT, 'node_modules/tsx/dist/cli.mjs');
+  const nodeDir = path.dirname(process.execPath);
+  const logFile = channelLogFile(channelId);
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${planLabel(channelId)}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${esc(process.execPath)}</string>
+    <string>${esc(tsxCli)}</string>
+    <string>${esc(path.join(ROOT, 'scripts/planSeries.ts'))}</string>
+    <string>--channel</string>
+    <string>${channelId}</string>
+  </array>
+  <key>WorkingDirectory</key><string>${esc(ROOT)}</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>0</integer>
+    <key>Minute</key><integer>5</integer>
+  </dict>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>${esc(nodeDir)}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key><string>${esc(logFile)}</string>
+  <key>StandardErrorPath</key><string>${esc(logFile)}</string>
+  <key>RunAtLoad</key><false/>
+</dict>
+</plist>
+`;
+}
+
 export function buildChannelPlist(channelId: number, times: string[]): string {
-  const slots = normalizeTimes(times).map(parseTime);
+  const slots = cleanTimes(times).map(parseTime);
   const tsxCli = path.join(ROOT, 'node_modules/tsx/dist/cli.mjs');
   const nodeDir = path.dirname(process.execPath);
   const logFile = channelLogFile(channelId);
@@ -183,9 +240,15 @@ async function launchctl(...args: string[]): Promise<void> {
 /** Tests set KINDRED_NO_LAUNCHD=1 so they never touch ~/Library/LaunchAgents or launchctl. */
 const launchdDisabled = () => process.env.KINDRED_NO_LAUNCHD === '1';
 
+/** Install (or remove) the channel's run job and, for random series, its nightly planner. */
 export async function syncChannelLaunchAgent(channelId: number, enabled: boolean, times: string[]): Promise<void> {
+  await syncRunAgent(channelId, enabled, times);
+  await syncPlanAgent(channelId, enabled);
+}
+
+export async function syncRunAgent(channelId: number, enabled: boolean, times: string[]): Promise<void> {
   if (process.platform !== 'darwin' || launchdDisabled()) return;
-  const clean = normalizeTimes(times);
+  const clean = cleanTimes(times);
   const domain = `gui/${os.userInfo().uid}`;
   const label = channelLabel(channelId);
   const plistPath = channelPlistPath(channelId);
@@ -206,6 +269,26 @@ export async function syncChannelLaunchAgent(channelId: number, enabled: boolean
   }
 }
 
+/**
+ * Random series re-plan every night, so they need the 00:05 planner job. Other modes do not have one.
+ * Never called from the planner itself: booting out a job kills that job's own process.
+ */
+export async function syncPlanAgent(channelId: number, enabled: boolean): Promise<void> {
+  if (process.platform !== 'darwin' || launchdDisabled()) return;
+  const domain = `gui/${os.userInfo().uid}`;
+  const planPlist = planPlistPath(channelId);
+  await launchctl('bootout', `${domain}/${planLabel(channelId)}`).catch(() => {});
+  if (enabled && readSeries(channelId)?.mode === 'random') {
+    fs.mkdirSync(path.dirname(planPlist), { recursive: true });
+    fs.writeFileSync(planPlist, buildPlanPlist(channelId));
+    await launchctl('bootstrap', domain, planPlist);
+  } else if (fs.existsSync(planPlist)) {
+    try {
+      fs.unlinkSync(planPlist);
+    } catch {}
+  }
+}
+
 export async function removeChannelLaunchAgent(channelId: number): Promise<void> {
   if (process.platform !== 'darwin' || launchdDisabled()) return;
   const domain = `gui/${os.userInfo().uid}`;
@@ -218,9 +301,88 @@ export async function removeChannelLaunchAgent(channelId: number): Promise<void>
       fs.unlinkSync(plistPath);
     } catch {}
   }
+  await launchctl('bootout', `${domain}/${planLabel(channelId)}`).catch(() => {});
+  if (fs.existsSync(planPlistPath(channelId))) {
+    try {
+      fs.unlinkSync(planPlistPath(channelId));
+    } catch {}
+  }
+}
+
+// ---- Series (every 15 min / 1 h / 2 h, or random gaps) -------------------------------------------------------
+
+const seriesConfigFile = (channelId: number) => path.join(channelDir(channelId), 'schedule_series.json');
+const seriesHistoryFile = (channelId: number) => path.join(channelDir(channelId), 'series_history.json');
+
+/** The saved series pattern, or null when the channel uses plain "times". */
+export function readSeries(channelId: number): SeriesConfig | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(seriesConfigFile(channelId), 'utf8'));
+    return parseSeries(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function writeSeries(channelId: number, cfg: SeriesConfig | null): void {
+  const file = seriesConfigFile(channelId);
+  if (!cfg) {
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+    return;
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
+}
+
+function readHistory(channelId: number): string[] {
+  try {
+    const list = JSON.parse(fs.readFileSync(seriesHistoryFile(channelId), 'utf8'));
+    return Array.isArray(list) ? list.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Today's (or tomorrow's) launch times for a series. Random days are remembered so no pattern comes back. */
+function planSeriesTimes(channelId: number, cfg: SeriesConfig): string[] {
+  if (cfg.mode === 'every') return planEveryDay(cfg);
+  const history = readHistory(channelId);
+  const { times, key } = planRandomDay(cfg, new Set(history));
+  const next = [...history, key].slice(-HISTORY_LIMIT);
+  fs.mkdirSync(path.dirname(seriesHistoryFile(channelId)), { recursive: true });
+  fs.writeFileSync(seriesHistoryFile(channelId), JSON.stringify(next));
+  return times;
+}
+
+/** Save a series pattern: check it, plan the first day, install launchd. Switches the channel to series mode. */
+export async function setChannelSeries(
+  channelId: number,
+  enabled: boolean,
+  input: unknown
+): Promise<ReturnType<typeof getChannelSchedule>> {
+  if (process.platform !== 'darwin') throw new Error('Daily scheduling uses macOS launchd and only works on a Mac.');
+  const cfg = parseSeries(input);
+  const times = planSeriesTimes(channelId, cfg);
+  writeSeries(channelId, cfg);
+  saveScheduleTimes(channelId, times);
+  updateChannel(channelId, { schedule_enabled: enabled });
+  await syncChannelLaunchAgent(channelId, enabled, times);
+  return getChannelSchedule(channelId);
+}
+
+/** Nightly planner entry point: make tomorrow's random times and reinstall the channel's launch times. */
+export async function planChannelSeries(channelId: number): Promise<string[] | null> {
+  const cfg = readSeries(channelId);
+  const channel = getChannel(channelId);
+  if (!cfg || cfg.mode !== 'random' || !channel || !channel.schedule_enabled) return null;
+  const times = planSeriesTimes(channelId, cfg);
+  saveScheduleTimes(channelId, times);
+  await syncRunAgent(channelId, true, times); // not syncChannelLaunchAgent: it would boot out this planner job
+  return times;
 }
 
 export function getChannelSchedule(channelId: number): ScheduleConfig & {
+  series: SeriesConfig | null;
   installed: boolean;
   logFile: string;
   platformSupported: boolean;
@@ -229,12 +391,13 @@ export function getChannelSchedule(channelId: number): ScheduleConfig & {
 } {
   const channel = getChannel(channelId);
   if (!channel) throw new Error(`Channel ${channelId} not found.`);
-  const times = channel.schedule_times.length ? normalizeTimes(channel.schedule_times) : ['10:00'];
+  const times = channel.schedule_times.length ? cleanTimes(channel.schedule_times) : ['10:00'];
   const st = readChannelState(channelId);
   const plistPath = channelPlistPath(channelId);
   return {
     enabled: channel.schedule_enabled,
     times,
+    series: readSeries(channelId),
     completedToday: times.filter((t) => st.doneSlots.includes(t)).length,
     lastRun: st.lastRun,
     installed: fs.existsSync(plistPath),
@@ -250,6 +413,7 @@ export async function setChannelSchedule(
 ): Promise<ReturnType<typeof getChannelSchedule>> {
   if (process.platform !== 'darwin') throw new Error('Daily scheduling uses macOS launchd and only works on a Mac.');
   const clean = normalizeTimes(times);
+  writeSeries(channelId, null); // plain times mode replaces any series pattern
   updateChannel(channelId, { schedule_enabled: enabled, schedule_times: clean });
   await syncChannelLaunchAgent(channelId, enabled, clean);
   return getChannelSchedule(channelId);

@@ -9,6 +9,7 @@ import type {
   Overview,
   Run,
   RunStatus,
+  SeriesSettings,
   StorageStatus,
   SystemCheck,
   Video,
@@ -104,6 +105,12 @@ export const api = {
   patchChannel: (id: number, patch: ChannelPatch) =>
     request<ChannelUpdate>(`/api/channels/${id}`, { method: 'PATCH', json: patch }),
   deleteChannel: (id: number) => request<{ success: true }>(`/api/channels/${id}`, { method: 'DELETE' }),
+  /** Plain times mode: one launch time per video. */
+  saveSchedule: (id: number, body: { enabled: boolean; times: string[] }) =>
+    request<{ times: string[] }>(`/api/channels/${id}/schedule`, { method: 'POST', json: body }),
+  /** Series mode: every 15 min / 1 h / 2 h, or random gaps, between start and end. */
+  saveSeries: (id: number, body: { enabled: boolean; series: SeriesSettings }) =>
+    request<{ times: string[] }>(`/api/channels/${id}/series`, { method: 'POST', json: body }),
   uploadReferenceImage: (id: number, file: File) =>
     request<unknown>(`/api/channels/${id}/reference-image`, {
       method: 'POST',

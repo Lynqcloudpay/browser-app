@@ -8,7 +8,7 @@ import { systemRouter } from './system';
 import { listRuns, lastRun } from '../engine/runs';
 import { startRun, getRunStatus, cancelRun, postedTodayCount, isRunBusy } from '../engine/dailyRunner';
 import db from '../db/database';
-import { getChannelSchedule, setChannelSchedule, syncChannelLaunchAgent } from '../engine/dailySchedule';
+import { getChannelSchedule, readSeries, setChannelSchedule, setChannelSeries, syncChannelLaunchAgent } from '../engine/dailySchedule';
 import { getAccountsOverview, startCheck, startSwitch, cancelAccountOp, isAccountOpBusy } from '../engine/accounts';
 import { AccountKey } from '../engine/accountStatus';
 import {
@@ -85,6 +85,7 @@ function channelView(c: Channel) {
     },
     lastRun: lastRun(c.id),
     nextRunAt: nextRunAt(c),
+    schedule_series: readSeries(c.id),
     browserOpen: getAgent(c.id).isBrowserOpen(),
   };
 }
@@ -163,6 +164,19 @@ apiRouter.post(
         ? req.body.times.map(String)
         : [String(req.body?.time || '10:00')];
       res.json(await setChannelSchedule(id, enabled, times));
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  })
+);
+
+/** Series mode: body { enabled, series: { mode: 'every' | 'random', everyMinutes?, start, end } }. */
+apiRouter.post(
+  '/channels/:id/series',
+  route(async (req, res) => {
+    const { id } = existingChannel(req);
+    try {
+      res.json(await setChannelSeries(id, !!req.body?.enabled, req.body?.series));
     } catch (err: any) {
       res.status(400).json({ error: err.message });
     }

@@ -82,7 +82,14 @@ export interface Run {
   duration_sec: number | null;
 }
 
+/** A series pattern: fixed step, or random gaps (30 min to under 2 hours). Times are HH:MM, same day. */
+export type SeriesSettings =
+  | { mode: 'every'; everyMinutes: 15 | 60 | 120; start: string; end: string }
+  | { mode: 'random'; start: string; end: string };
+
 export interface ChannelView extends Channel {
+  /** The series pattern, or null when the channel uses plain times. */
+  schedule_series: SeriesSettings | null;
   hasReferenceImage: boolean;
   /** Whether the channel's browser window is open right now. */
   browserOpen: boolean;

@@ -359,6 +359,14 @@ export function createChannel(name: string): Channel {
   return getChannel(newId)!;
 }
 
+/**
+ * Store a day's launch times that were already checked (series plans can be 15 minutes apart, which the plain
+ * "times" rule forbids). Does not touch seeds: series times are per machine and re-made every day.
+ */
+export function saveScheduleTimes(id: number, times: string[]): void {
+  db.prepare('UPDATE channels SET schedule_times = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(JSON.stringify(times), id);
+}
+
 export function updateChannel(id: number, patch: Partial<Channel>): Channel {
   const existing = getChannel(id);
   if (!existing) throw new Error(`Channel ${id} not found.`);
