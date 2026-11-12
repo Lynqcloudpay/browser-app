@@ -2773,18 +2773,13 @@ export class ChannelBrowserAgent {
       // 7. Only YouTube's own confirmation dialog counts: "Video published", or "Video processing" (a Short is public once its
       // SD version has processed; checks already passed). A link elsewhere on the page does not count: the upload dialog
       // itself carries the video's link before anything is published.
-      const confirmation = page
-        .locator('ytcp-uploads-still-processing-dialog, ytcp-video-share-dialog, ytcp-post-processing-dialog')
-        .or(page.getByRole('heading', { name: /video (processing|published)/i }))
-        .or(page.getByText(/video (published|processing)/i))
-        .or(page.getByText(/finish processing before your video is public/i))
-        .first();
+      const confirmation = youTubeConfirmation(page);
       let published = await confirmation.waitFor({ state: 'visible', timeout: 120000 }).then(() => true).catch(() => false);
       let shareUrl: string | null = null;
 
       // Fallback: if not matched yet, check whether the dialog or its Close button is visible on screen
       if (!published) {
-        const anyClose = page.locator('#close-button').or(page.getByRole('button', { name: /^Close$/i })).or(page.getByText(/^Close$/i)).first();
+        const anyClose = youTubeCloseButton(page);
         if (await anyClose.isVisible().catch(() => false)) {
           console.log('[ChannelBrowserAgent] YouTube confirmation dialog detected via Close button.');
           published = true;
@@ -2803,11 +2798,7 @@ export class ChannelBrowserAgent {
       }
       await snap(published ? 'published' : 'unconfirmed');
       if (published) {
-        const closeBtn = page
-          .locator('ytcp-uploads-still-processing-dialog #close-button, ytcp-video-share-dialog #close-button, ytcp-dialog-header #close-button, #close-button')
-          .or(page.getByRole('button', { name: /^Close$/i }))
-          .or(page.getByText(/^Close$/i))
-          .first();
+        const closeBtn = youTubeCloseButton(page);
         if (await closeBtn.isVisible().catch(() => false)) {
           await closeBtn.click({ timeout: 4000 }).catch(() => {});
         } else {
@@ -3632,6 +3623,31 @@ export class ChannelBrowserAgent {
 const NOT_RETRYABLE = /not signed in|requires login|sign into|signed out|usage limit|weekly limit|credits?|quota|upgrade|daily upload limit|already being produced|server failed|no longer exists|missing from disk|nothing to post/i;
 
 /** Lower-case, collapse whitespace: lets two readings of the same prompt compare equal. */
+/**
+ * YouTube's own confirmation after Publish: "Video published", or "Video processing" (a Short is public once its SD
+ * version has processed). YouTube Studio keeps its other dialogs in the page, hidden, so only VISIBLE matches count:
+ * without the filter, .first() picked a hidden dialog and the visible "Video processing" one was never seen.
+ */
+export function youTubeConfirmation(page: Page) {
+  return page
+    .locator('ytcp-uploads-still-processing-dialog, ytcp-video-share-dialog, ytcp-post-processing-dialog')
+    .or(page.getByRole('heading', { name: /video (processing|published)/i }))
+    .or(page.getByText(/video (published|processing)/i))
+    .or(page.getByText(/finish processing before your video is public/i))
+    .filter({ visible: true })
+    .first();
+}
+
+/** The visible Close button of YouTube's confirmation dialog (hidden dialogs carry Close buttons too). */
+export function youTubeCloseButton(page: Page) {
+  return page
+    .locator('ytcp-uploads-still-processing-dialog #close-button, ytcp-video-share-dialog #close-button, ytcp-dialog-header #close-button, #close-button')
+    .or(page.getByRole('button', { name: /^Close$/i }))
+    .or(page.getByText(/^Close$/i))
+    .filter({ visible: true })
+    .first();
+}
+
 export function normalizePromptText(text: string): string {
   return (text || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
