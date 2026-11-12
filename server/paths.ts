@@ -9,6 +9,9 @@ export const STORAGE_ROOT = process.env.KINDRED_STORAGE_DIR
   ? path.resolve(process.env.KINDRED_STORAGE_DIR)
   : path.join(REPO_ROOT, 'storage');
 
+/** Seed configurations and assets for channels tracked in git. */
+export const CHANNEL_SEEDS_DIR = path.join(REPO_ROOT, 'channel_seeds');
+
 export const VIDEOS_DIR = path.join(STORAGE_ROOT, 'videos');
 export const FRAMES_DIR = path.join(STORAGE_ROOT, 'frames');
 export const THUMBNAILS_DIR = path.join(STORAGE_ROOT, 'thumbnails');

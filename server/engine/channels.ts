@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import db from '../db/database';
 import { normalizeTimes, removeChannelLaunchAgent } from './dailySchedule';
-import { STORAGE_ROOT, LOGS_DIR } from '../paths';
+import { STORAGE_ROOT, LOGS_DIR, CHANNEL_SEEDS_DIR } from '../paths';
 
 export interface Channel {
   id: number;
@@ -127,7 +127,207 @@ function rowToChannel(row: any): Channel {
   };
 }
 
+let lastSeedsMtime = 0;
+
+export function isTestEnvironment(): boolean {
+  return Boolean(
+    process.env.KINDRED_STORAGE_DIR ||
+    process.env.NODE_ENV === 'test' ||
+    process.env.KINDRED_TEST_MODE ||
+    process.env.KINDRED_CHANNELS_DIR
+  );
+}
+
+export function syncSeedsIfChanged(): void {
+  if (isTestEnvironment()) return;
+  const seedsFile = path.join(CHANNEL_SEEDS_DIR, 'channels.json');
+  if (!fs.existsSync(seedsFile)) return;
+  try {
+    const mtime = fs.statSync(seedsFile).mtimeMs;
+    if (mtime > lastSeedsMtime) {
+      importChannelsFromSeeds();
+      lastSeedsMtime = mtime;
+    }
+  } catch {}
+}
+
+export function exportChannelsToSeeds(): void {
+  if (isTestEnvironment()) return;
+
+  try {
+    fs.mkdirSync(CHANNEL_SEEDS_DIR, { recursive: true });
+    const rows = db.prepare('SELECT * FROM channels ORDER BY id ASC').all();
+    const channels = rows.map(rowToChannel);
+
+    const seeds = channels.map((c) => ({
+      id: c.id,
+      name: c.name,
+      chatgpt_chat_url: c.chatgpt_chat_url,
+      chatgpt_chat_name: c.chatgpt_chat_name,
+      grok_resolution: c.grok_resolution,
+      grok_duration: c.grok_duration,
+      post_tiktok: c.post_tiktok,
+      post_youtube: c.post_youtube,
+      youtube_made_for_kids: c.youtube_made_for_kids,
+      hashtag_hint: c.hashtag_hint,
+      schedule_enabled: c.schedule_enabled,
+      schedule_times: c.schedule_times,
+      keep_browser_open: c.keep_browser_open,
+      hold_flagged_videos: c.hold_flagged_videos,
+      created_at: c.created_at,
+      updated_at: c.updated_at,
+    }));
+
+    const targetJson = path.join(CHANNEL_SEEDS_DIR, 'channels.json');
+    const tmpJson = targetJson + '.tmp_' + Date.now();
+    fs.writeFileSync(tmpJson, JSON.stringify(seeds, null, 2) + '\n');
+    fs.renameSync(tmpJson, targetJson);
+
+    try {
+      lastSeedsMtime = fs.statSync(targetJson).mtimeMs;
+    } catch {}
+
+    // Sync reference images
+    const existingSeedFiles = fs.readdirSync(CHANNEL_SEEDS_DIR);
+    const activeIds = new Set(channels.map((c) => c.id));
+
+    // Remove reference files for deleted channels
+    for (const f of existingSeedFiles) {
+      const match = f.match(/^reference_(\d+)\.(jpg|jpeg|png|webp)$/i);
+      if (match) {
+        const fileChannelId = Number(match[1]);
+        if (!activeIds.has(fileChannelId)) {
+          try { fs.unlinkSync(path.join(CHANNEL_SEEDS_DIR, f)); } catch {}
+        }
+      }
+    }
+
+    // Copy reference image for each active channel into channel_seeds
+    for (const c of channels) {
+      const refImg = referenceImagePath(c.id);
+      if (refImg && fs.existsSync(refImg)) {
+        const ext = path.extname(refImg).toLowerCase();
+        const dest = path.join(CHANNEL_SEEDS_DIR, `reference_${c.id}${ext}`);
+        // Remove different extensions for this channel if any
+        for (const otherExt of ['.jpg', '.jpeg', '.png', '.webp']) {
+          if (otherExt !== ext) {
+            const stale = path.join(CHANNEL_SEEDS_DIR, `reference_${c.id}${otherExt}`);
+            if (fs.existsSync(stale)) {
+              try { fs.unlinkSync(stale); } catch {}
+            }
+          }
+        }
+        try {
+          fs.copyFileSync(refImg, dest);
+        } catch (e: any) {
+          console.warn(`[channels] Failed to copy reference image for channel ${c.id}:`, e.message);
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn('[channels] Failed to export channel seeds:', err.message);
+  }
+}
+
+export function importChannelsFromSeeds(): void {
+  if (isTestEnvironment()) return;
+
+  const seedsFile = path.join(CHANNEL_SEEDS_DIR, 'channels.json');
+  if (!fs.existsSync(seedsFile)) return;
+
+  try {
+    const raw = fs.readFileSync(seedsFile, 'utf8');
+    const seeds = JSON.parse(raw);
+    if (!Array.isArray(seeds)) return;
+
+    for (const seed of seeds) {
+      if (!seed || typeof seed.id !== 'number' || !seed.name) continue;
+
+      const existing = db.prepare('SELECT * FROM channels WHERE id = ?').get(seed.id) as any;
+      if (!existing) {
+        console.log(`[Channels] Restoring channel ${seed.id} (${seed.name}) from seeds...`);
+        db.prepare(`
+          INSERT INTO channels (
+            id, name, chatgpt_chat_url, chatgpt_chat_name, grok_resolution, grok_duration,
+            post_tiktok, post_youtube, youtube_made_for_kids, hashtag_hint,
+            schedule_enabled, schedule_times, keep_browser_open, hold_flagged_videos,
+            created_at, updated_at
+          ) VALUES (
+            ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?
+          )
+        `).run(
+          seed.id,
+          seed.name,
+          seed.chatgpt_chat_url || '',
+          seed.chatgpt_chat_name || '',
+          seed.grok_resolution || '720p',
+          seed.grok_duration || 15,
+          seed.post_tiktok ? 1 : 0,
+          seed.post_youtube ? 1 : 0,
+          seed.youtube_made_for_kids ? 1 : 0,
+          seed.hashtag_hint || '',
+          0, // schedule_enabled starts off on new machine to prevent double posting
+          JSON.stringify(Array.isArray(seed.schedule_times) ? seed.schedule_times : ['10:00']),
+          seed.keep_browser_open === undefined ? 1 : (seed.keep_browser_open ? 1 : 0),
+          seed.hold_flagged_videos ? 1 : 0,
+          seed.created_at || new Date().toISOString(),
+          seed.updated_at || new Date().toISOString()
+        );
+      } else {
+        // Channel already exists locally: update channel metadata
+        db.prepare(`
+          UPDATE channels SET
+            name = ?, chatgpt_chat_url = ?, chatgpt_chat_name = ?,
+            grok_resolution = ?, grok_duration = ?, post_tiktok = ?,
+            post_youtube = ?, youtube_made_for_kids = ?, hashtag_hint = ?,
+            keep_browser_open = ?, hold_flagged_videos = ?
+          WHERE id = ?
+        `).run(
+          seed.name,
+          seed.chatgpt_chat_url || '',
+          seed.chatgpt_chat_name || '',
+          seed.grok_resolution || '720p',
+          seed.grok_duration || 15,
+          seed.post_tiktok ? 1 : 0,
+          seed.post_youtube ? 1 : 0,
+          seed.youtube_made_for_kids ? 1 : 0,
+          seed.hashtag_hint || '',
+          seed.keep_browser_open === undefined ? 1 : (seed.keep_browser_open ? 1 : 0),
+          seed.hold_flagged_videos ? 1 : 0,
+          seed.id
+        );
+      }
+
+      // Restore reference image if missing locally
+      const cDir = channelDir(seed.id);
+      const exts = ['.jpg', '.jpeg', '.png', '.webp'];
+      const hasLocalRef = exts.some((ext) => fs.existsSync(path.join(cDir, `reference${ext}`)));
+      if (!hasLocalRef) {
+        for (const ext of exts) {
+          const seedRef = path.join(CHANNEL_SEEDS_DIR, `reference_${seed.id}${ext}`);
+          if (fs.existsSync(seedRef)) {
+            const dest = path.join(cDir, `reference${ext}`);
+            try {
+              fs.copyFileSync(seedRef, dest);
+              console.log(`[Channels] Restored reference image for channel ${seed.id}`);
+            } catch (err: any) {
+              console.warn(`[Channels] Could not copy reference image for channel ${seed.id}:`, err.message);
+            }
+            break;
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Channels] Could not import channels from seeds:', err.message);
+  }
+}
+
 export function listChannels(): Channel[] {
+  syncSeedsIfChanged();
   const rows = db.prepare('SELECT * FROM channels ORDER BY id ASC').all();
   return rows.map(rowToChannel);
 }
@@ -155,6 +355,7 @@ export function createChannel(name: string): Channel {
 
   const newId = Number(res.lastInsertRowid);
   channelDir(newId);
+  exportChannelsToSeeds();
   return getChannel(newId)!;
 }
 
@@ -227,6 +428,7 @@ export function updateChannel(id: number, patch: Partial<Channel>): Channel {
     updates.push('updated_at = CURRENT_TIMESTAMP');
     params.push(id);
     db.prepare(`UPDATE channels SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+    exportChannelsToSeeds();
   }
 
   return getChannel(id)!;
@@ -278,6 +480,7 @@ export function deleteChannel(id: number): void {
 
   // Delete DB row. Jobs are kept as history; they keep their channel_id.
   db.prepare('DELETE FROM channels WHERE id = ?').run(id);
+  exportChannelsToSeeds();
 
   // Move the channel's folder (browser profile, cookies, reference image) aside instead of destroying it.
   const src = path.join(getChannelsRoot(), String(id));
@@ -296,6 +499,8 @@ export function deleteChannel(id: number): void {
 }
 
 export function seedDefaultChannelIfNeeded(): void {
+  importChannelsFromSeeds();
+
   const countRow = db.prepare('SELECT COUNT(*) as n FROM channels').get() as any;
   if (countRow?.n > 0) return;
 
@@ -418,4 +623,6 @@ export function seedDefaultChannelIfNeeded(): void {
   try {
     db.prepare('UPDATE jobs SET channel_id = 1 WHERE channel_id IS NULL').run();
   } catch {}
+
+  exportChannelsToSeeds();
 }

@@ -1,0 +1,22 @@
+[
+  {
+    "id": 1,
+    "name": "Mr. Apple",
+    "chatgpt_chat_url": "https://chatgpt.com/c/6af2a5f7-5c70-83ea-b06f-ae9109963d61",
+    "chatgpt_chat_name": "Create Mr Apple Videos",
+    "grok_resolution": "720p",
+    "grok_duration": 15,
+    "post_tiktok": true,
+    "post_youtube": true,
+    "youtube_made_for_kids": true,
+    "hashtag_hint": "#MrApple",
+    "schedule_enabled": false,
+    "schedule_times": [
+      "10:00"
+    ],
+    "keep_browser_open": true,
+    "hold_flagged_videos": false,
+    "created_at": "2026-11-11 00:30:32",
+    "updated_at": "2026-11-11 00:36:27"
+  }
+]

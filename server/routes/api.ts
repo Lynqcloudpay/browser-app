@@ -20,6 +20,7 @@ import {
   referenceImagePath,
   channelDir,
   Channel,
+  exportChannelsToSeeds,
 } from '../engine/channels';
 import { getAgent } from '../engine/agentRegistry';
 import { REPO_ROOT } from '../paths';
@@ -233,6 +234,7 @@ apiRouter.post(
     const tmp = target + '.tmp_' + Date.now();
     fs.writeFileSync(tmp, buf);
     fs.renameSync(tmp, target);
+    exportChannelsToSeeds();
 
     res.json({ success: true, path: target });
   })
