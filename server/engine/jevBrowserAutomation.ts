@@ -2773,16 +2773,32 @@ export class ChannelBrowserAgent {
       // 7. Only YouTube's own confirmation dialog counts: "Video published", or "Video processing" (a Short is public once its
       // SD version has processed; checks already passed). A link elsewhere on the page does not count: the upload dialog
       // itself carries the video's link before anything is published.
-      const confirmation = page.getByText(/^\s*Video (published|processing)\s*$/i).first();
+      const confirmation = page
+        .locator('ytcp-uploads-still-processing-dialog, ytcp-video-share-dialog, ytcp-post-processing-dialog')
+        .or(page.getByRole('heading', { name: /video (processing|published)/i }))
+        .or(page.getByText(/video (published|processing)/i))
+        .or(page.getByText(/finish processing before your video is public/i))
+        .first();
       const published = await confirmation.waitFor({ state: 'visible', timeout: 120000 }).then(() => true).catch(() => false);
       let shareUrl: string | null = null;
       if (published) {
         shareUrl =
-          (await page.locator('ytcp-video-share-dialog').locator('a[href*="/shorts/"], a[href*="youtu.be/"], a[href*="watch?v="]').first().getAttribute('href', { timeout: 1500 }).catch(() => null)) ||
+          (await page
+            .locator('ytcp-video-share-dialog, ytcp-uploads-still-processing-dialog')
+            .locator('a[href*="/shorts/"], a[href*="youtu.be/"], a[href*="watch?v="]')
+            .first()
+            .getAttribute('href', { timeout: 1500 })
+            .catch(() => null)) ||
           dialogLink;
       }
       await snap(published ? 'published' : 'unconfirmed');
-      if (published) await page.getByRole('button', { name: /^Close$/i }).first().click({ timeout: 4000 }).catch(() => {});
+      if (published) {
+        const closeBtn = page
+          .locator('ytcp-uploads-still-processing-dialog #close-button, ytcp-video-share-dialog #close-button, ytcp-dialog-header #close-button')
+          .or(page.getByRole('button', { name: /^Close$/i }))
+          .first();
+        await closeBtn.click({ timeout: 4000 }).catch(() => {});
+      }
 
       if (published) {
         console.log(`[ChannelBrowserAgent] Video published on YouTube: ${shareUrl}`);
