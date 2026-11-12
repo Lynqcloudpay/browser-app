@@ -7,7 +7,7 @@ import path from 'path';
 
 const REPO = path.resolve(__dirname, '..');
 const TSX_CLI = path.join(REPO, 'node_modules', 'tsx', 'dist', 'cli.mjs');
-const TESTS = ['channels.test.ts', 'qa.test.ts', 'api.test.ts', 'library.test.ts', 'chatgpt-extract.test.ts', 'chatgpt-wait.test.ts', 'grok-submit.test.ts', 'popups.test.ts', 'jev-assist.test.ts', 'youtube-confirm.test.ts'];
+const TESTS = ['channels.test.ts', 'qa.test.ts', 'api.test.ts', 'library.test.ts', 'chatgpt-extract.test.ts', 'chatgpt-wait.test.ts', 'grok-submit.test.ts', 'popups.test.ts', 'jev-assist.test.ts', 'youtube-confirm.test.ts', 'tiktok-share-link.test.ts'];
 
 const results: Array<{ file: string; ok: boolean; code: number | null }> = [];
 

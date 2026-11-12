@@ -3105,7 +3105,7 @@ export class ChannelBrowserAgent {
             success: true,
             verified: true,
             message: 'Video successfully uploaded and published to TikTok!',
-            shareUrl: 'https://www.tiktok.com/tiktokstudio/content',
+            shareUrl: (await tikTokVideoLink(page)) || 'https://www.tiktok.com/tiktokstudio/content',
           };
         } else {
           const framesDir = FRAMES_DIR;
@@ -3636,6 +3636,18 @@ export function youTubeConfirmation(page: Page) {
     .or(page.getByText(/finish processing before your video is public/i))
     .filter({ visible: true })
     .first();
+}
+
+/**
+ * The address of the video itself (tiktok.com/@creator/video/<id>) if TikTok's post-confirmation page links to it.
+ * Returns null when no such link is on the page; the caller then keeps the Studio page as the link.
+ */
+export async function tikTokVideoLink(page: Page): Promise<string | null> {
+  const hrefs: string[] = await page
+    .evaluate(() => Array.from(document.querySelectorAll('a[href]')).map((a) => (a as HTMLAnchorElement).href))
+    .catch(() => []);
+  const match = hrefs.find((h) => /^https:\/\/(www\.)?tiktok\.com\/@[^/]+\/video\/\d+/.test(h));
+  return match ? match.split('?')[0] : null;
 }
 
 /** The visible Close button of YouTube's confirmation dialog (hidden dialogs carry Close buttons too). */
