@@ -6,7 +6,24 @@ import { absolute } from '../../format';
 import type { ChannelView } from '../../types';
 import type { PatchFn } from './ChannelHeader';
 
-const DEFAULT_SLOTS = ['10:00', '14:30', '18:30', '21:00', '07:00', '12:00', '16:00', '23:00'];
+// Must match the server's MIN_GAP_MINUTES and MAX_POSTS_PER_DAY (server/engine/dailySchedule.ts).
+const MIN_GAP = 30;
+const MAX_PER_DAY = Math.floor((24 * 60) / MIN_GAP);
+const toMin = (t: string) => {
+  const [h, m] = t.split(':').map(Number);
+  return h * 60 + m;
+};
+const fmt = (min: number) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+
+/** First half-hour (starting 07:00, wrapping past midnight) that keeps MIN_GAP from every taken time. */
+function freeSlot(taken: string[]): string | null {
+  const used = taken.map(toMin);
+  for (let i = 0; i < MAX_PER_DAY; i++) {
+    const candidate = (7 * 60 + i * MIN_GAP) % (24 * 60);
+    if (used.every((u) => Math.abs(u - candidate) >= MIN_GAP)) return fmt(candidate);
+  }
+  return null;
+}
 
 export function ScheduleSection({
   channel,
@@ -44,16 +61,22 @@ export function ScheduleSection({
   };
 
   const setCount = (n: number) => {
+    if (!Number.isInteger(n) || n < 1 || n > MAX_PER_DAY) return;
     let next: string[];
     if (n <= times.length) {
       next = times.slice(0, n);
     } else {
       next = [...times];
-      for (const slot of DEFAULT_SLOTS) {
-        if (next.length === n) break;
-        if (!next.includes(slot)) next.push(slot);
+      while (next.length < n) {
+        const slot = freeSlot(next);
+        if (!slot) {
+          setWarning(`No room for ${n} videos a day with ${MIN_GAP} minutes between them. The most that fit now is ${next.length}.`);
+          return;
+        }
+        next.push(slot);
       }
     }
+    setWarning(null);
     setTimes(next);
     if (enabled) void save(true, next);
   };
@@ -84,22 +107,21 @@ export function ScheduleSection({
 
       <fieldset className="space-y-4">
         <legend className="mb-3 text-[14px] font-semibold">Videos per day</legend>
-        <div className="flex flex-wrap gap-1.5" role="group" aria-label="Videos per day">
-          {[1, 2, 3, 4, 5, 6].map((n) => (
-            <button
-              key={n}
-              type="button"
-              aria-pressed={times.length === n}
-              onClick={() => setCount(n)}
-              className={
-                times.length === n
-                  ? 'size-10 cursor-pointer rounded-[10px] bg-ink font-semibold text-white'
-                  : 'size-10 cursor-pointer rounded-[10px] border border-ink-soft bg-sheet font-semibold hover:bg-paper'
-              }
-            >
-              {n}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-3">
+          <input
+            id="schedule-count"
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={MAX_PER_DAY}
+            value={times.length}
+            disabled={saving}
+            onChange={(e) => setCount(Number(e.target.value))}
+            className="w-24 rounded-[10px] border border-ink-soft bg-sheet px-3 py-2 text-[15px] font-semibold"
+          />
+          <span className="text-[13px] text-ink-soft">
+            Any number, from 1 to {MAX_PER_DAY}. Times are at least {MIN_GAP} minutes apart.
+          </span>
         </div>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">

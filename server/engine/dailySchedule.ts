@@ -19,8 +19,9 @@ const execFileAsync = promisify(execFile);
  */
 
 export const LABEL = 'com.kindredstudio.daily';
-export const MAX_POSTS_PER_DAY = 8;
 export const MIN_GAP_MINUTES = 30; // one run takes ~5 minutes; keep runs from overlapping on the same browser profile
+// No fixed per-day count: the gap rule is the real limit (48 slots fit in 24 h at 30-minute spacing).
+export const MAX_POSTS_PER_DAY = Math.floor((24 * 60) / MIN_GAP_MINUTES);
 /** Repo root: the launchd job runs scripts/dailyRun.ts from here. Storage files go through paths.ts / channels.ts. */
 const ROOT = REPO_ROOT;
 
