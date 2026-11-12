@@ -9,7 +9,7 @@ import { AddressInfo } from 'net';
 import { createApp } from '../server/index';
 import { shutdownAllAgents } from '../server/engine/agentRegistry';
 import { audioToolsAvailable, detectSongExtension, makeMutedVideo, makeVideoWithSong, mediaDuration } from '../server/engine/audioMix';
-import { parseSoundQuery, pickSoundResult } from '../server/engine/jevBrowserAutomation';
+import { parseSoundQuery, pickSoundResult, tikTokRowsFor } from '../server/engine/jevBrowserAutomation';
 
 const ffprobeStreams = (file: string) =>
   execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', file]).toString().trim().split('\n');
@@ -32,6 +32,22 @@ async function run(): Promise<void> {
   assert.strictEqual(pickSoundResult(rows, 'Baby Shark'), -1, 'never a wrong song');
   console.log('ok TikTok sound matching');
 
+  // 1b. TikTok Posts list: a re-post leaves several rows with one title; each is judged on its own status
+  const title = "This Baby Tapir's SNOOT DANCE Is Too Funny! 🍎🐾😂🔥";
+  const listText = [
+    'Posts (Created on)', 'Privacy',
+    `${title} #MrApple`, 'Failed to publish', 'Retry', 'Everyone', '0',
+    `${title} #MrApple`, 'Content under review', 'Only me', '0',
+    `${title} #MrApple`, 'Nov 12, 4:56 PM', 'Everyone', '0',
+    'This Smiling Baby Quokka Has CRAZY Dance Moves!', 'Nov 12, 4:01 PM',
+  ].join('\n');
+  const found = tikTokRowsFor(listText, title);
+  assert.strictEqual(found.length, 3, 'three rows for the re-posted video');
+  assert.ok(/Failed to publish/.test(found[0]) && !/Failed/.test(found[1]) && /4:56 PM/.test(found[2]));
+  assert.ok(!/Quokka/.test(found[2]), 'a row stops before the next video');
+  assert.deepStrictEqual(tikTokRowsFor(listText, 'Some other video'), []);
+  console.log('ok TikTok Posts rows');
+
   // 2. Song file types
   assert.strictEqual(detectSongExtension(Buffer.concat([Buffer.from('ID3'), Buffer.alloc(20)])), '.mp3');
   assert.strictEqual(detectSongExtension(Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypM4A '), Buffer.alloc(20)])), '.m4a');
@@ -50,7 +66,9 @@ async function run(): Promise<void> {
     assert.strictEqual(detectSongExtension(fs.readFileSync(song)), '.mp3');
 
     const muted = await makeMutedVideo(video);
-    assert.deepStrictEqual(ffprobeStreams(muted), ['video'], 'muted file has no audio');
+    assert.deepStrictEqual(ffprobeStreams(muted).sort(), ['audio', 'video'], 'silent file keeps an audio track (TikTok needs one)');
+    const vol = execFileSync('sh', ['-c', `ffmpeg -i "${muted}" -map 0:a -af volumedetect -f null - 2>&1 | grep max_volume`]).toString();
+    assert.ok(/max_volume: -(9\d|inf)/.test(vol) || /-inf/.test(vol), `the audio track is silent (${vol.trim()})`);
 
     const mixed = await makeVideoWithSong(video, song);
     assert.deepStrictEqual(ffprobeStreams(mixed).sort(), ['audio', 'video'], 'song file has one audio track');

@@ -3214,6 +3214,20 @@ export class ChannelBrowserAgent {
           await dismissPopups(page);
         }
 
+        // Landing on Posts is not proof: TikTok finishes the video on its servers (a library sound is mixed in there)
+        // and can still list it as "Failed to publish". Watch this post's row for a while.
+        if (isPublished) {
+          // With a library sound TikTok renders the video after Post, so the row must stay healthy for a minute.
+          const outcome = await tikTokPostOutcome(page, title, soundName ? 150_000 : 30_000, soundName ? 60_000 : 0);
+          if (outcome === 'failed') {
+            const snap = path.join(FRAMES_DIR, `tiktok_failed_${Date.now()}.png`);
+            await page.screenshot({ path: snap }).catch(() => {});
+            console.warn(`[ChannelBrowserAgent] TikTok lists the post as "Failed to publish". Screenshot: ${snap}`);
+            // Not published anywhere, so a fresh upload cannot double-post.
+            return { success: false, message: `TikTok accepted Post but then showed "Failed to publish". Screenshot: ${snap}` };
+          }
+        }
+
         if (isPublished) {
           console.log('[ChannelBrowserAgent] Video successfully posted to TikTok!');
           return {
@@ -3901,4 +3915,66 @@ export function pickSoundResult(rows: Array<{ title: string; desc: string }>, ti
   const exact = rows.findIndex((r) => norm(r.title) === want && byArtist(r));
   if (exact >= 0) return exact;
   return rows.findIndex((r) => norm(r.title).includes(want) && byArtist(r));
+}
+
+/**
+ * Status words of every row on TikTok Studio's Posts page whose text starts like `title` (a re-post of the same video
+ * leaves several rows with one title). Pure, for tests.
+ */
+export function tikTokRowsFor(pageText: string, title: string): string[] {
+  const start = title.replace(/\s+/g, ' ').trim().slice(0, 30);
+  if (!start) return [];
+  const text = pageText.replace(/[ \t]+/g, ' ');
+  const rows: string[] = [];
+  let i = text.indexOf(start);
+  while (i >= 0) {
+    const next = text.indexOf(start, i + start.length);
+    const seg = text.slice(i, next < 0 ? i + 400 : Math.min(next, i + 400));
+    rows.push(seg.split('\n').slice(0, 3).join(' ')); // title, status, one more: never the next video's status
+    i = next;
+  }
+  return rows;
+}
+
+/**
+ * On TikTok Studio's Posts page, after Post: did TikTok publish this video?
+ *  - "ok" as soon as one row with this title is healthy (a date or "under review") and stays so for `stableMs`;
+ *  - "failed" only when EVERY row with this title says "Failed to publish" for 45 s in a row (with reloads). An
+ *    older failed attempt of the same video must not hide a new post that is still appearing in the list;
+ *  - "unknown" otherwise (treated as posted, as before).
+ */
+export async function tikTokPostOutcome(
+  page: Page,
+  title: string,
+  timeoutMs: number,
+  stableMs = 0
+): Promise<'ok' | 'failed' | 'unknown'> {
+  if (!/\/(content|manage)/.test(page.url())) return 'unknown';
+  const deadline = Date.now() + timeoutMs;
+  let okSince = 0;
+  let failSince = 0;
+  while (Date.now() < deadline) {
+    const text = await page.evaluate(() => document.body.innerText || '').catch(() => '');
+    const rows = tikTokRowsFor(text, title);
+    const healthy = rows.some((r) => !/failed to publish|publishing|processing|uploading/i.test(r));
+    const allFailed = rows.length > 0 && rows.every((r) => /failed to publish/i.test(r));
+    if (healthy) {
+      failSince = 0;
+      okSince = okSince || Date.now();
+      if (Date.now() - okSince >= stableMs) return 'ok';
+    } else {
+      okSince = 0;
+      if (allFailed) {
+        failSince = failSince || Date.now();
+        if (Date.now() - failSince >= 45_000) return 'failed';
+      } else {
+        failSince = 0;
+      }
+    }
+    await page.waitForTimeout(5000);
+    // The list does not update by itself.
+    await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+    await page.waitForTimeout(3000);
+  }
+  return 'unknown';
 }

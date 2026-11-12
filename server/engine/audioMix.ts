@@ -1,6 +1,6 @@
 /**
  * Audio for a finished Grok video, made with ffmpeg before upload:
- *   - muted:   Grok's sound removed (for a platform library sound picked on TikTok / YouTube)
+ *   - silent:  Grok's sound replaced by a silent track (for a sound picked from TikTok's library)
  *   - my song: Grok's sound removed and the channel's own song laid underneath, cut to the video's length
  * The video stream is copied, never re-encoded. ffmpeg comes from Homebrew (`brew install ffmpeg`) or FFMPEG_PATH.
  */
@@ -54,14 +54,28 @@ const variantPath = (videoPath: string, suffix: string) => {
   return path.join(path.dirname(videoPath), `${path.basename(videoPath, ext)}_${suffix}.mp4`);
 };
 
-/** Same video with no audio track. Reused when it already exists. */
+/**
+ * Same video with Grok's sound replaced by SILENCE (a real, silent audio track, not no track): TikTok's sound editor
+ * mixes its library sound into the video's audio on its servers, and a file without an audio track fails there
+ * ("Failed to publish") after Post was accepted. Reused when it already exists.
+ */
 export async function makeMutedVideo(videoPath: string): Promise<string> {
-  const out = variantPath(videoPath, 'muted');
+  const out = variantPath(videoPath, 'silent');
   if (fs.existsSync(out) && fs.statSync(out).size > 0) return out;
   const { ffmpeg } = tools();
-  await execFileAsync(ffmpeg, ['-y', '-v', 'error', '-i', videoPath, '-map', '0:v:0', '-c:v', 'copy', '-an', '-movflags', '+faststart', out], {
-    timeout: 120_000,
-  });
+  await execFileAsync(
+    ffmpeg,
+    [
+      '-y', '-v', 'error',
+      '-i', videoPath,
+      '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+      '-map', '0:v:0', '-map', '1:a:0',
+      '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
+      '-shortest', '-movflags', '+faststart',
+      out,
+    ],
+    { timeout: 120_000 }
+  );
   return out;
 }
 
