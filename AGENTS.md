@@ -89,7 +89,13 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
 - **Two ChatGPT answer formats.** Mr. Apple's chat puts the prompt in a **"Plain text" code block**; Mr Watermelon's puts it in a **writing card** (`[data-testid="chatgpt-writing-block"]` → `<header>` with the story title, then the prompt body, ending with the settings line). The code-block reader runs first and is unchanged; the writing-card reader (`writingPrompt` / `writingTitle`) is used only when there is no NEW code-block prompt. A writing card is accepted early only once it ends with its settings line. Both formats are covered by `tests/chatgpt-wait.test.ts`.
 - **Under `tsx`**, functions passed to `page.evaluate` get an injected `__name()` helper; `window.__name` is shimmed in
   `launchPersistent` and `extractCoverFrame`. Keep that when adding in-page code.
-- **No ffmpeg.** The raw Grok video goes straight to the platforms.
+- **Sound (per channel, per platform)** — `server/engine/audioMix.ts` (Homebrew ffmpeg) runs before upload, in `prepareAudio`:
+  Grok's sound (the raw file, as before) | "my song" (`storage/channels/<id>/song.*` replaces Grok's sound, looped/cut to the
+  video, short fade) | TikTok library (a muted file is uploaded, then TikTok Studio → Sounds → search → "+" → Save; the
+  editor re-renders and re-uploads, wait for "Uploaded") | YouTube Audio Library (a track the owner downloaded,
+  `youtube_track.*`, mixed like "my song", plus an optional credit line in the description). If the sound cannot be set the
+  platform is NOT posted (never silent or wrong audio). YouTube Studio's own "Add audio" editor was rejected: it asks
+  "Verify it's you" and only works after the Short is public.
 - **YouTube** goes through Studio's upload dialog: answers "made for kids" from the channel, always publishes Public, saves
   screenshots to `storage/frames/youtube_*.png`. YouTube sign-in is optional: after 4 minutes unsigned the run posts to TikTok only.
 - **Pop-ups that are not dialogs:** Grok's "Shape your scene, start to finish … Try it now" promo is a plain floating `<div>` (no `role=dialog`) with an icon button labelled "Dismiss". `popups.ts` marks small boxes (≤ 600 chars) whose text is a known nag AND that have their own Dismiss/Close/Not now button, and closes them with that button — never "Try it now". Covered by `tests/popups.test.ts`.

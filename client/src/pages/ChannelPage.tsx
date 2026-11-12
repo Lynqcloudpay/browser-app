@@ -14,6 +14,7 @@ import { ChatGptSection } from './channel/ChatGptSection';
 import { DangerSection } from './channel/DangerSection';
 import { LoginsSection } from './channel/LoginsSection';
 import { PostingSection } from './channel/PostingSection';
+import { AudioSection } from './channel/AudioSection';
 import { ReferencePictureSection } from './channel/ReferencePictureSection';
 import { RecentRunsSection, RecentVideosSection } from './channel/RecentSections';
 import { ScheduleSection } from './channel/ScheduleSection';
@@ -124,6 +125,7 @@ export function ChannelPage({ id }: { id: number }) {
       <LoginsSection channel={channel} accounts={accounts} runBusy={runBusy} patch={patch} onChanged={refreshLive} />
       <ChatGptSection channel={channel} patch={patch} />
       <PostingSection channel={channel} patch={patch} />
+      <AudioSection channel={channel} patch={patch} onChanged={refresh} />
       <ScheduleSection channel={channel} others={others} patch={patch} />
       <DangerSection channel={channel} />
 

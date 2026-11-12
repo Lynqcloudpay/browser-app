@@ -48,6 +48,10 @@ export function initDatabase(): void {
   addColumnIfMissing('jobs', 'youtube_status', 'TEXT');
   addColumnIfMissing('channels', 'keep_browser_open', 'INTEGER NOT NULL DEFAULT 1');
   addColumnIfMissing('channels', 'hold_flagged_videos', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing('channels', 'tiktok_audio', "TEXT NOT NULL DEFAULT 'original'");
+  addColumnIfMissing('channels', 'tiktok_sound', "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing('channels', 'youtube_audio', "TEXT NOT NULL DEFAULT 'original'");
+  addColumnIfMissing('channels', 'youtube_track', "TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing('runs', 'timings_json', 'TEXT');
   db.exec(POST_MIGRATION_SQL);
 

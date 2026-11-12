@@ -26,11 +26,15 @@ import {
   updateChannel,
   deleteChannel,
   referenceImagePath,
+  songPath,
+  youtubeTrackPath,
+  SONG_EXTENSIONS,
   channelDir,
   Channel,
   exportChannelsToSeeds,
 } from '../engine/channels';
 import { getAgent } from '../engine/agentRegistry';
+import { audioToolsAvailable, detectSongExtension } from '../engine/audioMix';
 import { REPO_ROOT } from '../paths';
 
 export const apiRouter = Router();
@@ -84,6 +88,9 @@ function channelView(c: Channel) {
   return {
     ...c,
     hasReferenceImage: Boolean(referenceImagePath(c.id)),
+    songFile: songFileInfo(songPath(c.id)),
+    youtubeTrackFile: songFileInfo(youtubeTrackPath(c.id)),
+    audioToolsReady: audioToolsAvailable(),
     runStatus: getRunStatus(c.id),
     accounts: getAccountsOverview(c.id),
     stats: {
@@ -231,6 +238,70 @@ export function detectImageExtension(buf: Buffer): '.jpg' | '.png' | '.webp' | n
   }
   return null;
 }
+
+/** Name and size of an attached audio file, for the channel page. */
+function songFileInfo(file: string | null): { name: string; bytes: number } | null {
+  if (!file) return null;
+  try {
+    return { name: path.basename(file), bytes: fs.statSync(file).size };
+  } catch {
+    return null;
+  }
+}
+
+// Audio files a channel uses under its videos: its own song ("song") and a YouTube Audio Library track ("youtube-track").
+const AUDIO_SLOTS = { song: { base: 'song', find: songPath }, 'youtube-track': { base: 'youtube_track', find: youtubeTrackPath } } as const;
+type AudioSlot = keyof typeof AUDIO_SLOTS;
+const audioSlot = (req: any): AudioSlot => {
+  const slot = String(req.params.slot);
+  if (slot !== 'song' && slot !== 'youtube-track') throw new HttpError(404, 'Unknown audio file.');
+  return slot;
+};
+
+apiRouter.get(
+  '/channels/:id/audio/:slot',
+  route((req, res) => {
+    const { id } = existingChannel(req);
+    const file = AUDIO_SLOTS[audioSlot(req)].find(id);
+    if (!file) return res.status(404).json({ error: 'No audio file attached.' });
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(path.resolve(file));
+  })
+);
+
+apiRouter.post(
+  '/channels/:id/audio/:slot',
+  raw({ type: ['audio/*', 'video/mp4', 'application/octet-stream'], limit: '40mb' }),
+  route((req, res) => {
+    const { id } = existingChannel(req);
+    const slot = AUDIO_SLOTS[audioSlot(req)];
+    const buf = req.body;
+    if (!buf || !Buffer.isBuffer(buf) || buf.length < 1000) return res.status(400).json({ error: 'The audio file is empty.' });
+    const ext = detectSongExtension(buf);
+    if (!ext) return res.status(400).json({ error: 'Unsupported audio file. Use MP3, M4A, WAV or AAC.' });
+    const dir = channelDir(id);
+    fs.mkdirSync(dir, { recursive: true });
+    for (const e of SONG_EXTENSIONS) {
+      const old = path.join(dir, `${slot.base}${e}`);
+      if (fs.existsSync(old)) fs.unlinkSync(old);
+    }
+    const target = path.join(dir, `${slot.base}${ext}`);
+    const tmp = `${target}.tmp_${Date.now()}`;
+    fs.writeFileSync(tmp, buf);
+    fs.renameSync(tmp, target);
+    res.json({ file: songFileInfo(target) });
+  })
+);
+
+apiRouter.delete(
+  '/channels/:id/audio/:slot',
+  route((req, res) => {
+    const { id } = existingChannel(req);
+    const file = AUDIO_SLOTS[audioSlot(req)].find(id);
+    if (file) fs.unlinkSync(file);
+    res.json({ success: true });
+  })
+);
 
 apiRouter.get(
   '/channels/:id/reference-image',

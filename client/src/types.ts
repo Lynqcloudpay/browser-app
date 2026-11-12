@@ -31,6 +31,14 @@ export interface Channel {
   hashtag_hint: string;
   schedule_enabled: boolean;
   schedule_times: string[];
+  /** TikTok audio: Grok's own sound, the channel's song, or a sound from TikTok's library. */
+  tiktok_audio: 'original' | 'my_song' | 'tiktok_sound';
+  /** TikTok library sound to search for, e.g. "Chicken Banana - Crazy Music Channel". */
+  tiktok_sound: string;
+  /** YouTube audio: Grok's own sound, the channel's song, or a track from YouTube's free Audio Library. */
+  youtube_audio: 'original' | 'my_song' | 'youtube_library';
+  /** Credit line added to the YouTube description for an Audio Library track. */
+  youtube_track: string;
   created_at: string;
   updated_at: string;
 }
@@ -87,9 +95,20 @@ export type SeriesSettings =
   | { mode: 'every'; everyMinutes: 15 | 60 | 120; start: string; end: string }
   | { mode: 'random'; start: string; end: string };
 
+export interface AudioFileInfo {
+  name: string;
+  bytes: number;
+}
+
 export interface ChannelView extends Channel {
   /** The series pattern, or null when the channel uses plain times. */
   schedule_series: SeriesSettings | null;
+  /** The channel's own song, mixed under its videos. */
+  songFile: AudioFileInfo | null;
+  /** A track downloaded from YouTube's free Audio Library, used for YouTube. */
+  youtubeTrackFile: AudioFileInfo | null;
+  /** ffmpeg is installed, so audio can be changed. */
+  audioToolsReady: boolean;
   hasReferenceImage: boolean;
   /** Whether the channel's browser window is open right now. */
   browserOpen: boolean;

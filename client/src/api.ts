@@ -105,6 +105,15 @@ export const api = {
   patchChannel: (id: number, patch: ChannelPatch) =>
     request<ChannelUpdate>(`/api/channels/${id}`, { method: 'PATCH', json: patch }),
   deleteChannel: (id: number) => request<{ success: true }>(`/api/channels/${id}`, { method: 'DELETE' }),
+  /** Audio files under a channel's videos: its own song, or a YouTube Audio Library track. */
+  uploadAudio: (id: number, slot: 'song' | 'youtube-track', file: File) =>
+    request<{ file: { name: string; bytes: number } }>(`/api/channels/${id}/audio/${slot}`, {
+      method: 'POST',
+      headers: { 'Content-Type': file.type || 'application/octet-stream' },
+      body: file,
+    }),
+  deleteAudio: (id: number, slot: 'song' | 'youtube-track') =>
+    request<{ success: true }>(`/api/channels/${id}/audio/${slot}`, { method: 'DELETE' }),
   /** Plain times mode: one launch time per video. */
   saveSchedule: (id: number, body: { enabled: boolean; times: string[] }) =>
     request<{ times: string[] }>(`/api/channels/${id}/schedule`, { method: 'POST', json: body }),

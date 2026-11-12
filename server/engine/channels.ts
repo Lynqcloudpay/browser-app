@@ -4,6 +4,13 @@ import db from '../db/database';
 import { normalizeTimes, removeChannelLaunchAgent } from './dailySchedule';
 import { STORAGE_ROOT, LOGS_DIR, CHANNEL_SEEDS_DIR, REPO_ROOT } from '../paths';
 
+export type TikTokAudio = 'original' | 'my_song' | 'tiktok_sound';
+export type YouTubeAudio = 'original' | 'my_song' | 'youtube_library';
+const TIKTOK_AUDIO: TikTokAudio[] = ['original', 'my_song', 'tiktok_sound'];
+const YOUTUBE_AUDIO: YouTubeAudio[] = ['original', 'my_song', 'youtube_library'];
+const asTikTokAudio = (v: any): TikTokAudio => (TIKTOK_AUDIO.includes(v) ? v : 'original');
+const asYouTubeAudio = (v: any): YouTubeAudio => (YOUTUBE_AUDIO.includes(v) ? v : 'original');
+
 export interface Channel {
   id: number;
   name: string;
@@ -21,6 +28,17 @@ export interface Channel {
   keep_browser_open: boolean;
   /** Hold a video for a person when the safety check flags words in it. Off: post anyway and record the flags. */
   hold_flagged_videos: boolean;
+  /** TikTok audio: keep Grok's sound, mute it and use the channel's own song, or mute it and pick a TikTok sound. */
+  tiktok_audio: TikTokAudio;
+  /** Name of the TikTok library sound to search for (tiktok_audio = 'tiktok_sound'). */
+  tiktok_sound: string;
+  /** YouTube audio: keep Grok's sound, the channel's own song, or a track from YouTube's free Audio Library. */
+  youtube_audio: YouTubeAudio;
+  /**
+   * Credit line added to the YouTube description for a YouTube Audio Library track (youtube_audio = 'youtube_library',
+   * file youtube_track.<ext> in the channel folder). Some library tracks require it.
+   */
+  youtube_track: string;
   created_at: string;
   updated_at: string;
 }
@@ -82,6 +100,27 @@ export function referenceImagePath(id: number): string | null {
   return null;
 }
 
+/** The channel's own song (mixed under its videos when an audio option says "my song"), or null. */
+export const SONG_EXTENSIONS = ['.mp3', '.m4a', '.wav', '.aac'] as const;
+export function songPath(id: number): string | null {
+  const dir = channelDir(id);
+  for (const ext of SONG_EXTENSIONS) {
+    const p = path.join(dir, `song${ext}`);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+/** A track downloaded from YouTube's free Audio Library, used for YouTube when youtube_audio = 'youtube_library'. */
+export function youtubeTrackPath(id: number): string | null {
+  const dir = channelDir(id);
+  for (const ext of SONG_EXTENSIONS) {
+    const p = path.join(dir, `youtube_track${ext}`);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
 export function accountStatusFile(id: number): string {
   const file = path.join(channelDir(id), 'account_status.json');
   if (id === 1 && !fs.existsSync(file) && legacyPathsAllowed()) {
@@ -122,6 +161,10 @@ function rowToChannel(row: any): Channel {
     schedule_times: Array.isArray(times) ? times : [],
     keep_browser_open: row.keep_browser_open === undefined || row.keep_browser_open === null ? true : Boolean(row.keep_browser_open),
     hold_flagged_videos: Boolean(row.hold_flagged_videos),
+    tiktok_audio: asTikTokAudio(row.tiktok_audio),
+    tiktok_sound: row.tiktok_sound || '',
+    youtube_audio: asYouTubeAudio(row.youtube_audio),
+    youtube_track: row.youtube_track || '',
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -174,6 +217,10 @@ export function exportChannelsToSeeds(): void {
       schedule_times: c.schedule_times,
       keep_browser_open: c.keep_browser_open,
       hold_flagged_videos: c.hold_flagged_videos,
+      tiktok_audio: c.tiktok_audio,
+      tiktok_sound: c.tiktok_sound,
+      youtube_audio: c.youtube_audio,
+      youtube_track: c.youtube_track,
       created_at: c.created_at,
       updated_at: c.updated_at,
     }));
@@ -300,6 +347,15 @@ export function importChannelsFromSeeds(): void {
           seed.id
         );
       }
+      if (seed.tiktok_audio !== undefined || seed.youtube_audio !== undefined) {
+        db.prepare('UPDATE channels SET tiktok_audio = ?, tiktok_sound = ?, youtube_audio = ?, youtube_track = ? WHERE id = ?').run(
+          asTikTokAudio(seed.tiktok_audio),
+          String(seed.tiktok_sound || ''),
+          asYouTubeAudio(seed.youtube_audio),
+          String(seed.youtube_track || ''),
+          seed.id
+        );
+      }
 
       // Restore reference image if missing locally
       const cDir = channelDir(seed.id);
@@ -421,6 +477,22 @@ export function updateChannel(id: number, patch: Partial<Channel>): Channel {
   if (patch.hold_flagged_videos !== undefined) {
     updates.push('hold_flagged_videos = ?');
     params.push(patch.hold_flagged_videos ? 1 : 0);
+  }
+  if (patch.tiktok_audio !== undefined) {
+    updates.push('tiktok_audio = ?');
+    params.push(asTikTokAudio(patch.tiktok_audio));
+  }
+  if (patch.tiktok_sound !== undefined) {
+    updates.push('tiktok_sound = ?');
+    params.push(String(patch.tiktok_sound).trim().slice(0, 200));
+  }
+  if (patch.youtube_audio !== undefined) {
+    updates.push('youtube_audio = ?');
+    params.push(asYouTubeAudio(patch.youtube_audio));
+  }
+  if (patch.youtube_track !== undefined) {
+    updates.push('youtube_track = ?');
+    params.push(String(patch.youtube_track).trim().slice(0, 300));
   }
   if (patch.keep_browser_open !== undefined) {
     updates.push('keep_browser_open = ?');

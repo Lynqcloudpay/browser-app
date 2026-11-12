@@ -22,7 +22,10 @@ import {
   profileDir,
   cookiesFile,
   referenceImagePath,
+  songPath,
+  youtubeTrackPath,
 } from './channels';
+import { makeMutedVideo, makeVideoWithSong } from './audioMix';
 
 export interface BrowserJobResult {
   success: boolean;
@@ -2560,6 +2563,72 @@ export class ChannelBrowserAgent {
    * On TikTok Studio's upload form: Edit cover → Upload cover → pick our JPEG → Confirm.
    * Best effort: if TikTok's layout differs, we save screenshots for debugging, back out, and post with the automatic cover.
    */
+  /**
+   * TikTok Studio upload page → Sounds → search the library → "+" on the matching sound → Save. The editor renders
+   * the video with the sound and uploads it again, so wait for that. `query` may name the artist too
+   * ("Chicken Banana - Crazy Music Channel"); then only a sound by that artist is accepted.
+   */
+  private async setTikTokSound(page: Page, query: string): Promise<{ ok: boolean; message: string }> {
+    const { title, artist } = parseSoundQuery(query);
+    const gotIt = async () => {
+      for (let i = 0; i < 4; i++) {
+        const g = page.getByRole('button', { name: /^got it$/i }).first();
+        if (!(await g.isVisible().catch(() => false))) break;
+        await g.click().catch(() => {});
+        await page.waitForTimeout(600);
+      }
+    };
+    try {
+      await gotIt();
+      const soundsBtn = page.getByRole('button', { name: /^sounds$/i }).first();
+      if (!(await soundsBtn.isVisible({ timeout: 10000 }).catch(() => false))) {
+        return { ok: false, message: 'TikTok\'s Sounds button was not found on the upload page.' };
+      }
+      await soundsBtn.click();
+      const search = page.locator('input[placeholder="Search sounds"]').first();
+      await search.waitFor({ state: 'visible', timeout: 20000 });
+      await gotIt();
+      await search.fill([title, artist].filter(Boolean).join(' '));
+      await search.press('Enter');
+
+      const items = page.locator('.MusicPanelMusicItem__content');
+      await items.first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+      const rows = await items.evaluateAll((els) =>
+        els.map((el) => ({
+          title: (el.querySelector('.MusicPanelMusicItem__infoBasicTitle')?.textContent || '').trim(),
+          desc: (el.querySelector('.MusicPanelMusicItem__infoBasicDesc')?.textContent || '').trim(),
+        }))
+      );
+      const index = pickSoundResult(rows, title, artist);
+      if (index < 0) {
+        const seen = rows.slice(0, 5).map((r) => `${r.title} (${r.desc})`).join('; ');
+        return { ok: false, message: `TikTok has no sound matching "${query}" in its library${seen ? `. First results: ${seen}` : ''}.` };
+      }
+      console.log(`[ChannelBrowserAgent-${this.channelId}] TikTok sound: adding "${rows[index].title}" (${rows[index].desc}).`);
+      await items.nth(index).locator('.MusicPanelMusicItem__operation button').last().click({ timeout: 10000 });
+      await page.waitForTimeout(3000);
+      await gotIt();
+
+      const save = page.getByRole('button', { name: /^save$/i }).first();
+      await save.click({ timeout: 10000 });
+      // The editor closes and the rendered video is uploaded again; the Post button returns when it is done.
+      const deadline = Date.now() + 180_000;
+      while (Date.now() < deadline) {
+        await page.waitForTimeout(2000);
+        await gotIt();
+        const editorOpen = await save.isVisible().catch(() => false);
+        const uploaded = await page.getByText(/^\s*Uploaded\b/i).first().isVisible().catch(() => false);
+        if (!editorOpen && uploaded) {
+          return { ok: true, message: `Added TikTok sound "${rows[index].title}".` };
+        }
+      }
+      return { ok: false, message: `TikTok did not finish saving the video with "${rows[index].title}" within 3 minutes.` };
+    } catch (err: any) {
+      return { ok: false, message: `Could not add the TikTok sound "${query}": ${err?.message || err}` };
+    }
+  }
+
   private async setTikTokCover(page: Page, coverPath: string): Promise<boolean> {
     const framesDir = FRAMES_DIR;
     const snap = (tag: string) => page.screenshot({ path: path.join(framesDir, `tiktok_cover_${tag}_${Date.now()}.png`) }).catch(() => {});
@@ -2861,7 +2930,8 @@ export class ChannelBrowserAgent {
     videoPath: string,
     title: string,
     hook: string,
-    coverPath?: string
+    coverPath?: string,
+    soundName?: string
   ): Promise<{ success: boolean; verified?: boolean; shareUrl?: string; message: string }> {
     const context = await this.launchContext(false);
     const pages = context.pages();
@@ -2999,6 +3069,18 @@ export class ChannelBrowserAgent {
         console.log('[ChannelBrowserAgent] Waiting for TikTok video upload to show Uploaded (100%)...');
         await page.getByText(/^\s*Uploaded\b/i).first().waitFor({ state: 'visible', timeout: 120000 }).catch(() => null);
         await page.waitForTimeout(800);
+
+        // 4a. A sound from TikTok's own library (the uploaded file is muted). If it cannot be added, stop before Post:
+        // a silent video or the wrong sound must never go out.
+        if (soundName) {
+          const sound = await this.setTikTokSound(page, soundName);
+          if (!sound.ok) {
+            const snap = path.join(FRAMES_DIR, `tiktok_sound_${Date.now()}.png`);
+            await page.screenshot({ path: snap }).catch(() => {});
+            return { success: false, message: `${sound.message} Nothing was posted. Screenshot: ${snap}` };
+          }
+          await dismissExitModal();
+        }
 
         // 4b. Unique cover image (a mid-video frame instead of the identical first frame)
         if (coverPath && fs.existsSync(coverPath)) {
@@ -3290,6 +3372,59 @@ export class ChannelBrowserAgent {
    * Uploads one finished video to the requested platforms and writes the outcome to its job row.
    * A platform that is not attempted keeps whatever status it already had.
    */
+  /** The file (and TikTok sound) each platform gets, from the channel's audio settings. */
+  private async prepareAudio(
+    videoPath: string,
+    tiktok: boolean,
+    youtube: boolean,
+    say: (step: string) => void
+  ): Promise<{
+    tiktok: { path: string; sound?: string } | { error: string };
+    youtube: { path: string; credit?: string } | { error: string };
+  }> {
+    const ch = getChannel(this.channelId);
+    const tiktokMode = ch?.tiktok_audio || 'original';
+    const youtubeMode = ch?.youtube_audio || 'original';
+    const attempt = async <T>(fn: () => Promise<T>): Promise<T | { error: string }> => {
+      try {
+        return await fn();
+      } catch (err: any) {
+        return { error: String(err?.message || err).slice(0, 300) };
+      }
+    };
+    const withSong = async (file: string | null, missing: string) => {
+      if (!file) throw new Error(missing);
+      return makeVideoWithSong(videoPath, file);
+    };
+    if ((tiktok && tiktokMode !== 'original') || (youtube && youtubeMode !== 'original')) say('Setting the video\'s audio…');
+
+    const tiktokAudio = !tiktok || tiktokMode === 'original'
+      ? { path: videoPath }
+      : tiktokMode === 'tiktok_sound'
+        ? await attempt(async () => {
+          const sound = (ch?.tiktok_sound || '').trim();
+          if (!sound) throw new Error('the TikTok sound option is on but no sound name is set on the channel page.');
+          return { path: await makeMutedVideo(videoPath), sound };
+        })
+        : await attempt(async () => ({
+          path: await withSong(songPath(this.channelId), 'the "my song" option is on but no song file is attached on the channel page.'),
+        }));
+
+    const youtubeAudio = !youtube || youtubeMode === 'original'
+      ? { path: videoPath }
+      : youtubeMode === 'youtube_library'
+        ? await attempt(async () => ({
+          path: await withSong(youtubeTrackPath(this.channelId), 'the YouTube Audio Library option is on but no track file is attached on the channel page.'),
+          credit: (ch?.youtube_track || '').trim() || undefined,
+        }))
+        : await attempt(async () => ({
+          path: await withSong(songPath(this.channelId), 'the "my song" option is on but no song file is attached on the channel page.'),
+        }));
+
+    console.log(`[ChannelBrowserAgent-${this.channelId}] Audio: TikTok ${tiktok ? tiktokMode : 'off'}, YouTube ${youtube ? youtubeMode : 'off'}.`);
+    return { tiktok: tiktokAudio, youtube: youtubeAudio };
+  }
+
   private async postVideo(input: {
     jobId: string;
     videoPath: string;
@@ -3303,6 +3438,9 @@ export class ChannelBrowserAgent {
     say: (step: string, kind?: 'running' | 'waiting_login') => void;
   }): Promise<Pick<PipelineResult, 'tiktokStatus' | 'tiktokVerified' | 'tiktokUrl' | 'youtubeStatus' | 'youtubeVerified' | 'youtubeUrl' | 'postedEverywhere' | 'postedAnywhere' | 'postFailed'>> {
     const { say } = input;
+    // Audio per platform (original, the channel's song, or a muted file for a TikTok library sound), made before
+    // any upload. A platform whose audio cannot be prepared is not posted, never posted with the wrong sound.
+    const audio = await this.prepareAudio(input.videoPath, input.tiktok, input.youtube, say);
     let tiktokStatus = input.previous?.tiktokStatus || 'off';
     let tiktokUrl: string | undefined = input.previous?.tiktokUrl || undefined;
     let tiktokVerified = tiktokStatus === 'published';
@@ -3315,13 +3453,18 @@ export class ChannelBrowserAgent {
       this.throwIfCancelled();
       console.log(`[ChannelBrowserAgent-${this.channelId}] Uploading the video to TikTok...`);
       tiktokStatus = 'failed';
+      if ('error' in audio.tiktok) {
+        say(`TikTok not posted: ${audio.tiktok.error}`);
+        return;
+      }
+      const tt = audio.tiktok;
       try {
-        let uploadRes = await this.uploadToTikTokViaBrowser(input.videoPath, input.title, input.hook, input.coverPath || undefined);
+        let uploadRes = await this.uploadToTikTokViaBrowser(tt.path, input.title, input.hook, input.coverPath || undefined, tt.sound);
         if (!uploadRes.success && !this.cancelRequested) {
           // success=false means Post was never clicked, so a second try cannot post the video twice.
           say(`TikTok upload failed (${uploadRes.message.slice(0, 120)}). Trying once more…`);
           await this.releaseTabs(['tiktok.com']);
-          uploadRes = await this.uploadToTikTokViaBrowser(input.videoPath, input.title, input.hook, input.coverPath || undefined);
+          uploadRes = await this.uploadToTikTokViaBrowser(tt.path, input.title, input.hook, input.coverPath || undefined, tt.sound);
         }
         if (uploadRes.success) {
           tiktokVerified = !!uploadRes.verified;
@@ -3341,15 +3484,21 @@ export class ChannelBrowserAgent {
       this.throwIfCancelled();
       console.log(`[ChannelBrowserAgent-${this.channelId}] Uploading the video to YouTube...`);
       youtubeStatus = 'failed';
+      if ('error' in audio.youtube) {
+        say(`YouTube not posted: ${audio.youtube.error}`);
+        return;
+      }
+      const ytAudio = audio.youtube;
       try {
         const cleanTitle = input.title.replace(/\s*#\w+/g, '').trim();
         const ytOptions = { coverPath: input.coverPath || undefined, madeForKids: input.youtubeMadeForKids };
-        let yt = await this.uploadToYouTubeViaBrowser(input.videoPath, cleanTitle, `${input.hook}\n\n#Shorts`, ytOptions);
+        const ytDescription = [input.hook, ytAudio.credit, '#Shorts'].filter(Boolean).join('\n\n');
+        let yt = await this.uploadToYouTubeViaBrowser(ytAudio.path, cleanTitle, ytDescription, ytOptions);
         if (!yt.success && !this.cancelRequested && !/daily upload limit|not signed in|no YouTube channel/i.test(yt.message)) {
           // success=false means Publish was never clicked (at most a private draft exists), so a retry cannot double-post.
           say(`YouTube upload failed (${yt.message.slice(0, 120)}). Trying once more…`);
           await this.releaseTabs(['youtube.com']);
-          yt = await this.uploadToYouTubeViaBrowser(input.videoPath, cleanTitle, `${input.hook}\n\n#Shorts`, ytOptions);
+          yt = await this.uploadToYouTubeViaBrowser(ytAudio.path, cleanTitle, ytDescription, ytOptions);
         }
         if (yt.success) {
           youtubeVerified = !!yt.verified;
@@ -3732,4 +3881,24 @@ export function shortReason(err: any): string {
   const text = String(err?.message || err || 'unknown error').replace(/\s*Screenshot:.*$/s, '').trim();
   const first = text.split(/(?<=\.)\s/)[0];
   return first.length > 140 ? first.slice(0, 137) + '…' : first;
+}
+
+/** "Chicken Banana - Crazy Music Channel" / "Chicken Banana by Crazy Music Channel" → title + artist. */
+export function parseSoundQuery(query: string): { title: string; artist: string } {
+  const q = query.trim();
+  const m = /^(.*?)\s+(?:-|–|—|by)\s+(.+)$/i.exec(q);
+  return m ? { title: m[1].trim(), artist: m[2].trim() } : { title: q, artist: '' };
+}
+
+/**
+ * Which TikTok search result to use: an exact title match first (by the artist, when one is given), then a title that
+ * contains the wanted words. -1 when nothing fits, so a wrong song is never picked.
+ */
+export function pickSoundResult(rows: Array<{ title: string; desc: string }>, title: string, artist = ''): number {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9\u00c0-\uffff]+/g, ' ').trim();
+  const want = norm(title);
+  const byArtist = (r: { desc: string }) => !artist || norm(r.desc).includes(norm(artist));
+  const exact = rows.findIndex((r) => norm(r.title) === want && byArtist(r));
+  if (exact >= 0) return exact;
+  return rows.findIndex((r) => norm(r.title).includes(want) && byArtist(r));
 }
