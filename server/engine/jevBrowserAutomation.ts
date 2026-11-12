@@ -2779,8 +2779,18 @@ export class ChannelBrowserAgent {
         .or(page.getByText(/video (published|processing)/i))
         .or(page.getByText(/finish processing before your video is public/i))
         .first();
-      const published = await confirmation.waitFor({ state: 'visible', timeout: 120000 }).then(() => true).catch(() => false);
+      let published = await confirmation.waitFor({ state: 'visible', timeout: 120000 }).then(() => true).catch(() => false);
       let shareUrl: string | null = null;
+
+      // Fallback: if not matched yet, check whether the dialog or its Close button is visible on screen
+      if (!published) {
+        const anyClose = page.locator('#close-button').or(page.getByRole('button', { name: /^Close$/i })).or(page.getByText(/^Close$/i)).first();
+        if (await anyClose.isVisible().catch(() => false)) {
+          console.log('[ChannelBrowserAgent] YouTube confirmation dialog detected via Close button.');
+          published = true;
+        }
+      }
+
       if (published) {
         shareUrl =
           (await page
@@ -2794,10 +2804,16 @@ export class ChannelBrowserAgent {
       await snap(published ? 'published' : 'unconfirmed');
       if (published) {
         const closeBtn = page
-          .locator('ytcp-uploads-still-processing-dialog #close-button, ytcp-video-share-dialog #close-button, ytcp-dialog-header #close-button')
+          .locator('ytcp-uploads-still-processing-dialog #close-button, ytcp-video-share-dialog #close-button, ytcp-dialog-header #close-button, #close-button')
           .or(page.getByRole('button', { name: /^Close$/i }))
+          .or(page.getByText(/^Close$/i))
           .first();
-        await closeBtn.click({ timeout: 4000 }).catch(() => {});
+        if (await closeBtn.isVisible().catch(() => false)) {
+          await closeBtn.click({ timeout: 4000 }).catch(() => {});
+        } else {
+          await page.keyboard.press('Escape').catch(() => {});
+        }
+        await page.waitForTimeout(1000);
       }
 
       if (published) {
