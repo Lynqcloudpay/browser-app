@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import db from '../db/database';
 import { normalizeTimes, removeChannelLaunchAgent } from './dailySchedule';
+import { publishChannels } from './sharedSchedule';
 import { STORAGE_ROOT, LOGS_DIR, CHANNEL_SEEDS_DIR, REPO_ROOT } from '../paths';
 
 export type TikTokAudio = 'original' | 'my_song' | 'tiktok_sound';
@@ -234,6 +235,9 @@ export function exportChannelsToSeeds(): void {
       lastSeedsMtime = fs.statSync(targetJson).mtimeMs;
     } catch {}
 
+    // Every machine's launch times go to the shared registry, so other machines' random planning avoids them.
+    publishChannels(channels.map((c) => ({ name: c.name, enabled: c.schedule_enabled, times: c.schedule_times })));
+
     // Sync reference images
     const existingSeedFiles = fs.readdirSync(CHANNEL_SEEDS_DIR);
     const activeIds = new Set(channels.map((c) => c.id));
@@ -421,6 +425,10 @@ export function createChannel(name: string): Channel {
  */
 export function saveScheduleTimes(id: number, times: string[]): void {
   db.prepare('UPDATE channels SET schedule_times = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(JSON.stringify(times), id);
+  const c = getChannel(id);
+  if (c && !isTestEnvironment()) {
+    publishChannels([{ name: c.name, enabled: c.schedule_enabled, times: c.schedule_times }]);
+  }
 }
 
 export function updateChannel(id: number, patch: Partial<Channel>): Channel {

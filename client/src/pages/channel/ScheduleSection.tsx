@@ -10,6 +10,8 @@ import type { PatchFn } from './ChannelHeader';
 // Must match the server's MIN_GAP_MINUTES and MAX_POSTS_PER_DAY (server/engine/dailySchedule.ts).
 const MIN_GAP = 30;
 const MAX_PER_DAY = Math.floor((24 * 60) / MIN_GAP);
+/** Most videos a random series may make in one day (server: SERIES_MAX_VIDEOS). */
+const SERIES_MAX_VIDEOS = 30;
 const toMin = (t: string) => {
   const [h, m] = t.split(':').map(Number);
   return h * 60 + m;
@@ -73,6 +75,7 @@ export function ScheduleSection({
   const [pattern, setPattern] = useState<Pattern>(patternOf(saved));
   const [start, setStart] = useState(saved?.start ?? '08:00');
   const [end, setEnd] = useState(saved?.end ?? '22:00');
+  const [count, setSeriesCount] = useState<number>(saved?.mode === 'random' && saved.count ? saved.count : 5);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
@@ -116,7 +119,7 @@ export function ScheduleSection({
     try {
       const series: SeriesSettings =
         pattern === 'random'
-          ? { mode: 'random', start, end }
+          ? { mode: 'random', start, end, count }
           : { mode: 'every', everyMinutes: EVERY_MINUTES[pattern], start, end };
       const res = await api.saveSeries(channel.id, { enabled, series });
       const list = res.times.join(', ');
@@ -259,6 +262,25 @@ export function ScheduleSection({
             ))}
           </div>
 
+          {pattern === 'random' && (
+            <div>
+              <label htmlFor="series-count" className="mb-1 block text-[13px] font-semibold text-ink-soft">
+                Videos per day
+              </label>
+              <input
+                id="series-count"
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={SERIES_MAX_VIDEOS}
+                step={1}
+                value={count}
+                onChange={(e) => setSeriesCount(Number(e.target.value))}
+                className="w-full rounded-[10px] border border-ink-soft bg-sheet px-3 py-2 text-[15px]"
+              />
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label htmlFor="series-start" className="mb-1 block text-[13px] font-semibold text-ink-soft">
@@ -288,7 +310,7 @@ export function ScheduleSection({
 
           <p className="text-[13px] text-ink-soft">
             {pattern === 'random'
-              ? 'Each gap is random, between 30 minutes and 1 hour 59 minutes. Every night a new pattern is made, and an earlier pattern never comes back.'
+              ? 'Each gap is random, between 30 minutes and 1 hour 59 minutes. You choose how many videos a day. Every night a new pattern is made, and an earlier pattern never comes back.'
               : `A video every ${pattern === 'every15' ? '15 minutes' : pattern === 'every60' ? 'hour' : '2 hours'}, from the first video up to the last one.`}
           </p>
 

@@ -4,6 +4,7 @@ import assert from 'assert';
 import {
   RANDOM_MAX_GAP,
   RANDOM_MIN_GAP,
+  isBlocked,
   parseSeries,
   planEveryDay,
   planRandomDay,
@@ -90,6 +91,36 @@ assert.throws(
   /Could not make a new random pattern/
 );
 console.log('ok short window refused');
+
+// 6b. Chosen number of videos per day
+{
+  assert.deepStrictEqual(parseSeries({ mode: 'random', start: '08:00', end: '23:00', count: 10 }), {
+    mode: 'random', start: '08:00', end: '23:00', count: 10,
+  });
+  for (const bad of [0, 31, 2.5, -1, 'many']) {
+    assert.throws(() => parseSeries({ mode: 'random', start: '08:00', end: '23:00', count: bad }), /from 1 to 30/, `count ${bad}`);
+  }
+  const big = { mode: 'random' as const, start: '07:00', end: '23:00', count: 10 };
+  for (let i = 0; i < 100; i++) {
+    const { times } = planRandomDay(big, new Set(), Math.random);
+    assert.strictEqual(times.length, 10, 'exactly 10 videos');
+    assert.strictEqual(times[0], '07:00');
+    for (let j = 1; j < times.length; j++) assert.ok(toMin(times[j]) > toMin(times[j - 1]), 'times ascend');
+    for (const g of gapsOf(times)) assert.ok(g >= RANDOM_MIN_GAP && g <= RANDOM_MAX_GAP);
+  }
+  // Other channels' times block some minutes: still exactly 10, and never within 10 minutes of them
+  const otherTimes = [toMin('09:00'), toMin('12:30'), toMin('15:45'), toMin('19:10')];
+  for (let i = 0; i < 100; i++) {
+    const { times } = planRandomDay(big, new Set(), Math.random, 1000, otherTimes);
+    assert.strictEqual(times.length, 10, 'exactly 10 videos with other channels');
+    for (const t of times) assert.ok(!isBlocked(toMin(t), otherTimes), `${t} too close to another channel`);
+  }
+  assert.throws(
+    () => planRandomDay({ mode: 'random', start: '08:00', end: '08:30', count: 5 }, new Set(), Math.random),
+    /Could not fit 5 videos/
+  );
+}
+console.log('ok chosen number of videos per day');
 
 // 7. launchd jobs never point launchd itself at the app folder (it may sit on an external drive launchd cannot
 //    open: the job then dies with exit 78 and no log). Only node, inside the job, reads the app folder.

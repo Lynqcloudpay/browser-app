@@ -19,10 +19,9 @@ import {
   planEveryDay,
   planRandomDay,
   patternKey,
-  findClash,
-  toMinutes as seriesMinutes,
   CHANNEL_GAP_MINUTES,
 } from './seriesPlan';
+import { blockedMinutes, LocalPlan, publishChannels, sharedClash, withPlanLock } from './sharedSchedule';
 import { REPO_ROOT } from '../paths';
 
 const execFileAsync = promisify(execFile);
@@ -370,16 +369,16 @@ function readHistory(channelId: number): string[] {
 /** Today's (or tomorrow's) launch times for a series. Random days are remembered so no pattern comes back. */
 // ---- One channel at a time: every video keeps CHANNEL_GAP_MINUTES from every other channel's ----------------------
 
-/** Other channels whose schedule is on, with their current day's times. */
-function otherEnabledChannels(channelId: number): Array<{ name: string; times: string[] }> {
-  return listChannels()
-    .filter((c) => c.id !== channelId && c.schedule_enabled)
-    .map((c) => ({ name: c.name, times: c.schedule_times }));
+/** This machine's channels, for the clash checks (their times also come from the local database). */
+function localPlans(): LocalPlan[] {
+  return listChannels().map((c) => ({ name: c.name, enabled: c.schedule_enabled, times: c.schedule_times }));
 }
 
 /** Throws a readable error when any of these times is within CHANNEL_GAP_MINUTES of another channel's video. */
 export function assertNoClash(channelId: number, times: string[]): void {
-  const clash = findClash(times, otherEnabledChannels(channelId));
+  const own = getChannel(channelId);
+  if (!own) throw new Error(`Channel ${channelId} not found.`);
+  const clash = sharedClash(own.name, times, localPlans());
   if (clash) {
     throw new Error(
       `${clash.time} is less than ${CHANNEL_GAP_MINUTES} minutes from ${clash.other}'s video at ${clash.otherTime}. ` +
@@ -391,7 +390,9 @@ export function assertNoClash(channelId: number, times: string[]): void {
 function planSeriesTimes(channelId: number, cfg: SeriesConfig): string[] {
   if (cfg.mode === 'every') return planEveryDay(cfg);
   const history = readHistory(channelId);
-  const blocked = otherEnabledChannels(channelId).flatMap((o) => o.times.map(seriesMinutes));
+  // Every enabled channel on every machine, from the shared registry: random times never land near their times.
+  const own = getChannel(channelId);
+  const blocked = blockedMinutes(own?.name ?? '', localPlans());
   // Smart feature "best times": draw several valid days and keep the one that falls in the best-viewed hours.
   const weights = smartOn(channelId, 'bestTimes') ? hourWeights(channelId) : {};
   const used = new Set(history);
@@ -422,13 +423,32 @@ export async function setChannelSeries(
 ): Promise<ReturnType<typeof getChannelSchedule>> {
   if (process.platform !== 'darwin') throw new Error('Daily scheduling uses macOS launchd and only works on a Mac.');
   const cfg = parseSeries(input);
-  const times = planSeriesTimes(channelId, cfg);
-  if (enabled) assertNoClash(channelId, times); // random plans already avoid others; fixed steps may not
+  // Plan, check and save under one lock, so no other channel can plan in between.
+  const times = withPlanLock(() => {
+    const planned = planSeriesTimes(channelId, cfg);
+    if (enabled) assertNoClash(channelId, planned); // random plans already avoid others; fixed steps may not
+    saveScheduleTimes(channelId, planned);
+    return planned;
+  });
   writeSeries(channelId, cfg);
-  saveScheduleTimes(channelId, times);
   updateChannel(channelId, { schedule_enabled: enabled });
   await syncChannelLaunchAgent(channelId, enabled, times);
   return getChannelSchedule(channelId);
+}
+
+/**
+ * Turning a random series on: plan fresh times against the channels that are on NOW. Times saved earlier may have
+ * been planned before the other channels were switched on (or re-planned nightly), so they are never reused here.
+ * Returns false when the channel is not a random series.
+ */
+export function replanRandomOnEnable(channelId: number): boolean {
+  const cfg = readSeries(channelId);
+  if (!cfg || cfg.mode !== 'random') return false;
+  withPlanLock(() => {
+    const planned = planSeriesTimes(channelId, cfg);
+    saveScheduleTimes(channelId, planned);
+  });
+  return true;
 }
 
 /** Nightly planner entry point: make tomorrow's random times and reinstall the channel's launch times. */
@@ -436,8 +456,12 @@ export async function planChannelSeries(channelId: number): Promise<string[] | n
   const cfg = readSeries(channelId);
   const channel = getChannel(channelId);
   if (!cfg || cfg.mode !== 'random' || !channel || !channel.schedule_enabled) return null;
-  const times = planSeriesTimes(channelId, cfg);
-  saveScheduleTimes(channelId, times);
+  // Under the lock, so two channels planning at 00:05 cannot both pick around each other's old times.
+  const times = withPlanLock(() => {
+    const planned = planSeriesTimes(channelId, cfg);
+    saveScheduleTimes(channelId, planned);
+    return planned;
+  });
   await syncRunAgent(channelId, true, times); // not syncChannelLaunchAgent: it would boot out this planner job
   return times;
 }
@@ -474,7 +498,9 @@ export async function setChannelSchedule(
 ): Promise<ReturnType<typeof getChannelSchedule>> {
   if (process.platform !== 'darwin') throw new Error('Daily scheduling uses macOS launchd and only works on a Mac.');
   const clean = normalizeTimes(times);
-  if (enabled) assertNoClash(channelId, clean);
+  withPlanLock(() => {
+    if (enabled) assertNoClash(channelId, clean);
+  });
   writeSeries(channelId, null); // plain times mode replaces any series pattern
   updateChannel(channelId, { schedule_enabled: enabled, schedule_times: clean });
   await syncChannelLaunchAgent(channelId, enabled, clean);
@@ -503,4 +529,7 @@ export async function migrateLegacySchedule(): Promise<void> {
       console.warn(`[Schedule] Could not sync channel ${ch.id} schedule:`, e.message);
     });
   }
+  // Share this machine's channels' times with the other machines (see sharedSchedule.ts).
+  const local = listChannels();
+  if (local.length) publishChannels(local.map((c) => ({ name: c.name, enabled: c.schedule_enabled, times: c.schedule_times })));
 }

@@ -93,7 +93,7 @@ export interface Run {
 /** A series pattern: fixed step, or random gaps (30 min to under 2 hours). Times are HH:MM, same day. */
 export type SeriesSettings =
   | { mode: 'every'; everyMinutes: 15 | 60 | 120; start: string; end: string }
-  | { mode: 'random'; start: string; end: string };
+  | { mode: 'random'; start: string; end: string; count?: number };
 
 export interface AudioFileInfo {
   name: string;

@@ -13,6 +13,7 @@ import {
   getChannelSchedule,
   normalizeTimes,
   readSeries,
+  replanRandomOnEnable,
   setChannelSchedule,
   setChannelSeries,
   syncChannelLaunchAgent,
@@ -147,7 +148,9 @@ apiRouter.patch(
     // Turning a schedule on, or changing its times, must keep 10 minutes from every other channel's videos.
     if (body.schedule_enabled !== undefined || body.schedule_times !== undefined) {
       const willBeOn = body.schedule_enabled !== undefined ? Boolean(body.schedule_enabled) : channel.schedule_enabled;
-      if (willBeOn) {
+      // A random series re-plans on enable instead of checking its old times (see replanRandomOnEnable).
+      const replanned = willBeOn && body.schedule_times === undefined && !channel.schedule_enabled && replanRandomOnEnable(id);
+      if (willBeOn && !replanned) {
         try {
           const times = body.schedule_times !== undefined
             ? normalizeTimes(Array.isArray(body.schedule_times) ? body.schedule_times : [])

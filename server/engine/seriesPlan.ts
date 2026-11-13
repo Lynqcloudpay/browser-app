@@ -10,10 +10,12 @@
 export const RANDOM_MIN_GAP = 30;
 export const RANDOM_MAX_GAP = 119;
 export const EVERY_CHOICES = [15, 60, 120] as const;
+/** Most videos a random series may make in one day. */
+export const SERIES_MAX_VIDEOS = 30;
 
 export type SeriesConfig =
   | { mode: 'every'; everyMinutes: 15 | 60 | 120; start: string; end: string }
-  | { mode: 'random'; start: string; end: string };
+  | { mode: 'random'; start: string; end: string; count?: number };
 
 const TIME_RE = /^(\d{1,2}):(\d{2})$/;
 
@@ -47,7 +49,14 @@ export function parseSeries(input: any): SeriesConfig {
     }
     return { mode: 'every', everyMinutes: everyMinutes as 15 | 60 | 120, start: startS, end: endS };
   }
-  if (input.mode === 'random') return { mode: 'random', start: startS, end: endS };
+  if (input.mode === 'random') {
+    if (input.count === undefined || input.count === null) return { mode: 'random', start: startS, end: endS };
+    const count = Number(input.count);
+    if (!Number.isInteger(count) || count < 1 || count > SERIES_MAX_VIDEOS) {
+      throw new Error('Pick how many videos to post, from 1 to 30.');
+    }
+    return { mode: 'random', start: startS, end: endS, count };
+  }
   throw new Error('Unknown series pattern.');
 }
 
@@ -86,6 +95,8 @@ export const isBlocked = (min: number, blocked: readonly number[]) =>
  * each time, never past the end. Every time keeps CHANNEL_GAP_MINUTES from `blocked` (other channels' times), and
  * two gaps in a row are never equal. A day whose exact time list was used before is rejected and drawn again, so the
  * same pattern never comes back. `rng` is injectable for tests.
+ * With `cfg.count`, the chain stops at exactly count times; an attempt that runs out of valid gaps before reaching
+ * count is retried like a repeated pattern. Without count, the chain runs until the end of the window.
  */
 export function planRandomDay(
   cfg: Extract<SeriesConfig, { mode: 'random' }>,
@@ -109,6 +120,7 @@ export function planRandomDay(
     let t = first;
     let prevGap = -1;
     for (;;) {
+      if (cfg.count !== undefined && times.length === cfg.count) break;
       const options: number[] = [];
       for (let g = RANDOM_MIN_GAP; g <= RANDOM_MAX_GAP && t + g <= end; g++) {
         if (g !== prevGap && !isBlocked(t + g, blocked)) options.push(g);
@@ -119,8 +131,12 @@ export function planRandomDay(
       t += gap;
       times.push(formatMinutes(t));
     }
+    if (cfg.count !== undefined && times.length !== cfg.count) continue;
     const key = patternKey(times);
     if (!used.has(key)) return { times, key };
+  }
+  if (cfg.count !== undefined) {
+    throw new Error(`Could not fit ${cfg.count} videos between ${cfg.start} and ${cfg.end} with 30 min to 1 h 59 min gaps. Make the window longer or pick fewer videos.`);
   }
   throw new Error('Could not make a new random pattern for this window. Make the window longer.');
 }
