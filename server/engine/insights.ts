@@ -175,6 +175,10 @@ export interface TrendItem {
   name: string;
   detail: string;
   views: number | null;
+  /** The trend's real song (title and artist), from ChatGPT's look-up. */
+  song?: string;
+  /** The trend's real moves, step by step, from ChatGPT's look-up. */
+  moves?: string;
 }
 
 /** TikTok Studio → Inspiration → Topics: "1", topic name, views, …, "2", next topic name, views … */
@@ -222,6 +226,91 @@ export function parseTrendList(pageText: string): TrendItem[] {
   return out.length >= 3 ? out.slice(0, 12) : [];
 }
 
+/** Matches trend names across spellings and emoji: "Ba Ba Ba Duo Dance 🎶" and "ba ba ba duo dance" are the same. */
+export const trendKey = (name: string) =>
+  name
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/**
+ * The look-up question: for each usable trend, its real song and real moves, as the original videos do them. The
+ * answer is read between a line containing only TRENDDETAILS and a line containing only ENDDETAILS.
+ */
+export function detailsQuestion(names: string[]): string {
+  const list = names.slice(0, 10).map((n, i) => `${i + 1}. ${n.slice(0, 60)}`).join('; ');
+  return (
+    `Search the web for each of these trends and say what it really is on TikTok and YouTube Shorts: ${list}. ` +
+    'For each trend give the exact song the original videos use, written as title, space, hyphen, space, artist, and for a dance or challenge the real ' +
+    'moves step by step, in the order the original videos do them. Write none where there is no song or no moves. ' +
+    'Answer with a line containing only TRENDDETAILS, then one line per trend, using the trend name exactly as listed, ' +
+    'then a vertical bar and the word song with a colon and the song, then a vertical bar and the word moves with a colon ' +
+    'and the moves separated by commas, then a line containing only ENDDETAILS.'
+  );
+}
+
+const NO_VALUE = /^(none|n\/a|-|—|–)$/i;
+
+/**
+ * The TikTok sound search splits "Title - Artist" on " - ". ChatGPT also writes `"Title" by Artist` or `Title — Artist`:
+ * turn those into "Title - Artist" and drop the quotes.
+ */
+export function cleanSong(song: string): string {
+  let s = song.replace(/[“”"]/g, '').replace(/\s+[—–]\s+/g, ' - ').replace(/\s+/g, ' ').trim();
+  if (!s.includes(' - ')) {
+    const by = /^(.+?)\s+by\s+(.+)$/i.exec(s);
+    if (by) s = `${by[1].trim()} - ${by[2].trim()}`;
+  }
+  return s;
+}
+
+/**
+ * Reads ChatGPT's look-up answer: a map from trendKey(name) to its song and moves. Only lines inside the standalone
+ * TRENDDETAILS … ENDDETAILS block count, so the question (one line, markers inside a sentence) reads as empty.
+ */
+export function parseTrendDetails(pageText: string): Map<string, { song: string; moves: string }> {
+  const out = new Map<string, { song: string; moves: string }>();
+  const all = pageText.replace(/\r/g, '').split('\n');
+  let start = -1;
+  all.forEach((l, i) => {
+    if (l.trim() === 'TRENDDETAILS') start = i;
+  });
+  if (start < 0) return out;
+  const block: string[] = [];
+  for (let i = start + 1; i < all.length && all[i].trim() !== 'ENDDETAILS'; i++) block.push(all[i]);
+  for (const raw of block) {
+    const parts = raw.split('|');
+    const name = parts[0].replace(/^\s*(?:[-•*]|\d+[.)])\s*/, '').replace(/\*\*/g, '').trim();
+    if (!name || name.length > 120) continue;
+    let song = '';
+    let moves = '';
+    for (const p of parts.slice(1)) {
+      const part = p.replace(/\*\*/g, '').trim();
+      const value = (label: RegExp) => part.replace(label, '').trim();
+      if (/^song:/i.test(part)) song = value(/^song:/i);
+      else if (/^moves:/i.test(part)) moves = value(/^moves:/i);
+    }
+    song = cleanSong(song);
+    if (NO_VALUE.test(song)) song = '';
+    if (NO_VALUE.test(moves)) moves = '';
+    if (!song && !moves) continue;
+    out.set(trendKey(name), { song: song.slice(0, 120), moves: moves.slice(0, 700) });
+  }
+  return out;
+}
+
+/** Sentences added to a run's message: the real moves, the song and the video's length (only when known). */
+export function trendFacts(trend: { song?: string; moves?: string }, durationSec?: number): string {
+  let out = '';
+  if (trend.moves) {
+    out += ` The real trend's moves, in this order: ${trend.moves}. The Grok prompt must describe exactly these moves, on the beat, fully visible (full body, front-facing); never invent different moves.`;
+  }
+  if (trend.song) out += ` The trend's song is ${trend.song}: make the music match its tempo and rhythm.`;
+  if (durationSec) out += ` The video is ${durationSec} seconds long: write the prompt and the moves for exactly ${durationSec} seconds.`;
+  return out;
+}
+
 // ---------------------------------------------------------------- storing
 
 const norm = (s: string) => s.toLowerCase().replace(/#\S+/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
@@ -264,9 +353,10 @@ export function saveTrends(channelId: number, source: string, items: Array<Trend
   const tx = db.transaction(() => {
     db.prepare('DELETE FROM trends WHERE channel_id = ? AND source = ?').run(channelId, source);
     const ins = db.prepare(
-      'INSERT OR REPLACE INTO trends (channel_id, source, name, detail, views, kid_safe, fits, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+      'INSERT OR REPLACE INTO trends (channel_id, source, name, detail, views, kid_safe, fits, fetched_at, song, moves) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
-    for (const t of items) ins.run(channelId, source, t.name, t.detail || '', t.views, t.kidSafe ?? null, t.fits ?? null, now);
+    for (const t of items)
+      ins.run(channelId, source, t.name, t.detail || '', t.views, t.kidSafe ?? null, t.fits ?? null, now, t.song || '', t.moves || '');
   });
   tx();
 }
@@ -377,6 +467,8 @@ export interface TrendRow {
   fits: number | null;
   usable: boolean;
   fetched_at: string;
+  song: string;
+  moves: string;
 }
 
 /** A trend is used only when Jev rated it safe AND a fit. Without Jev, nothing counts as usable. */
@@ -384,9 +476,11 @@ export const isUsable = (t: { kid_safe: number | null; fits: number | null }) =>
   t.kid_safe !== null && t.fits !== null && t.kid_safe >= USABLE_SAFE && t.fits >= USABLE_FIT;
 
 export function listTrends(channelId: number): TrendRow[] {
-  const rows = db.prepare('SELECT source, name, detail, views, kid_safe, fits, fetched_at FROM trends WHERE channel_id = ?').all(channelId) as any[];
+  const rows = db
+    .prepare('SELECT source, name, detail, views, kid_safe, fits, fetched_at, song, moves FROM trends WHERE channel_id = ?')
+    .all(channelId) as any[];
   return rows
-    .map((r) => ({ ...r, detail: r.detail || '', usable: isUsable(r) }))
+    .map((r) => ({ ...r, detail: r.detail || '', song: r.song || '', moves: r.moves || '', usable: isUsable(r) }))
     .sort((a, b) => Number(b.usable) - Number(a.usable) || (b.fits ?? 0) - (a.fits ?? 0) || (b.views ?? 0) - (a.views ?? 0));
 }
 
@@ -493,12 +587,17 @@ export const RECENT_TRENDS = 4;
  * The message for a run: "next." plus ONE trend for this video. Only the trend is named, never earlier titles:
  * quoting the most viewed titles made ChatGPT copy them ("SNOOT DANCE" twice).
  */
-export function buildNextMessage(trend: { name: string; detail?: string } | null): string {
+export function buildNextMessage(
+  trend: { name: string; detail?: string; song?: string; moves?: string } | null,
+  durationSec?: number
+): string {
   if (!trend) return 'next';
   const why = trend.detail ? ` (${trend.detail.slice(0, 120)})` : '';
   return (
     `next. Base this video on the trend "${trend.name.slice(0, 60)}"${why}. ` +
-    'Use a new animal, a new joke and new title words, never an earlier video\'s. Keep the same answer format.'
+    'Use a new animal, a new joke and new title words, never an earlier video\'s.' +
+    trendFacts(trend, durationSec) +
+    ' Keep the same answer format.'
   );
 }
 
@@ -566,6 +665,8 @@ export const EXPLORE_RATE = 0.35;
 export interface TrendScore {
   name: string;
   detail: string;
+  song: string;
+  moves: string;
   /** Videos made with this trend, and their average total views (TikTok + YouTube). */
   videos: number;
   avgViews: number | null;
@@ -616,12 +717,21 @@ export function trendScores(channelId: number): TrendScore[] {
     const v = byTrend.get(name) || [];
     const avg = v.length ? v.reduce((x, y) => x + y, 0) / v.length : null;
     const t = usable.find((u) => u.name === name);
-    return { name, detail: t?.detail || '', videos: v.length, avgViews: avg, winner: avg !== null && avg >= bar, usable: !!t };
+    return {
+      name,
+      detail: t?.detail || '',
+      song: t?.song || '',
+      moves: t?.moves || '',
+      videos: v.length,
+      avgViews: avg,
+      winner: avg !== null && avg >= bar,
+      usable: !!t,
+    };
   });
 }
 
 export interface TrendDecision {
-  trend: { name: string; detail: string } | null;
+  trend: { name: string; detail: string; song?: string; moves?: string } | null;
   mode: 'test' | 'repeat' | 'none';
   reason: string;
 }
@@ -723,16 +833,31 @@ export async function pickTrendForRun(channelId: number, rng: () => number = Mat
 }
 
 /** The message for a run that is starting. Picks (and records) this video's trend. */
-export async function nextMessageForRun(channelId: number): Promise<{ message: string; trend: string | null }> {
-  if (!smartOn(channelId, 'smartPrompts')) return { message: 'next', trend: null };
+export async function nextMessageForRun(
+  channelId: number,
+  durationSec?: number
+): Promise<{ message: string; trend: string | null; song: string }> {
+  if (!smartOn(channelId, 'smartPrompts')) return { message: 'next', trend: null, song: '' };
   const d = await pickTrendForRun(channelId);
-  if (!d.trend) return { message: 'next', trend: null };
+  if (!d.trend) return { message: 'next', trend: null, song: '' };
   // A winner may be repeated on purpose: say so, so ChatGPT keeps what worked (with a new animal).
   const message =
     d.mode === 'repeat'
-      ? `next. Base this video on the trend "${d.trend.name.slice(0, 60)}": our videos with it get the most views, so keep that style and music, with a new animal. Keep the same answer format.`
-      : buildNextMessage(d.trend);
-  return { message, trend: d.trend.name };
+      ? `next. Base this video on the trend "${d.trend.name.slice(0, 60)}": our videos with it get the most views, so keep that style and music, with a new animal.` +
+        trendFacts(d.trend, durationSec) +
+        ' Keep the same answer format.'
+      : buildNextMessage(d.trend, durationSec);
+  return { message, trend: d.trend.name, song: d.trend.song || '' };
+}
+
+/** The song stored for a trend (any source, any spelling of its name); '' when none is known. */
+export function trendSong(channelId: number, trendName: string | null | undefined): string {
+  if (!trendName) return '';
+  const key = trendKey(trendName);
+  const rows = db
+    .prepare("SELECT name, song FROM trends WHERE channel_id = ? AND song != ''")
+    .all(channelId) as Array<{ name: string; song: string }>;
+  return rows.find((r) => trendKey(r.name) === key)?.song || '';
 }
 
 // ---------------------------------------------------------------- rotation (sounds, comments)

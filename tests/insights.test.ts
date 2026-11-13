@@ -36,6 +36,12 @@ import {
   realVideoUrl,
   repeatsEarlierIdea,
   retryMessage,
+  cleanSong,
+  detailsQuestion,
+  listTrends,
+  parseTrendDetails,
+  trendKey,
+  trendSong,
 } from '../server/engine/insights';
 import { pickTikTokLink } from '../server/engine/jevBrowserAutomation';
 
@@ -137,6 +143,26 @@ async function run(): Promise<void> {
     `Can I Ride Dance Challenge: Rapidly rising TikTok dance format.\nViralRemix\n\nENDLIST\n\nChatGPT can make mistakes.`;
   assert.deepStrictEqual(parseTrendList(rendered).map((t) => t.name), ['Funny Animal Reactions', 'Deck the Halls Christmas Dance', 'Can I Ride Dance Challenge']);
   console.log('ok ChatGPT trend list');
+
+  // 2b. Real song and moves of each trend (look-up answer)
+  const dq = detailsQuestion(['Ba Ba Ba Duo Dance', 'Penguin Slide']);
+  assert.ok(dq.includes('TRENDDETAILS') && dq.includes('ENDDETAILS') && dq.includes('1. Ba Ba Ba Duo Dance'));
+  assert.strictEqual(parseTrendDetails(dq).size, 0, 'the question alone is not an answer');
+  const renderedDetails = `${dq}\nTRENDDETAILS\n- Ba Ba Ba Duo Dance 🎶 | song: Ba Ba Ba - Ba Ba Band | moves: wiggle hips, clap twice, spin\n` +
+    '**Penguin Slide** | song: none | moves: slide forward, flap wings\n' +
+    'Capybara Spa | song: Relax Song - Kid Singer | moves: n/a\nENDDETAILS\nChatGPT can make mistakes.';
+  const details = parseTrendDetails(renderedDetails);
+  assert.deepStrictEqual(details.get(trendKey('Ba Ba Ba Duo Dance')), { song: 'Ba Ba Ba - Ba Ba Band', moves: 'wiggle hips, clap twice, spin' });
+  assert.deepStrictEqual(details.get(trendKey('Penguin Slide')), { song: '', moves: 'slide forward, flap wings' }, 'song none is empty');
+  assert.deepStrictEqual(details.get(trendKey('Capybara Spa')), { song: 'Relax Song - Kid Singer', moves: '' }, 'moves n/a is empty');
+  assert.strictEqual(trendKey('Ba Ba Ba Duo Dance 🎶'), trendKey('ba ba ba duo dance'));
+  assert.strictEqual(cleanSong('"Ba Ba Ba" by Ba Ba Band'), 'Ba Ba Ba - Ba Ba Band', 'TikTok sound search splits on " - "');
+  assert.strictEqual(cleanSong('“Ba Ba Ba” — Ba Ba Band'), 'Ba Ba Ba - Ba Ba Band');
+  assert.strictEqual(cleanSong('Ba Ba Ba - Ba Ba Band'), 'Ba Ba Ba - Ba Ba Band');
+  const withMoves = buildNextMessage({ name: 'Ba Ba Ba Duo Dance', song: 'Ba Ba Ba - Ba Ba Band', moves: 'wiggle hips, clap twice' }, 6);
+  assert.ok(withMoves.includes('wiggle hips, clap twice') && withMoves.includes('Ba Ba Ba - Ba Ba Band') && withMoves.includes('6 seconds'));
+  assert.ok(withMoves.endsWith('Keep the same answer format.'));
+  console.log('ok trend look-up parsing');
 
   // 3. Pure decisions
   assert.ok(isUsable({ kid_safe: 0.9, fits: 0.8 }));
@@ -256,6 +282,11 @@ async function run(): Promise<void> {
     assert.ok((await nextMessageForRun(k)).message.startsWith('next.'));
     const view: any = await (await fetch(`${base}/api/channels/${k}/insights`)).json();
     assert.ok(view.lastDecision && view.trendScores[0].name === 'Dance A', 'the page shows the decision and what worked');
+    saveTrends(k, 'tiktok', [{ name: 'Ba Ba Ba Duo Dance 🎶', detail: '', views: 5, kidSafe: 0.9, fits: 0.9, song: 'Ba Ba Ba - Ba Ba Band', moves: 'wiggle hips' }]);
+    const stored = listTrends(k).find((t) => t.name.startsWith('Ba Ba Ba'));
+    assert.deepStrictEqual([stored?.song, stored?.moves], ['Ba Ba Ba - Ba Ba Band', 'wiggle hips'], 'song and moves round-trip');
+    assert.strictEqual(trendSong(k, 'Ba Ba Ba Duo Dance'), 'Ba Ba Ba - Ba Ba Band', 'found under the name with the emoji');
+    assert.strictEqual(trendSong(k, 'Nothing Like This'), '');
     console.log('ok insights through the API');
   } finally {
     server.close();

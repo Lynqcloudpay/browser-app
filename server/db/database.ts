@@ -83,6 +83,8 @@ export function initDatabase(): void {
       PRIMARY KEY (channel_id, source, name)
     );
   `);
+  addColumnIfMissing('trends', 'song', "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing('trends', 'moves', "TEXT NOT NULL DEFAULT ''");
   db.exec(POST_MIGRATION_SQL);
 
   try {

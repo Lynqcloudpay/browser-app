@@ -29,11 +29,14 @@ import { makeMutedVideo, makeVideoWithSong } from './audioMix';
 import {
   collectDue,
   commentForRun,
+  detailsQuestion,
   HOOK_RETRY_BELOW,
+  isUsable,
   judgeTrends,
   nextMessageForRun,
   parseTikTokStudioPosts,
   parseTikTokTopics,
+  parseTrendDetails,
   parseTrendList,
   parseYouTubeStudioShorts,
   rateHook,
@@ -42,6 +45,8 @@ import {
   saveTrends,
   smartOn,
   tikTokSoundForRun,
+  trendKey,
+  trendSong,
   writeInsightsState,
   channelProfile,
   recentTitles,
@@ -3616,6 +3621,33 @@ export class ChannelBrowserAgent {
       if (trends.length) {
         say('Insights: Jev is checking which trends are kid-safe and fit the channel…');
         const judged = await judgeTrends(this.channelId, trends);
+        // The usable trends get their real song and moves, so the next videos can dance the real dance.
+        const usableNow = judged.filter((t) => isUsable({ kid_safe: t.kidSafe, fits: t.fits })).slice(0, 10);
+        if (usableNow.length) {
+          say('Insights: asking ChatGPT for each trend\'s real song and moves…');
+          try {
+            if (!page.url().includes('chatgpt.com')) {
+              await page.goto('https://chatgpt.com/?temporary-chat=true', { waitUntil: 'domcontentloaded', timeout: 45000 });
+              await settle(5000);
+            }
+            await this.submitChatGptPrompt(page, detailsQuestion(usableNow.map((t) => t.name)));
+            await page.waitForTimeout(8000);
+            for (let i = 0; i < 120 && (await this.chatGptIsWriting(page)); i++) await page.waitForTimeout(1500);
+            await page.waitForTimeout(2000);
+            const details = parseTrendDetails(await text());
+            let merged = 0;
+            for (const t of judged) {
+              const d = details.get(trendKey(t.name));
+              if (!d) continue;
+              t.song = d.song;
+              t.moves = d.moves;
+              merged++;
+            }
+            if (!merged) notes.push('ChatGPT\'s trend details could not be read.');
+          } catch (err: any) {
+            notes.push(`Trend details skipped (${String(err?.message || err).slice(0, 80)}).`);
+          }
+        }
         for (const source of ['tiktok', 'chatgpt']) {
           const items = judged.filter((_t, i) => trends[i].source === source);
           if (items.length) saveTrends(this.channelId, source, items);
@@ -3627,6 +3659,10 @@ export class ChannelBrowserAgent {
     } finally {
       this.insightsRunning = false;
       await page.close().catch(() => {});
+      // launchPersistentContext opens its own about:blank tab; close the leftover blank tabs so no empty window stays open.
+      for (const p of context.pages()) {
+        if (!p.isClosed() && p.url() === 'about:blank') await p.close().catch(() => {});
+      }
     }
   }
 
@@ -3638,9 +3674,10 @@ export class ChannelBrowserAgent {
     videoPath: string,
     tiktok: boolean,
     youtube: boolean,
-    say: (step: string) => void
+    say: (step: string) => void,
+    trendSongName = ''
   ): Promise<{
-    tiktok: { path: string; sound?: string } | { error: string };
+    tiktok: { path: string; sound?: string; fallbackPath?: string } | { error: string };
     youtube: { path: string; credit?: string } | { error: string };
   }> {
     const ch = getChannel(this.channelId);
@@ -3659,17 +3696,30 @@ export class ChannelBrowserAgent {
     };
     if ((tiktok && tiktokMode !== 'original') || (youtube && youtubeMode !== 'original')) say('Setting the video\'s audio…');
 
-    const tiktokAudio = !tiktok || tiktokMode === 'original'
-      ? { path: videoPath }
-      : tiktokMode === 'tiktok_sound'
-        ? await attempt(async () => {
-          const sound = tikTokSoundForRun(this.channelId, (ch?.tiktok_sound || '').trim()).trim();
-          if (!sound) throw new Error('the TikTok sound option is on but no sound name is set on the channel page.');
-          return { path: await makeMutedVideo(videoPath), sound };
-        })
-        : await attempt(async () => ({
-          path: await withSong(songPath(this.channelId), 'the "my song" option is on but no song file is attached on the channel page.'),
-        }));
+    // The trend's own song (from the trend look-up) goes on TikTok from the Sounds library, ahead of Grok's sound and the
+    // rotation. The owner's own file ("my song") is never replaced.
+    let tiktokAudio: { path: string; sound?: string; fallbackPath?: string } | { error: string };
+    if (tiktok && trendSongName && (tiktokMode === 'original' || tiktokMode === 'tiktok_sound')) {
+      console.log(`[ChannelBrowserAgent-${this.channelId}] TikTok: using the trend's song "${trendSongName}".`);
+      try {
+        tiktokAudio = { path: await makeMutedVideo(videoPath), sound: trendSongName, fallbackPath: videoPath };
+      } catch (err: any) {
+        console.warn(`[ChannelBrowserAgent-${this.channelId}] Muted copy for the trend's song failed, posting Grok's sound: ${err?.message || err}`);
+        tiktokAudio = { path: videoPath };
+      }
+    } else {
+      tiktokAudio = !tiktok || tiktokMode === 'original'
+        ? { path: videoPath }
+        : tiktokMode === 'tiktok_sound'
+          ? await attempt(async () => {
+            const sound = tikTokSoundForRun(this.channelId, (ch?.tiktok_sound || '').trim()).trim();
+            if (!sound) throw new Error('the TikTok sound option is on but no sound name is set on the channel page.');
+            return { path: await makeMutedVideo(videoPath), sound };
+          })
+          : await attempt(async () => ({
+            path: await withSong(songPath(this.channelId), 'the "my song" option is on but no song file is attached on the channel page.'),
+          }));
+    }
 
     const youtubeAudio = !youtube || youtubeMode === 'original'
       ? { path: videoPath }
@@ -3701,7 +3751,8 @@ export class ChannelBrowserAgent {
     const { say } = input;
     // Audio per platform (original, the channel's song, or a muted file for a TikTok library sound), made before
     // any upload. A platform whose audio cannot be prepared is not posted, never posted with the wrong sound.
-    const audio = await this.prepareAudio(input.videoPath, input.tiktok, input.youtube, say);
+    const jobTrend = (db.prepare('SELECT trend FROM jobs WHERE id = ?').get(input.jobId) as any)?.trend;
+    const audio = await this.prepareAudio(input.videoPath, input.tiktok, input.youtube, say, trendSong(this.channelId, jobTrend));
     let tiktokStatus = input.previous?.tiktokStatus || 'off';
     let tiktokUrl: string | undefined = input.previous?.tiktokUrl || undefined;
     let tiktokVerified = tiktokStatus === 'published';
@@ -3721,7 +3772,12 @@ export class ChannelBrowserAgent {
       const tt = audio.tiktok;
       try {
         let uploadRes = await this.uploadToTikTokViaBrowser(tt.path, input.title, input.hook, input.coverPath || undefined, tt.sound);
-        if (!uploadRes.success && !this.cancelRequested) {
+        if (!uploadRes.success && !this.cancelRequested && tt.fallbackPath) {
+          // The trend's song could not be added: post the video with Grok's own sound rather than not at all.
+          say(`TikTok could not add the trend's song "${tt.sound}" (${uploadRes.message.slice(0, 120)}). Posting with Grok's own sound instead…`);
+          await this.releaseTabs(['tiktok.com']);
+          uploadRes = await this.uploadToTikTokViaBrowser(tt.fallbackPath, input.title, input.hook, input.coverPath || undefined, undefined);
+        } else if (!uploadRes.success && !this.cancelRequested) {
           // success=false means Post was never clicked, so a second try cannot post the video twice.
           say(`TikTok upload failed (${uploadRes.message.slice(0, 120)}). Trying once more…`);
           await this.releaseTabs(['tiktok.com']);
@@ -3916,7 +3972,7 @@ export class ChannelBrowserAgent {
     this.grokPrepAbandoned = false;
     const grokReady = this.prepareGrok(prepDuration, prepResolution);
     // A retry sends "next" again, which only asks ChatGPT for another prompt: nothing is spent or posted.
-    const { message, trend: runTrend } = await nextMessageForRun(this.channelId);
+    const { message, trend: runTrend } = await nextMessageForRun(this.channelId, prepDuration);
     if (message !== 'next') console.log(`[ChannelBrowserAgent-${this.channelId}] Smart prompt message: ${message}`);
     let chatGptResult = await this.retryStep('Writing the prompt in ChatGPT', say, async (n) => {
       if (n > 1) say('Writing a new prompt in ChatGPT (second try)…');
