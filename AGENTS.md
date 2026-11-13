@@ -96,6 +96,14 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
   `youtube_track.*`, mixed like "my song", plus an optional credit line in the description). If the sound cannot be set the
   platform is NOT posted (never silent or wrong audio). YouTube Studio's own "Add audio" editor was rejected: it asks
   "Verify it's you" and only works after the Short is public.
+- **TikTok share link** = the Posts-list row whose caption starts like the title and is NOT "Failed to publish"
+  (`tikTokVideoLink(page, title)` / `pickTikTokLink`). Failed posts stay at the top of the list, so "first video link"
+  saved an old failed post's link once.
+- **Repeated ideas:** before Grok, `repeatsEarlierIdea` rejects a title sharing a distinctive two-word phrase with ONE
+  earlier title ("snoot dance"); phrases in 2+ titles are the channel's style. ChatGPT is asked again (max 2), then the
+  run stops with nothing spent. Smart prompts must never present winning titles as examples: ChatGPT copied one.
+- **YouTube "Verify it's you"** is never clicked through: before Publish the upload fails with a clear message; after
+  Publish it is reported as unconfirmed (never a failure, or the repost could post twice).
 - **Smart features** (`server/engine/insights.ts`, channel page → Smart features; master switch + one switch each, all off by
   default, stored in `channels.smart_json`): after a post (at most every 6 h) or "Refresh now", `collectInsights` reads views
   from TikTok Studio → Posts and YouTube Studio → Shorts (`video_stats`), TikTok Studio → Inspiration topics, and a

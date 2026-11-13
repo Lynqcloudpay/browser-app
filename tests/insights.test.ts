@@ -29,7 +29,10 @@ import {
   writeInsightsState,
   DEFAULT_COMMENTS,
   realVideoUrl,
+  repeatsEarlierIdea,
+  retryMessage,
 } from '../server/engine/insights';
+import { pickTikTokLink } from '../server/engine/jevBrowserAutomation';
 
 // Page text as Playwright's innerText reads it (copied from the real pages, shortened).
 const TIKTOK_POSTS = [
@@ -90,6 +93,33 @@ async function run(): Promise<void> {
   assert.strictEqual(realVideoUrl('https://youtube.com/shorts/xRHj2NWyds8?feature=share', 'youtube'), 'https://youtube.com/shorts/xRHj2NWyds8?feature=share');
   assert.strictEqual(realVideoUrl('https://youtu.be/pmihTFLE0qs', 'youtube'), 'https://youtu.be/pmihTFLE0qs');
   assert.strictEqual(realVideoUrl(null, 'youtube'), null);
+
+  // Repeated ideas: the anteater video copied the tapir video's "SNOOT DANCE" (the real titles)
+  const history = [
+    "This Baby Tapir's SNOOT DANCE Is Too Funny! 🍎🐾😂🔥",
+    'This Smiling Baby Quokka Has CRAZY Dance Moves! 🍎🐾😂🔥',
+    'This Pink Baby Axolotl Just OUTDANCED Mr. Apple! 🍎🩷🫧😂',
+    'This Chubby Baby Panda Just OUTDANCED Mr. Apple! 🍎🐼😂🔥',
+    "This Tiny Hamster's CHEEK DANCE Is Absolutely INSANE! 🍎🐹😂🔥",
+  ];
+  assert.strictEqual(repeatsEarlierIdea("This Baby Anteater's SNOOT DANCE Is HILARIOUS! 🍎🐾😂🔥", history), history[0]);
+  assert.strictEqual(repeatsEarlierIdea('This Tiny Pufferfish Just OUTDANCED Mr. Apple! 🍎🐡', history), null, 'the channel style (in 2+ titles) is allowed');
+  assert.strictEqual(repeatsEarlierIdea('This Baby Penguin Slides Into a SNOWBALL FIGHT! 🍎🐧', history), null);
+  assert.strictEqual(repeatsEarlierIdea('Mr. Apple & Friends Dance Battle', ['Mr. Apple & Friends Dance Battle']), 'Mr. Apple & Friends Dance Battle');
+  assert.ok(retryMessage('A', 'B').startsWith('next.') && retryMessage('A', 'B').includes('"B"'));
+  assert.ok(!buildNextMessage([], ['Baby Tapir Dance']).includes('Use one of these ideas if it fits'), 'winners are not offered as ideas to copy');
+
+  // TikTok link: the row of THIS post, never a failed row or another video's row
+  const rows = [
+    { href: 'https://www.tiktok.com/@me/video/111?x=1', text: "This Baby Tapir's SNOOT DANCE Is Too Funny! #MrApple\nFailed to publish\nRetry" },
+    { href: 'https://www.tiktok.com/@me/video/222', text: "This Baby Anteater's SNOOT DANCE Is HILARIOUS! #MrApple\nNov 12, 8:37 PM" },
+    { href: 'https://www.tiktok.com/@me/video/333', text: "This Baby Tapir's SNOOT DANCE Is Too Funny! #MrApple\nNov 12, 4:57 PM" },
+  ];
+  assert.strictEqual(pickTikTokLink(rows, "This Baby Anteater's SNOOT DANCE Is HILARIOUS!"), 'https://www.tiktok.com/@me/video/222');
+  assert.strictEqual(pickTikTokLink(rows, "This Baby Tapir's SNOOT DANCE Is Too Funny!"), 'https://www.tiktok.com/@me/video/333', 'failed row skipped');
+  assert.strictEqual(pickTikTokLink(rows, 'A video TikTok does not list yet'), null, 'never another video\'s link');
+  assert.strictEqual(pickTikTokLink([{ href: 'https://www.tiktok.com/@me/video/9', text: '' }], 'Anything'), 'https://www.tiktok.com/@me/video/9', 'confirmation page link');
+  console.log('ok repeated ideas and TikTok link');
 
   // 2. ChatGPT research answer
   const q = researchQuestion('Mr. Apple', ['This Baby Tapir Dances']);

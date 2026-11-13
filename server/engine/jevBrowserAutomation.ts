@@ -44,6 +44,9 @@ import {
   tikTokSoundForRun,
   writeInsightsState,
   channelProfile,
+  recentTitles,
+  repeatsEarlierIdea,
+  retryMessage,
   type TrendItem,
 } from './insights';
 
@@ -2784,6 +2787,13 @@ export class ChannelBrowserAgent {
     // YouTube sometimes stops the upload dialog with a modal ("Unlock more on YouTube": custom thumbnails need a
     // verified phone number). Its backdrop blocks every click behind it, so cancel it whenever it shows up.
     const dismissYouTubeNag = async () => {
+      // "Verify it's you" is Google asking the owner to sign in again. Never click through it: stop and say so.
+      if (await page.getByText(/verify it'?s you/i).first().isVisible().catch(() => false)) {
+        await snap('verify_its_you');
+        throw new Error(
+          'YouTube asked "Verify it\'s you". Open the channel\'s browser window, finish the check (sign in again), then use "Post now" on the Videos page.'
+        );
+      }
       if (!(await page.getByText(/unlock more on youtube|verify your phone number/i).first().isVisible().catch(() => false))) return false;
       console.log('[ChannelBrowserAgent] YouTube showed a "verify your phone number" prompt — dismissing it.');
       const cancel = page.getByRole('button', { name: /^Cancel$/i }).last();
@@ -2933,6 +2943,15 @@ export class ChannelBrowserAgent {
       let published = await confirmation.waitFor({ state: 'visible', timeout: 120000 }).then(() => true).catch(() => false);
       let shareUrl: string | null = null;
 
+      // A "Verify it's you" check AFTER Publish: Publish was clicked, so never fail (a retry could post twice). Report it.
+      if (!published && (await page.getByText(/verify it'?s you/i).first().isVisible().catch(() => false))) {
+        await snap('verify_its_you');
+        return {
+          success: true,
+          verified: false,
+          message: 'Publish was clicked, then YouTube asked "Verify it\'s you". Finish the check in the channel\'s browser window and look in YouTube Studio.',
+        };
+      }
       // Fallback: if not matched yet, check whether the dialog or its Close button is visible on screen
       if (!published) {
         const anyClose = youTubeCloseButton(page);
@@ -3288,7 +3307,7 @@ export class ChannelBrowserAgent {
             success: true,
             verified: true,
             message: 'Video successfully uploaded and published to TikTok!',
-            shareUrl: (await tikTokVideoLink(page)) || 'https://www.tiktok.com/tiktokstudio/content',
+            shareUrl: (await tikTokVideoLink(page, title)) || 'https://www.tiktok.com/tiktokstudio/content',
           };
         } else {
           const framesDir = FRAMES_DIR;
@@ -3903,6 +3922,23 @@ export class ChannelBrowserAgent {
       return this.generatePromptViaChatGPT(false, message);
     });
 
+    // Never make the same video twice: a title that copies an earlier video's distinctive phrase ("SNOOT DANCE") asks
+    // ChatGPT for a different idea, at most twice. Nothing is spent yet; Grok has not been asked.
+    const earlier = recentTitles(this.channelId);
+    for (let tries = 0; ; tries++) {
+      const copied = repeatsEarlierIdea(chatGptResult.scriptPackage.concept_title, earlier);
+      if (!copied) break;
+      console.warn(`[ChannelBrowserAgent-${this.channelId}] "${chatGptResult.scriptPackage.concept_title}" repeats "${copied}".`);
+      if (tries >= 2) {
+        throw new Error(
+          `ChatGPT kept repeating an earlier video ("${copied}"). Nothing was made or posted. Ask the ChatGPT chat for new ideas, then try again.`
+        );
+      }
+      say('That idea repeats an earlier video. Asking ChatGPT for a different one…');
+      chatGptResult = await this.generatePromptViaChatGPT(false, retryMessage(chatGptResult.scriptPackage.concept_title, copied));
+      this.throwIfCancelled();
+    }
+
     // Smart feature: Jev rates the title. A weak one asks ChatGPT for another idea once (nothing is spent yet).
     let hookScore: number | null = null;
     if (smartOn(this.channelId, 'hookCheck')) {
@@ -4070,7 +4106,7 @@ export class ChannelBrowserAgent {
 }
 
 /** Errors a second attempt cannot fix: a stop, a sign-in that needs a person, a usage or upload limit. */
-const NOT_RETRYABLE = /not signed in|requires login|sign into|signed out|usage limit|weekly limit|credits?|quota|upgrade|daily upload limit|already being produced|server failed|no longer exists|missing from disk|nothing to post/i;
+const NOT_RETRYABLE = /verify it'?s you|kept repeating|not signed in|requires login|sign into|signed out|usage limit|weekly limit|credits?|quota|upgrade|daily upload limit|already being produced|server failed|no longer exists|missing from disk|nothing to post/i;
 
 /** Lower-case, collapse whitespace: lets two readings of the same prompt compare equal. */
 /**
@@ -4092,12 +4128,39 @@ export function youTubeConfirmation(page: Page) {
  * The address of the video itself (tiktok.com/@creator/video/<id>) if TikTok's post-confirmation page links to it.
  * Returns null when no such link is on the page; the caller then keeps the Studio page as the link.
  */
-export async function tikTokVideoLink(page: Page): Promise<string | null> {
-  const hrefs: string[] = await page
-    .evaluate(() => Array.from(document.querySelectorAll('a[href]')).map((a) => (a as HTMLAnchorElement).href))
+/**
+ * The TikTok video link for this post. TikTok Studio's Posts list keeps failed posts at the top and lists older posts
+ * of the same video, so the link is taken from the row whose caption starts like `title` and that did not fail.
+ * Without a title (or no matching row), the first video link on the page.
+ */
+export async function tikTokVideoLink(page: Page, title = ''): Promise<string | null> {
+  const items: Array<{ href: string; text: string }> = await page
+    .evaluate(() =>
+      Array.from(document.querySelectorAll('a[href]')).map((a) => {
+        // The row: climb while the ancestor holds only this one video link.
+        let row: HTMLElement = a as HTMLElement;
+        while (row.parentElement && row.parentElement.querySelectorAll('a[href*="/video/"]').length <= 1 && row.parentElement !== document.body) {
+          row = row.parentElement;
+        }
+        return { href: (a as HTMLAnchorElement).href, text: (row.innerText || '').slice(0, 600) };
+      })
+    )
     .catch(() => []);
-  const match = hrefs.find((h) => /^https:\/\/(www\.)?tiktok\.com\/@[^/]+\/video\/\d+/.test(h));
-  return match ? match.split('?')[0] : null;
+  return pickTikTokLink(items, title);
+}
+
+/** Pure part of tikTokVideoLink, for tests. */
+export function pickTikTokLink(items: Array<{ href: string; text: string }>, title = ''): string | null {
+  const videos = items.filter((i) => /^https:\/\/(www\.)?tiktok\.com\/@[^/]+\/video\/\d+/.test(i.href));
+  const clean = (h: string) => h.split('?')[0];
+  const start = title.replace(/\s+/g, ' ').trim().slice(0, 30);
+  if (start) {
+    const row = videos.find((v) => v.text.replace(/\s+/g, ' ').includes(start) && !/failed to publish/i.test(v.text));
+    if (row) return clean(row.href);
+    // Rows were found but none is this post (or only failed ones): no link rather than another video's link.
+    if (videos.some((v) => v.text.trim().length > 0)) return null;
+  }
+  return videos[0] ? clean(videos[0].href) : null;
 }
 
 /** The visible Close button of YouTube's confirmation dialog (hidden dialogs carry Close buttons too). */

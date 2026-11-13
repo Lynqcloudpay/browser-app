@@ -501,8 +501,10 @@ export function buildNextMessage(trends: string[], winners: string[]): string {
   if (!t.length && !w.length) return 'next';
   const parts = ['next.'];
   if (t.length) parts.push(`Trending now and kid-friendly: ${t.join('; ')}.`);
-  if (w.length) parts.push(`Our most viewed videos lately: ${w.join(', ')}.`);
-  parts.push('Use one of these ideas if it fits the character, otherwise make the usual kind of video. Keep the same answer format.');
+  // Winning titles are named only as ideas NOT to repeat: quoting them as examples made ChatGPT copy them
+  // ("This Baby Tapir's SNOOT DANCE" came back as "This Baby Anteater's SNOOT DANCE").
+  if (w.length) parts.push(`Our most viewed videos lately were ${w.join(', ')}: keep that energy but do not reuse their jokes or title words.`);
+  parts.push('Use a new animal and a new idea. Use one of the trends if it fits the character. Keep the same answer format.');
   return parts.join(' ');
 }
 
@@ -580,4 +582,64 @@ export function insightsView(channelId: number) {
     bestHours,
     nextMessage: nextMessage(channelId),
   };
+}
+
+// ---------------------------------------------------------------- repeated ideas
+
+const STOP = new Set(
+  'this that the a an is was are to for by of and or just mr mrs apple baby tiny little big has have so too very not ready with who what how its it in on at vs got went who\'s'.split(' ')
+);
+
+const titleWords = (t: string) =>
+  t
+    .toLowerCase()
+    .replace(/#\S+/g, ' ')
+    .replace(/'s\b/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean);
+
+const distinctivePairs = (t: string) => {
+  const w = titleWords(t);
+  const out = new Set<string>();
+  for (let i = 0; i + 1 < w.length; i++) {
+    if (STOP.has(w[i]) || STOP.has(w[i + 1]) || w[i].length < 3 || w[i + 1].length < 3) continue;
+    out.add(`${w[i]} ${w[i + 1]}`);
+  }
+  return out;
+};
+
+/**
+ * The earlier title a new title copies, or null. A copy shares a distinctive two-word phrase ("snoot dance") with ONE
+ * earlier video. Phrases found in two or more earlier titles are the channel's style ("outdanced mr", "dance moves")
+ * and are allowed. Pure, for tests.
+ */
+export function repeatsEarlierIdea(title: string, earlier: string[]): string | null {
+  const unique = [...new Set(earlier.map((t) => t.trim()).filter(Boolean))];
+  const count = new Map<string, number>();
+  for (const t of unique) for (const p of distinctivePairs(t)) count.set(p, (count.get(p) || 0) + 1);
+  for (const p of distinctivePairs(title)) {
+    if (count.get(p) !== 1) continue;
+    const hit = unique.find((t) => distinctivePairs(t).has(p) && t !== title.trim());
+    if (hit) return hit;
+  }
+  // The very same title is always a repeat.
+  return unique.find((t) => titleWords(t).join(' ') === titleWords(title).join(' ')) || null;
+}
+
+/** The channel's recent video titles, newest first. */
+export function recentTitles(channelId: number, limit = 30): string[] {
+  return db
+    .prepare('SELECT concept_title FROM jobs WHERE channel_id = ? AND concept_title IS NOT NULL ORDER BY created_at DESC LIMIT ?')
+    .all(channelId, limit)
+    .map((r: any) => String(r.concept_title));
+}
+
+/** Sent to the ChatGPT chat when its new idea copies an earlier video. */
+export function retryMessage(newTitle: string, oldTitle: string): string {
+  return (
+    `next. That idea ("${newTitle.slice(0, 80)}") repeats an earlier video ("${oldTitle.slice(0, 80)}"). ` +
+    'Write a completely different video: a new animal, a new kind of joke or dance, and new words in the title. Keep the same answer format.'
+  );
 }
