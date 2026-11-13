@@ -73,6 +73,35 @@ export function planEveryDay(cfg: Extract<SeriesConfig, { mode: 'every' }>): str
 export const patternKey = (times: string[]) => times.join(',');
 
 /**
+ * Depth-first search for `count` times starting at `first`: gaps in random order, each gap RANDOM_MIN_GAP..RANDOM_MAX_GAP,
+ * no two equal gaps in a row, every time clear of `blocked`, nothing past `end`. Backtracks, so a chain that exists is
+ * found. Returns null when none is found within the search budget.
+ */
+function fitChain(first: number, end: number, count: number, blocked: readonly number[], rng: () => number): number[] | null {
+  let budget = 50000;
+  const path = [first];
+  const search = (t: number, prevGap: number): boolean => {
+    if (path.length === count) return true;
+    if (--budget < 0) return false;
+    const options: number[] = [];
+    for (let g = RANDOM_MIN_GAP; g <= RANDOM_MAX_GAP && t + g <= end; g++) {
+      if (g !== prevGap && !isBlocked(t + g, blocked)) options.push(g);
+    }
+    for (let i = options.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [options[i], options[j]] = [options[j], options[i]];
+    }
+    for (const g of options) {
+      path.push(t + g);
+      if (search(t + g, g)) return true;
+      path.pop();
+    }
+    return false;
+  };
+  return search(first, -1) ? [...path] : null;
+}
+
+/**
  * Random chain for one day: start, then a random gap each time, never past the end.
  * A day is rejected when its exact time list was used before, or when two gaps in a row are equal, so the same
  * pattern never comes back. `rng` is injectable for tests.
@@ -116,22 +145,32 @@ export function planRandomDay(
   }
   if (first < 0) throw new Error('Other channels have videos all through the start of this window. Pick another start time.');
   for (let attempt = 0; attempt < maxTries; attempt++) {
-    const times = [formatMinutes(first)];
-    let t = first;
-    let prevGap = -1;
-    for (;;) {
-      if (cfg.count !== undefined && times.length === cfg.count) break;
-      const options: number[] = [];
-      for (let g = RANDOM_MIN_GAP; g <= RANDOM_MAX_GAP && t + g <= end; g++) {
-        if (g !== prevGap && !isBlocked(t + g, blocked)) options.push(g);
+    let times: string[];
+    if (cfg.count !== undefined) {
+      // Exact count: search for a chain that fits. A greedy walk can get stuck among other channels' times.
+      // First try the window start; if no chain fits from there, start from another free minute in the first two hours.
+      const freeFirsts: number[] = [];
+      for (let m = start; m <= end && m < start + RANDOM_MAX_GAP; m++) if (!isBlocked(m, blocked)) freeFirsts.push(m);
+      const from = attempt === 0 ? first : freeFirsts[Math.floor(rng() * freeFirsts.length)];
+      const chain = fitChain(from, end, cfg.count, blocked, rng);
+      if (!chain) break;
+      times = chain.map(formatMinutes);
+    } else {
+      times = [formatMinutes(first)];
+      let t = first;
+      let prevGap = -1;
+      for (;;) {
+        const options: number[] = [];
+        for (let g = RANDOM_MIN_GAP; g <= RANDOM_MAX_GAP && t + g <= end; g++) {
+          if (g !== prevGap && !isBlocked(t + g, blocked)) options.push(g);
+        }
+        if (!options.length) break;
+        const gap = options[Math.floor(rng() * options.length)];
+        prevGap = gap;
+        t += gap;
+        times.push(formatMinutes(t));
       }
-      if (!options.length) break;
-      const gap = options[Math.floor(rng() * options.length)];
-      prevGap = gap;
-      t += gap;
-      times.push(formatMinutes(t));
     }
-    if (cfg.count !== undefined && times.length !== cfg.count) continue;
     const key = patternKey(times);
     if (!used.has(key)) return { times, key };
   }
