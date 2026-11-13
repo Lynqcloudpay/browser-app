@@ -28,6 +28,7 @@ import {
   topVideos,
   writeInsightsState,
   DEFAULT_COMMENTS,
+  realVideoUrl,
 } from '../server/engine/insights';
 
 // Page text as Playwright's innerText reads it (copied from the real pages, shortened).
@@ -82,6 +83,13 @@ async function run(): Promise<void> {
   assert.deepStrictEqual(topics.map((t) => t.name), ['Baby Capybara Spa Day', 'LEGO Unveils 70cm Godzilla Set', 'Penguin Slide Challenge']);
   assert.strictEqual(topics[0].views, 227_000_000);
   console.log('ok page parsers');
+
+  // Most viewed links: only real video links; TikTok Studio's page (stored by older runs) is never used
+  assert.strictEqual(realVideoUrl('https://www.tiktok.com/@mel.j.rodriguez/video/7707407028305612046', 'tiktok'), 'https://www.tiktok.com/@mel.j.rodriguez/video/7707407028305612046');
+  assert.strictEqual(realVideoUrl('https://www.tiktok.com/tiktokstudio/content', 'tiktok'), null);
+  assert.strictEqual(realVideoUrl('https://youtube.com/shorts/xRHj2NWyds8?feature=share', 'youtube'), 'https://youtube.com/shorts/xRHj2NWyds8?feature=share');
+  assert.strictEqual(realVideoUrl('https://youtu.be/pmihTFLE0qs', 'youtube'), 'https://youtu.be/pmihTFLE0qs');
+  assert.strictEqual(realVideoUrl(null, 'youtube'), null);
 
   // 2. ChatGPT research answer
   const q = researchQuestion('Mr. Apple', ['This Baby Tapir Dances']);

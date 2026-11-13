@@ -400,13 +400,23 @@ export interface VideoRow {
   views: number;
   posted_at: string;
   hook_score: number | null;
+  /** Link to the TikTok video, when the app posted it (only real video links, never the Studio page). */
+  tiktok_url: string | null;
+  youtube_url: string | null;
+}
+
+/** A saved link only when it really points at a video (not TikTok Studio's page, which older rows stored). */
+export function realVideoUrl(url: string | null | undefined, platform: 'tiktok' | 'youtube'): string | null {
+  if (!url) return null;
+  const ok = platform === 'tiktok' ? /tiktok\.com\/@[^/]+\/video\/\d+/.test(url) : /(youtube\.com\/shorts\/|youtu\.be\/|youtube\.com\/watch)/.test(url);
+  return ok ? url : null;
 }
 
 /** One row per video (TikTok and YouTube added together), most viewed first. */
 export function topVideos(channelId: number, limit = 10): VideoRow[] {
   const rows = db
     .prepare(
-      `SELECT s.platform, s.title, s.posted_at, s.views, s.likes, s.comments, s.job_id, j.concept_title AS job_title, j.hook_score
+      `SELECT s.platform, s.title, s.posted_at, s.views, s.likes, s.comments, s.job_id, j.concept_title AS job_title, j.hook_score, j.tiktok_share_url, j.youtube_share_url
        FROM video_stats s LEFT JOIN jobs j ON j.id = s.job_id WHERE s.channel_id = ?`
     )
     .all(channelId) as any[];
@@ -423,6 +433,8 @@ export function topVideos(channelId: number, limit = 10): VideoRow[] {
       views: 0,
       posted_at: r.posted_at,
       hook_score: r.hook_score ?? null,
+      tiktok_url: realVideoUrl(r.tiktok_share_url, 'tiktok'),
+      youtube_url: realVideoUrl(r.youtube_share_url, 'youtube'),
     };
     if (r.platform === 'tiktok') v.tiktok_views += r.views;
     else v.youtube_views += r.views;

@@ -338,17 +338,34 @@ export function SmartSection({ channel }: { channel: ChannelView }) {
                       </tr>
                     </thead>
                     <tbody>
-                      {data.videos.slice(0, 8).map((v, i) => (
-                        <tr key={v.job_id ?? i} className="border-t border-line">
-                          <td className="max-w-[12rem] truncate py-1 pr-3" title={v.title}>
-                            {v.title}
-                          </td>
-                          <td className="py-1 pr-3 text-right">{v.tiktok_views.toLocaleString()}</td>
-                          <td className="py-1 pr-3 text-right">{v.youtube_views.toLocaleString()}</td>
-                          <td className="py-1 pr-3 text-right">{v.likes.toLocaleString()}</td>
-                          <td className="py-1 text-right">{v.hook_score !== null ? Math.round(v.hook_score * 100) : '–'}</td>
-                        </tr>
-                      ))}
+                      {data.videos.slice(0, 8).map((v, i) => {
+                        const link = v.tiktok_url || v.youtube_url;
+                        const cell = (n: number, url: string | null, label: string) =>
+                          url && n > 0 ? (
+                            <a href={url} target="_blank" rel="noreferrer" aria-label={`${label}: open the video`} className="font-semibold text-ink underline underline-offset-2 hover:no-underline">
+                              {n.toLocaleString()}
+                            </a>
+                          ) : (
+                            n.toLocaleString()
+                          );
+                        return (
+                          <tr key={v.job_id ?? i} className="border-t border-line">
+                            <td className="max-w-[12rem] truncate py-1 pr-3" title={v.title}>
+                              {link ? (
+                                <a href={link} target="_blank" rel="noreferrer" className="font-semibold text-ink underline underline-offset-2 hover:no-underline">
+                                  {v.title}
+                                </a>
+                              ) : (
+                                v.title
+                              )}
+                            </td>
+                            <td className="py-1 pr-3 text-right">{cell(v.tiktok_views, v.tiktok_url, 'TikTok views')}</td>
+                            <td className="py-1 pr-3 text-right">{cell(v.youtube_views, v.youtube_url, 'YouTube views')}</td>
+                            <td className="py-1 pr-3 text-right">{v.likes.toLocaleString()}</td>
+                            <td className="py-1 text-right">{v.hook_score !== null ? Math.round(v.hook_score * 100) : '–'}</td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

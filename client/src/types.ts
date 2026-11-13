@@ -251,6 +251,8 @@ export interface InsightVideo {
   views: number;
   posted_at: string;
   hook_score: number | null;
+  tiktok_url: string | null;
+  youtube_url: string | null;
 }
 
 export interface Insights {
