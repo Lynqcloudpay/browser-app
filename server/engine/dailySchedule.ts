@@ -1,3 +1,4 @@
+import { hourWeights, pickBestDay, smartOn } from './insights';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -391,7 +392,22 @@ function planSeriesTimes(channelId: number, cfg: SeriesConfig): string[] {
   if (cfg.mode === 'every') return planEveryDay(cfg);
   const history = readHistory(channelId);
   const blocked = otherEnabledChannels(channelId).flatMap((o) => o.times.map(seriesMinutes));
-  const { times, key } = planRandomDay(cfg, new Set(history), Math.random, 1000, blocked);
+  // Smart feature "best times": draw several valid days and keep the one that falls in the best-viewed hours.
+  const weights = smartOn(channelId, 'bestTimes') ? hourWeights(channelId) : {};
+  const used = new Set(history);
+  const candidates: Array<{ times: string[]; key: string }> = [];
+  const draws = Object.keys(weights).length ? 30 : 1;
+  for (let i = 0; i < draws; i++) {
+    try {
+      const c = planRandomDay(cfg, used, Math.random, 1000, blocked);
+      candidates.push(c);
+      used.add(c.key);
+    } catch (err) {
+      if (!candidates.length) throw err;
+      break;
+    }
+  }
+  const { times, key } = candidates[Math.max(0, pickBestDay(candidates.map((c) => c.times), weights))];
   const next = [...history, key].slice(-HISTORY_LIMIT);
   fs.mkdirSync(path.dirname(seriesHistoryFile(channelId)), { recursive: true });
   fs.writeFileSync(seriesHistoryFile(channelId), JSON.stringify(next));

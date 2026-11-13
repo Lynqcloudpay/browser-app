@@ -36,6 +36,7 @@ import {
 import { getAgent } from '../engine/agentRegistry';
 import { audioToolsAvailable, detectSongExtension } from '../engine/audioMix';
 import { REPO_ROOT } from '../paths';
+import { insightsView, setSmart } from '../engine/insights';
 
 export const apiRouter = Router();
 
@@ -457,6 +458,51 @@ apiRouter.post(
     const wasOpen = agent.isBrowserOpen();
     await agent.shutdown();
     res.json({ success: true, message: wasOpen ? 'Browser window closed. Logins are saved.' : 'The browser window was already closed.' });
+  })
+);
+
+// ---- Smart features (insights): settings, what was collected, and a manual refresh.
+const insightsRefresh = new Map<number, { state: 'running' | 'done' | 'error'; message: string; at: string }>();
+
+apiRouter.get(
+  '/channels/:id/insights',
+  route(async (req, res) => {
+    const { id } = existingChannel(req);
+    res.json({ ...insightsView(id), refresh: insightsRefresh.get(id) || null });
+  })
+);
+
+apiRouter.post(
+  '/channels/:id/smart',
+  route(async (req, res) => {
+    const { id } = existingChannel(req);
+    if (!req.body || typeof req.body !== 'object') throw new HttpError(400, 'Send the settings as JSON.');
+    setSmart(id, req.body);
+    res.json({ ...insightsView(id), refresh: insightsRefresh.get(id) || null });
+  })
+);
+
+/** Opens the channel's browser to read views and trends now. Never posts anything. */
+apiRouter.post(
+  '/channels/:id/insights/refresh',
+  route(async (req, res) => {
+    const { id } = existingChannel(req);
+    if (isRunBusy(id)) throw new HttpError(409, 'This channel is making or posting a video. Refresh insights after it finishes.');
+    if (isAccountOpBusy(id)) throw new HttpError(409, 'A login check or account switch is using the browser. Wait for it to finish.');
+    const agent = getAgent(id);
+    if (agent.isCollectingInsights()) throw new HttpError(409, 'Insights are already being updated.');
+    insightsRefresh.set(id, { state: 'running', message: 'Opening the browser…', at: new Date().toISOString() });
+    agent
+      .collectInsights((step) => insightsRefresh.set(id, { state: 'running', message: step, at: new Date().toISOString() }))
+      .then((r) =>
+        insightsRefresh.set(id, {
+          state: 'done',
+          message: `Read ${r.stats} video stats and ${r.trends} trends.${r.notes.length ? ' ' + r.notes.join(' ') : ''}`,
+          at: new Date().toISOString(),
+        })
+      )
+      .catch((err: any) => insightsRefresh.set(id, { state: 'error', message: String(err?.message || err), at: new Date().toISOString() }));
+    res.json({ started: true });
   })
 );
 

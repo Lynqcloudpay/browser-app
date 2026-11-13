@@ -53,6 +53,35 @@ export function initDatabase(): void {
   addColumnIfMissing('channels', 'youtube_audio', "TEXT NOT NULL DEFAULT 'original'");
   addColumnIfMissing('channels', 'youtube_track', "TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing('runs', 'timings_json', 'TEXT');
+  addColumnIfMissing('channels', 'smart_json', 'TEXT');
+  addColumnIfMissing('jobs', 'hook_score', 'REAL');
+  // Smart features (server/engine/insights.ts): views per posted video, and trends with Jev's judgments.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS video_stats (
+      channel_id INTEGER NOT NULL,
+      platform TEXT NOT NULL,
+      title TEXT NOT NULL,
+      posted_at TEXT NOT NULL,
+      posted_hour INTEGER,
+      views INTEGER NOT NULL DEFAULT 0,
+      likes INTEGER,
+      comments INTEGER,
+      job_id TEXT,
+      fetched_at TEXT NOT NULL,
+      PRIMARY KEY (channel_id, platform, title, posted_at)
+    );
+    CREATE TABLE IF NOT EXISTS trends (
+      channel_id INTEGER NOT NULL,
+      source TEXT NOT NULL,
+      name TEXT NOT NULL,
+      detail TEXT,
+      views INTEGER,
+      kid_safe REAL,
+      fits REAL,
+      fetched_at TEXT NOT NULL,
+      PRIMARY KEY (channel_id, source, name)
+    );
+  `);
   db.exec(POST_MIGRATION_SQL);
 
   try {

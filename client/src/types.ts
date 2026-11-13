@@ -216,3 +216,51 @@ export interface CleanupResult {
   freedMb: number;
   message: string;
 }
+
+/** Smart features switches, per channel. Off means the app works exactly as before. */
+export interface SmartSettings {
+  enabled: boolean;
+  collect: boolean;
+  smartPrompts: boolean;
+  hookCheck: boolean;
+  bestTimes: boolean;
+  soundRotation: boolean;
+  sounds: string[];
+  firstComment: boolean;
+  comments: string[];
+}
+
+export interface TrendRow {
+  source: string;
+  name: string;
+  detail: string;
+  views: number | null;
+  kid_safe: number | null;
+  fits: number | null;
+  usable: boolean;
+  fetched_at: string;
+}
+
+export interface InsightVideo {
+  title: string;
+  job_id: string | null;
+  tiktok_views: number;
+  youtube_views: number;
+  likes: number;
+  comments: number;
+  views: number;
+  posted_at: string;
+  hook_score: number | null;
+}
+
+export interface Insights {
+  settings: SmartSettings;
+  jevReady: boolean;
+  collectedAt: string | null;
+  privateAccount: boolean;
+  trends: TrendRow[];
+  videos: InsightVideo[];
+  bestHours: Array<{ hour: number; avgViews: number }>;
+  nextMessage: string;
+  refresh: { state: 'running' | 'done' | 'error'; message: string; at: string } | null;
+}

@@ -96,6 +96,16 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
   `youtube_track.*`, mixed like "my song", plus an optional credit line in the description). If the sound cannot be set the
   platform is NOT posted (never silent or wrong audio). YouTube Studio's own "Add audio" editor was rejected: it asks
   "Verify it's you" and only works after the Short is public.
+- **Smart features** (`server/engine/insights.ts`, channel page → Smart features; master switch + one switch each, all off by
+  default, stored in `channels.smart_json`): after a post (at most every 6 h) or "Refresh now", `collectInsights` reads views
+  from TikTok Studio → Posts and YouTube Studio → Shorts (`video_stats`), TikTok Studio → Inspiration topics, and a
+  ChatGPT **temporary** chat research answer (`TRENDLIST`/`ENDLIST`; the page text loses the bullets, so lines are
+  "Name: why"); Jev rates each trend kid-safe (>= 0.7) and a fit (>= 0.75) (`trends`). Smart prompts send "next." plus usable
+  trends and top videos (`nextMessage`); title check (`rateHook`) asks ChatGPT once more below 0.4; best times draws 30
+  random days and keeps the best-viewed hours (`pickBestDay`); TikTok sounds and first comments rotate
+  (`nextInRotation`). The TikTok first comment uses `[data-e2e="comment-icon"|"comment-input"|"comment-post"]`. YouTube
+  made-for-kids videos have comments disabled, so there is no YouTube comment. `isPrivateAccount` on tiktok.com/explore
+  shows a warning (a private account keeps views near zero). Parsers are pure and tested in `tests/insights.test.ts`.
 - **YouTube** goes through Studio's upload dialog: answers "made for kids" from the channel, always publishes Public, saves
   screenshots to `storage/frames/youtube_*.png`. YouTube sign-in is optional: after 4 minutes unsigned the run posts to TikTok only.
 - **Pop-ups that are not dialogs:** Grok's "Shape your scene, start to finish … Try it now" promo is a plain floating `<div>` (no `role=dialog`) with an icon button labelled "Dismiss". `popups.ts` marks small boxes (≤ 600 chars) whose text is a known nag AND that have their own Dismiss/Close/Not now button, and closes them with that button — never "Try it now". Covered by `tests/popups.test.ts`.

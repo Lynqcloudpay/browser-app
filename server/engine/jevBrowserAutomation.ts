@@ -26,6 +26,26 @@ import {
   youtubeTrackPath,
 } from './channels';
 import { makeMutedVideo, makeVideoWithSong } from './audioMix';
+import {
+  collectDue,
+  commentForRun,
+  HOOK_RETRY_BELOW,
+  judgeTrends,
+  nextMessage,
+  parseTikTokStudioPosts,
+  parseTikTokTopics,
+  parseTrendList,
+  parseYouTubeStudioShorts,
+  rateHook,
+  researchQuestion,
+  saveStats,
+  saveTrends,
+  smartOn,
+  tikTokSoundForRun,
+  writeInsightsState,
+  channelProfile,
+  type TrendItem,
+} from './insights';
 
 export interface BrowserJobResult {
   success: boolean;
@@ -1109,7 +1129,8 @@ export class ChannelBrowserAgent {
    * Step 1: Browse into ChatGPT, type "next" in the chat, wait for the new prompt to finish generating, and extract it.
    */
   public async generatePromptViaChatGPT(
-    headless = false
+    headless = false,
+    message = 'next'
   ): Promise<{ scriptPackage: ScriptPackage; screenshotPath?: string }> {
     const context = await this.launchContext(headless);
 
@@ -1155,7 +1176,7 @@ export class ChannelBrowserAgent {
 
       // ALWAYS submit "next" to generate a brand new video prompt!
       console.log('[ChannelBrowserAgent] Submitting "next" command strictly to bottom ChatGPT chat input...');
-      await this.submitChatGptPrompt(page, 'next');
+      await this.submitChatGptPrompt(page, message);
       const sentAt = Date.now();
 
       // Wait for ChatGPT to begin and finish writing the brand new reply
@@ -3337,6 +3358,11 @@ export class ChannelBrowserAgent {
     this.cancelRequested = false;
     this.cancelReason = 'user';
     try {
+      // An insights refresh uses its own tab (one of them ChatGPT): let it finish so the run finds the right ChatGPT tab.
+      for (let i = 0; i < 200 && this.insightsRunning; i++) {
+        if (i === 0) onProgress?.('Waiting for the insights update to finish…');
+        await new Promise((r) => setTimeout(r, 1500));
+      }
       const result = await fn();
       if (result.postedEverywhere && !this.keepBrowserOpen()) {
         // The channel asked for a closed window between videos.
@@ -3420,6 +3446,174 @@ export class ChannelBrowserAgent {
    * A platform that is not attempted keeps whatever status it already had.
    */
   /** The file (and TikTok sound) each platform gets, from the channel's audio settings. */
+  /**
+   * Smart features after a post: comment on the new TikTok video, then refresh the insights when they are due.
+   * Best effort and capped in time: nothing here can fail or undo the post.
+   */
+  private async afterPosting(tiktokUrl: string | undefined, say: (step: string) => void): Promise<void> {
+    if (tiktokUrl) {
+      const comment = commentForRun(this.channelId);
+      if (comment) {
+        say('Adding the first comment on TikTok…');
+        const res = await this.commentOnTikTok(tiktokUrl, comment).catch((err: any) => ({ ok: false, message: String(err?.message || err) }));
+        console.log(`[ChannelBrowserAgent-${this.channelId}] First comment: ${res.ok ? 'posted' : res.message}`);
+      }
+    }
+    if (collectDue(this.channelId)) {
+      say('Updating insights (views and trends)…');
+      await this.collectInsights(say).catch((err: any) => console.warn(`[insights] collection failed: ${err?.message || err}`));
+    }
+  }
+
+  /** Opens a TikTok video, types `text` in its comment box and posts it. */
+  public async commentOnTikTok(url: string, text: string): Promise<{ ok: boolean; message: string }> {
+    const context = await this.launchContext(false);
+    const page = await context.newPage();
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(4000);
+      await dismissPopups(page).catch(() => {});
+      const input = page.locator('[data-e2e="comment-input"] [contenteditable="true"], [data-e2e="comment-input"]').first();
+      if (!(await input.isVisible({ timeout: 3000 }).catch(() => false))) {
+        await page.locator('[data-e2e="comment-icon"]').first().click({ timeout: 10000 });
+        await page.waitForTimeout(2000);
+      }
+      const box = page.locator('[data-e2e="comment-input"] [contenteditable="true"]').first();
+      await box.click({ timeout: 10000 });
+      await page.keyboard.type(text, { delay: 40 });
+      const post = page.locator('[data-e2e="comment-post"]').first();
+      await page.waitForFunction(() => {
+        const b = document.querySelector('[data-e2e="comment-post"]');
+        return !!b && !b.hasAttribute('disabled') && b.getAttribute('aria-disabled') !== 'true';
+      }, undefined, { timeout: 10000 });
+      await post.click({ timeout: 10000 });
+      const start = text.slice(0, 20);
+      const seen = await page
+        .locator('[data-e2e="comment-level-1"], [data-e2e="comment-text"]')
+        .filter({ hasText: start })
+        .first()
+        .waitFor({ state: 'visible', timeout: 15000 })
+        .then(() => true)
+        .catch(() => false);
+      return { ok: seen, message: seen ? 'posted' : 'Post was clicked but the comment did not show up yet.' };
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
+  private insightsRunning = false;
+
+  /**
+   * Smart features: read views per video from TikTok Studio and YouTube Studio, TikTok's trending topics, and a short
+   * research answer from ChatGPT (temporary chat, so the prompt chat is untouched); Jev judges the trends. Each source
+   * is optional: one that fails is skipped and the others are still saved.
+   */
+  public async collectInsights(say: (step: string) => void = () => {}): Promise<{ stats: number; trends: number; notes: string[] }> {
+    if (this.insightsRunning) throw new Error('Insights are already being updated.');
+    this.insightsRunning = true;
+    const notes: string[] = [];
+    let stats = 0;
+    const trends: Array<TrendItem & { source: string }> = [];
+    const ch = getChannel(this.channelId);
+    const context = await this.launchContext(false);
+    const page = await context.newPage();
+    const text = () => page.evaluate(() => document.body.innerText || '').catch(() => '');
+    const settle = async (ms: number) => {
+      await page.waitForTimeout(ms);
+      await dismissPopups(page).catch(() => {});
+    };
+    try {
+      if (ch?.post_tiktok) {
+        say('Insights: reading TikTok views…');
+        try {
+          await page.goto('https://www.tiktok.com/tiktokstudio/content', { waitUntil: 'domcontentloaded', timeout: 45000 });
+          await settle(8000);
+          const rows = parseTikTokStudioPosts(await text());
+          stats += saveStats(this.channelId, 'tiktok', rows);
+          if (!rows.length) notes.push('TikTok Studio showed no posted videos.');
+          // A private account shows videos to followers only, which keeps views near zero: tell the owner.
+          await page.goto('https://www.tiktok.com/explore', { waitUntil: 'domcontentloaded', timeout: 45000 });
+          await page.waitForTimeout(3000);
+          const flag = /"isPrivateAccount":\s*(true|false)/.exec(await page.content().catch(() => ''));
+          if (flag) writeInsightsState(this.channelId, { privateAccount: flag[1] === 'true' });
+        } catch (err: any) {
+          notes.push(`TikTok views not read (${String(err?.message || err).slice(0, 80)}).`);
+        }
+
+        say('Insights: reading TikTok trending topics…');
+        try {
+          await page.goto('https://www.tiktok.com/tiktokstudio/inspiration', { waitUntil: 'domcontentloaded', timeout: 45000 });
+          await settle(8000);
+          const seen = new Set<string>();
+          for (const category of ['', 'Nature', 'Entertainment', 'Performance']) {
+            if (category) {
+              const tab = page.getByText(category, { exact: true }).first();
+              if (!(await tab.isVisible().catch(() => false))) continue;
+              await tab.click().catch(() => {});
+              await settle(5000);
+            }
+            for (const t of parseTikTokTopics(await text()).slice(0, 10)) {
+              if (seen.has(t.name)) continue;
+              seen.add(t.name);
+              trends.push({ ...t, detail: category || 'All categories', source: 'tiktok' });
+            }
+          }
+          if (!seen.size) notes.push('TikTok trending topics were not found on the page.');
+        } catch (err: any) {
+          notes.push(`TikTok trends not read (${String(err?.message || err).slice(0, 80)}).`);
+        }
+      }
+
+      if (ch?.post_youtube) {
+        say('Insights: reading YouTube views…');
+        try {
+          await page.goto('https://studio.youtube.com/channel/UC/videos/short', { waitUntil: 'domcontentloaded', timeout: 45000 });
+          await settle(9000);
+          const rows = parseYouTubeStudioShorts(await text());
+          stats += saveStats(this.channelId, 'youtube', rows);
+          if (!rows.length) notes.push('YouTube Studio showed no published Shorts.');
+        } catch (err: any) {
+          notes.push(`YouTube views not read (${String(err?.message || err).slice(0, 80)}).`);
+        }
+      }
+
+      say('Insights: asking ChatGPT what is trending…');
+      try {
+        await page.goto('https://chatgpt.com/?temporary-chat=true', { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await settle(5000);
+        const profile = channelProfile(this.channelId);
+        await this.submitChatGptPrompt(page, researchQuestion(profile.name, profile.recent_titles));
+        await page.waitForTimeout(8000);
+        for (let i = 0; i < 120 && (await this.chatGptIsWriting(page)); i++) await page.waitForTimeout(1500);
+        await page.waitForTimeout(2000);
+        const found = parseTrendList(await text());
+        for (const t of found) trends.push({ ...t, source: 'chatgpt' });
+        if (!found.length) notes.push('ChatGPT\'s trend answer could not be read.');
+      } catch (err: any) {
+        notes.push(`ChatGPT research skipped (${String(err?.message || err).slice(0, 80)}).`);
+      }
+
+      if (trends.length) {
+        say('Insights: Jev is checking which trends are kid-safe and fit the channel…');
+        const judged = await judgeTrends(this.channelId, trends);
+        for (const source of ['tiktok', 'chatgpt']) {
+          const items = judged.filter((_t, i) => trends[i].source === source);
+          if (items.length) saveTrends(this.channelId, source, items);
+        }
+      }
+      writeInsightsState(this.channelId, { collectedAt: new Date().toISOString() });
+      console.log(`[insights] channel ${this.channelId}: ${stats} stat rows, ${trends.length} trends. ${notes.join(' ')}`);
+      return { stats, trends: trends.length, notes };
+    } finally {
+      this.insightsRunning = false;
+      await page.close().catch(() => {});
+    }
+  }
+
+  public isCollectingInsights(): boolean {
+    return this.insightsRunning;
+  }
+
   private async prepareAudio(
     videoPath: string,
     tiktok: boolean,
@@ -3449,7 +3643,7 @@ export class ChannelBrowserAgent {
       ? { path: videoPath }
       : tiktokMode === 'tiktok_sound'
         ? await attempt(async () => {
-          const sound = (ch?.tiktok_sound || '').trim();
+          const sound = tikTokSoundForRun(this.channelId, (ch?.tiktok_sound || '').trim()).trim();
           if (!sound) throw new Error('the TikTok sound option is on but no sound name is set on the channel page.');
           return { path: await makeMutedVideo(videoPath), sound };
         })
@@ -3702,10 +3896,34 @@ export class ChannelBrowserAgent {
     this.grokPrepAbandoned = false;
     const grokReady = this.prepareGrok(prepDuration, prepResolution);
     // A retry sends "next" again, which only asks ChatGPT for another prompt: nothing is spent or posted.
-    const chatGptResult = await this.retryStep('Writing the prompt in ChatGPT', say, async (n) => {
+    const message = nextMessage(this.channelId);
+    if (message !== 'next') console.log(`[ChannelBrowserAgent-${this.channelId}] Smart prompt message: ${message}`);
+    let chatGptResult = await this.retryStep('Writing the prompt in ChatGPT', say, async (n) => {
       if (n > 1) say('Writing a new prompt in ChatGPT (second try)…');
-      return this.generatePromptViaChatGPT(false);
+      return this.generatePromptViaChatGPT(false, message);
     });
+
+    // Smart feature: Jev rates the title. A weak one asks ChatGPT for another idea once (nothing is spent yet).
+    let hookScore: number | null = null;
+    if (smartOn(this.channelId, 'hookCheck')) {
+      say('Checking how appealing the title is…');
+      hookScore = await rateHook(this.channelId, chatGptResult.scriptPackage.concept_title, chatGptResult.scriptPackage.hook);
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Hook score ${hookScore ?? 'n/a'} for "${chatGptResult.scriptPackage.concept_title}".`);
+      if (hookScore !== null && hookScore < HOOK_RETRY_BELOW) {
+        say(`The title scored ${Math.round(hookScore * 100)}/100. Asking ChatGPT for a stronger idea…`);
+        try {
+          const second = await this.generatePromptViaChatGPT(false, message);
+          const secondScore = await rateHook(this.channelId, second.scriptPackage.concept_title, second.scriptPackage.hook);
+          if (secondScore === null || secondScore > hookScore) {
+            chatGptResult = second;
+            hookScore = secondScore;
+          }
+        } catch (err: any) {
+          console.warn(`[ChannelBrowserAgent-${this.channelId}] Second idea failed (${err?.message}); keeping the first.`);
+        }
+      }
+      this.throwIfCancelled();
+    }
 
     const scriptPkg = chatGptResult.scriptPackage;
     const grokPrompt = scriptPkg.shot_briefs[0]?.video_prompt;
@@ -3784,6 +4002,7 @@ export class ChannelBrowserAgent {
       videoDuration
     );
     options.onJob?.(jobId);
+    if (hookScore !== null) db.prepare('UPDATE jobs SET hook_score = ? WHERE id = ?').run(hookScore, jobId);
 
     say('Picking a cover frame…');
     const coverPath = await this.makeCoverImage(finalVideoPath, jobId);
@@ -3832,6 +4051,8 @@ export class ChannelBrowserAgent {
         postFailed: [],
       };
     }
+
+    await this.afterPosting(posted.tiktokVerified ? posted.tiktokUrl : undefined, say);
 
     return {
       success: true,

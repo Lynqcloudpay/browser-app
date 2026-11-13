@@ -560,6 +560,13 @@ export function deleteChannel(id: number): void {
 
   // Delete DB row. Jobs are kept as history; they keep their channel_id.
   db.prepare('DELETE FROM channels WHERE id = ?').run(id);
+  for (const table of ['video_stats', 'trends']) {
+    try {
+      db.prepare(`DELETE FROM ${table} WHERE channel_id = ?`).run(id);
+    } catch {
+      /* the table does not exist in a very old database */
+    }
+  }
   exportChannelsToSeeds();
 
   // Move the channel's folder (browser profile, cookies, reference image) aside instead of destroying it.

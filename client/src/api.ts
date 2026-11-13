@@ -9,7 +9,9 @@ import type {
   Overview,
   Run,
   RunStatus,
+  Insights,
   SeriesSettings,
+  SmartSettings,
   StorageStatus,
   SystemCheck,
   Video,
@@ -168,4 +170,11 @@ export const api = {
     request<{ success: true; path: string }>('/api/storage/open-folder', { method: 'POST', json: { target } }),
   cleanup: (body: { frames?: boolean; orphanVideos?: boolean }) =>
     request<CleanupResult>('/api/storage/cleanup', { method: 'POST', json: body }),
+
+  // Smart features
+  insights: (id: number) => request<Insights>(`/api/channels/${id}/insights`),
+  saveSmart: (id: number, patch: Partial<SmartSettings>) =>
+    request<Insights>(`/api/channels/${id}/smart`, { method: 'POST', json: patch }),
+  refreshInsights: (id: number) =>
+    request<{ started: true }>(`/api/channels/${id}/insights/refresh`, { method: 'POST', json: {} }),
 };

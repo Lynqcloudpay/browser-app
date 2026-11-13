@@ -18,6 +18,7 @@ import { AudioSection } from './channel/AudioSection';
 import { ReferencePictureSection } from './channel/ReferencePictureSection';
 import { RecentRunsSection, RecentVideosSection } from './channel/RecentSections';
 import { ScheduleSection } from './channel/ScheduleSection';
+import { SmartSection } from './channel/SmartSection';
 
 export function ChannelPage({ id }: { id: number }) {
   const data = useChannelData(id);
@@ -126,6 +127,7 @@ export function ChannelPage({ id }: { id: number }) {
       <ChatGptSection channel={channel} patch={patch} />
       <PostingSection channel={channel} patch={patch} />
       <AudioSection channel={channel} patch={patch} onChanged={refresh} />
+      <SmartSection channel={channel} />
       <ScheduleSection channel={channel} others={others} patch={patch} />
       <DangerSection channel={channel} />
 
