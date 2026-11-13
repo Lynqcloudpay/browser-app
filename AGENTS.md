@@ -91,7 +91,7 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
   `launchPersistent` and `extractCoverFrame`. Keep that when adding in-page code.
 - **Sound (per channel, per platform)** — `server/engine/audioMix.ts` (Homebrew ffmpeg) runs before upload, in `prepareAudio`:
   Grok's sound (the raw file, as before) | "my song" (`storage/channels/<id>/song.*` replaces Grok's sound, looped/cut to the
-  video, short fade) | TikTok library (a muted file is uploaded, then TikTok Studio → Sounds → search → "+" → Save; the
+  video, short fade) | TikTok library (`tiktok_sound` is a pasted sound link, short `vm.tiktok.com` links too, or a name; a link is opened in a spare tab to read `data-e2e="music-title"` / `"music-creator"`; a muted file is uploaded, then TikTok Studio → Sounds → search → "+" → Save; the
   editor re-renders and re-uploads, wait for "Uploaded") | YouTube Audio Library (a track the owner downloaded,
   `youtube_track.*`, mixed like "my song", plus an optional credit line in the description). If the sound cannot be set the
   platform is NOT posted (never silent or wrong audio). YouTube Studio's own "Add audio" editor was rejected: it asks

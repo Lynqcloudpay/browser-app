@@ -9,7 +9,7 @@ import { AddressInfo } from 'net';
 import { createApp } from '../server/index';
 import { shutdownAllAgents } from '../server/engine/agentRegistry';
 import { audioToolsAvailable, detectSongExtension, makeMutedVideo, makeVideoWithSong, mediaDuration } from '../server/engine/audioMix';
-import { parseSoundQuery, pickSoundResult, tikTokRowsFor } from '../server/engine/jevBrowserAutomation';
+import { parseSoundQuery, parseTikTokSoundLink, pickSoundResult, tikTokRowsFor } from '../server/engine/jevBrowserAutomation';
 
 const ffprobeStreams = (file: string) =>
   execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', file]).toString().trim().split('\n');
@@ -30,6 +30,16 @@ async function run(): Promise<void> {
   assert.strictEqual(pickSoundResult(rows, 'Chicken Banana', 'Crazy Music Channel'), 3, 'artist picks the exact one');
   assert.strictEqual(pickSoundResult(rows, 'phonk'), 1, 'partial title when there is no exact one');
   assert.strictEqual(pickSoundResult(rows, 'Baby Shark'), -1, 'never a wrong song');
+  assert.strictEqual(pickSoundResult(rows, 'Chicken Banana', 'CrazyMusicChannel'), 3, 'creator name from the sound page (no spaces) still matches');
+
+  // 1a. Pasted TikTok sound links
+  assert.deepStrictEqual(parseTikTokSoundLink('https://www.tiktok.com/music/Chicken-Banana-7465696476092042006?is_from_webapp=1&sender_device=pc'), {
+    url: 'https://www.tiktok.com/music/Chicken-Banana-7465696476092042006', id: '7465696476092042006', slugTitle: 'Chicken Banana',
+  });
+  assert.strictEqual(parseTikTokSoundLink('tiktok.com/music/original-sound-7123456789012345678/')?.slugTitle, 'original sound');
+  assert.strictEqual(parseTikTokSoundLink('https://m.tiktok.com/music/Caf%C3%A9-Song-7123456789012345678')?.slugTitle, 'Café Song');
+  assert.strictEqual(parseTikTokSoundLink('Chicken Banana - Crazy Music Channel'), null, 'a name is not a link');
+  assert.strictEqual(parseTikTokSoundLink('https://www.tiktok.com/@someone/video/7123456789012345678'), null, 'a video link is not a sound');
   console.log('ok TikTok sound matching');
 
   // 1b. TikTok Posts list: a re-post leaves several rows with one title; each is judged on its own status

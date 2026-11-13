@@ -2564,12 +2564,45 @@ export class ChannelBrowserAgent {
    * Best effort: if TikTok's layout differs, we save screenshots for debugging, back out, and post with the automatic cover.
    */
   /**
+   * The owner may paste a TikTok sound link (tiktok.com/music/Name-123…). Open it in a spare tab of the same browser to
+   * read the exact title and creator; if the page cannot be read, fall back to the name in the link.
+   */
+  private async resolveTikTokSound(page: Page, query: string): Promise<{ title: string; artist: string }> {
+    const link = parseTikTokSoundLink(query);
+    // The app's Share → Copy link gives a short link (vm.tiktok.com/…) that redirects to the sound's page.
+    const shortLink = !link && /^(?:https?:\/\/)?(?:vm|vt|www|m)?\.?tiktok\.com\/\S+$/i.test(query.trim()) ? query.trim() : '';
+    if (!link && !shortLink) return parseSoundQuery(query);
+    const tab = await page.context().newPage();
+    let landed: ReturnType<typeof parseTikTokSoundLink> = link;
+    try {
+      const target = link ? link.url : /^https?:/i.test(shortLink) ? shortLink : `https://${shortLink}`;
+      await tab.goto(target, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      landed = parseTikTokSoundLink(tab.url()) || link;
+      if (!landed) return { title: '', artist: '' }; // a link, but not to a sound
+      const titleEl = tab.locator('[data-e2e="music-title"]').first();
+      await titleEl.waitFor({ state: 'visible', timeout: 15000 });
+      const title = ((await titleEl.textContent()) || '').trim();
+      const artist = ((await tab.locator('[data-e2e="music-creator"]').first().textContent({ timeout: 5000 }).catch(() => '')) || '').trim();
+      if (title) {
+        console.log(`[ChannelBrowserAgent-${this.channelId}] TikTok sound link: "${title}" by "${artist}".`);
+        return { title, artist };
+      }
+    } catch (err: any) {
+      console.warn(`[ChannelBrowserAgent-${this.channelId}] TikTok sound link not readable (${err?.message || err}); using the name in the link.`);
+    } finally {
+      await tab.close().catch(() => {});
+    }
+    return { title: landed?.slugTitle || '', artist: '' };
+  }
+
+  /**
    * TikTok Studio upload page → Sounds → search the library → "+" on the matching sound → Save. The editor renders
    * the video with the sound and uploads it again, so wait for that. `query` may name the artist too
    * ("Chicken Banana - Crazy Music Channel"); then only a sound by that artist is accepted.
    */
   private async setTikTokSound(page: Page, query: string): Promise<{ ok: boolean; message: string }> {
-    const { title, artist } = parseSoundQuery(query);
+    const { title, artist } = await this.resolveTikTokSound(page, query);
+    if (!title) return { ok: false, message: `"${query}" is not a TikTok sound link or name.` };
     const gotIt = async () => {
       for (let i = 0; i < 4; i++) {
         const g = page.getByRole('button', { name: /^got it$/i }).first();
@@ -3897,6 +3930,22 @@ export function shortReason(err: any): string {
   return first.length > 140 ? first.slice(0, 137) + '…' : first;
 }
 
+/**
+ * A TikTok sound link → its page URL and the name in it. "https://www.tiktok.com/music/Chicken-Banana-7465696476092042006?x=1"
+ * → slugTitle "Chicken Banana". null when the text is not such a link (then it is a plain sound name).
+ */
+export function parseTikTokSoundLink(text: string): { url: string; id: string; slugTitle: string } | null {
+  const m = /^(?:https?:\/\/)?(?:[a-z]+\.)?tiktok\.com\/music\/([^?#\s]*?)-?(\d{6,})\/?(?:[?#]\S*)?$/i.exec(text.trim());
+  if (!m) return null;
+  let slug = m[1];
+  try {
+    slug = decodeURIComponent(slug);
+  } catch {
+    /* keep it as it is */
+  }
+  return { url: `https://www.tiktok.com/music/${m[1] ? m[1] + '-' : ''}${m[2]}`, id: m[2], slugTitle: slug.replace(/-+/g, ' ').trim() };
+}
+
 /** "Chicken Banana - Crazy Music Channel" / "Chicken Banana by Crazy Music Channel" → title + artist. */
 export function parseSoundQuery(query: string): { title: string; artist: string } {
   const q = query.trim();
@@ -3911,7 +3960,9 @@ export function parseSoundQuery(query: string): { title: string; artist: string 
 export function pickSoundResult(rows: Array<{ title: string; desc: string }>, title: string, artist = ''): number {
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9\u00c0-\uffff]+/g, ' ').trim();
   const want = norm(title);
-  const byArtist = (r: { desc: string }) => !artist || norm(r.desc).includes(norm(artist));
+  // "CrazyMusicChannel" on the sound's page is "Crazy Music Channel" in Studio's list, so spaces do not count.
+  const squash = (s: string) => norm(s).replace(/ /g, '');
+  const byArtist = (r: { desc: string }) => !artist || squash(r.desc).includes(squash(artist));
   const exact = rows.findIndex((r) => norm(r.title) === want && byArtist(r));
   if (exact >= 0) return exact;
   return rows.findIndex((r) => norm(r.title).includes(want) && byArtist(r));

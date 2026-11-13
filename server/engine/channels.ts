@@ -484,7 +484,7 @@ export function updateChannel(id: number, patch: Partial<Channel>): Channel {
   }
   if (patch.tiktok_sound !== undefined) {
     updates.push('tiktok_sound = ?');
-    params.push(String(patch.tiktok_sound).trim().slice(0, 200));
+    params.push(String(patch.tiktok_sound).trim().slice(0, 500));
   }
   if (patch.youtube_audio !== undefined) {
     updates.push('youtube_audio = ?');

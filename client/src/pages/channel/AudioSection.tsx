@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../../api';
 import { Section } from '../../components/Section';
+import { Switch } from '../../components/Switch';
 import { useToast } from '../../components/Toasts';
 import type { AudioFileInfo, ChannelView } from '../../types';
 import type { PatchFn } from './ChannelHeader';
@@ -172,6 +173,11 @@ function AudioFile({
   );
 }
 
+const linkClass = 'font-semibold text-ink underline underline-offset-2 hover:no-underline';
+
+/** A pasted TikTok sound link, e.g. https://www.tiktok.com/music/Chicken-Banana-7465696476092042006 */
+const TIKTOK_LINK = /^https?:\/\/([a-z]+\.)?tiktok\.com\//i;
+
 export function AudioSection({
   channel,
   patch,
@@ -195,97 +201,134 @@ export function AudioSection({
     }
   };
 
-  const songNeeded =
-    (channel.post_tiktok && channel.tiktok_audio === 'my_song') || (channel.post_youtube && channel.youtube_audio === 'my_song');
-  const mixing = songNeeded || (channel.post_youtube && channel.youtube_audio === 'youtube_library') ||
-    (channel.post_tiktok && channel.tiktok_audio === 'tiktok_sound');
+  const musicOn = channel.tiktok_audio !== 'original' || channel.youtube_audio !== 'original';
+  const setMusic = (on: boolean) =>
+    void save(
+      on
+        ? {
+            tiktok_audio: channel.songFile || !channel.tiktok_sound ? 'my_song' : 'tiktok_sound',
+            youtube_audio: channel.songFile || !channel.youtubeTrackFile ? 'my_song' : 'youtube_library',
+          }
+        : { tiktok_audio: 'original', youtube_audio: 'original' },
+    );
+
+  const songNeeded = channel.tiktok_audio === 'my_song' || channel.youtube_audio === 'my_song';
+  const sound = channel.tiktok_sound;
 
   return (
-    <Section
-      title="Sound"
-      description="Keep Grok's own sound, or mute it and put music under the video. Set it for each platform."
-    >
-      {mixing && !channel.audioToolsReady && (
+    <Section title="Sound" description="Choose whether videos get music, or keep the sound Grok made.">
+      <Switch checked={musicOn} disabled={saving} onChange={setMusic}>
+        <span className="font-semibold">Add a song to the videos</span>
+        <span className="block text-[13px] text-ink-soft">
+          {musicOn ? "Grok's sound is muted and the song below plays instead." : "Off: videos keep the sound Grok made."}
+        </span>
+      </Switch>
+
+      {musicOn && !channel.audioToolsReady && (
         <p role="alert" className="rounded-[10px] bg-honey-wash p-3 text-[14px] text-honey-ink">
           ffmpeg is not installed, so the sound cannot be changed. In Terminal run: brew install ffmpeg
         </p>
       )}
 
-      <AudioFile channelId={channel.id} slot="song" title="Your song" file={channel.songFile} onChanged={onChanged} />
-      {songNeeded && !channel.songFile && (
-        <p className="text-[14px] font-medium text-honey-ink">Attach your song, or videos set to "My song" will not post.</p>
-      )}
-
-      {channel.post_tiktok && (
-        <fieldset className="space-y-3 border-t border-line pt-4">
-          <legend className="mb-2 text-[14px] font-semibold">TikTok</legend>
-          <Choices
-            label="TikTok sound"
-            value={channel.tiktok_audio}
-            disabled={saving}
-            onChange={(v) => void save({ tiktok_audio: v })}
-            options={[
-              { key: 'original', label: "Grok's sound" },
-              { key: 'my_song', label: 'My song' },
-              { key: 'tiktok_sound', label: 'TikTok library' },
-            ]}
-          />
-          {channel.tiktok_audio === 'tiktok_sound' && (
-            <SavedText
-              id="tiktok-sound"
-              label="TikTok sound to use"
-              placeholder="Chicken Banana - Crazy Music Channel"
-              hint={
-                'The video is muted and this sound is picked from TikTok\'s library, with its credit. Add " - artist" to pick the exact one. ' +
-                'If TikTok cannot find it, the video is not posted to TikTok.'
-              }
-              value={channel.tiktok_sound}
-              onSave={(v) => void save({ tiktok_sound: v })}
-            />
-          )}
-        </fieldset>
-      )}
-
-      {channel.post_youtube && (
-        <fieldset className="space-y-3 border-t border-line pt-4">
-          <legend className="mb-2 text-[14px] font-semibold">YouTube</legend>
-          <Choices
-            label="YouTube sound"
-            value={channel.youtube_audio}
-            disabled={saving}
-            onChange={(v) => void save({ youtube_audio: v })}
-            options={[
-              { key: 'original', label: "Grok's sound" },
-              { key: 'my_song', label: 'My song' },
-              { key: 'youtube_library', label: 'YouTube Audio Library' },
-            ]}
-          />
-          {channel.youtube_audio === 'youtube_library' && (
+      {musicOn && (
+        <>
+          {songNeeded && (
             <>
-              <p className="text-[13px] text-ink-soft">
-                Download a free track in YouTube Studio → Audio Library, attach it here, and it is put under every YouTube video.
-              </p>
-              <AudioFile
-                channelId={channel.id}
-                slot="youtube-track"
-                title="YouTube Audio Library track"
-                file={channel.youtubeTrackFile}
-                onChanged={onChanged}
-              />
-              <SavedText
-                id="youtube-credit"
-                label="Credit line (added to the description)"
-                placeholder="Music: Track name by Artist (YouTube Audio Library)"
-                hint="Some library tracks ask for this credit. Leave empty if yours does not."
-                value={channel.youtube_track}
-                onSave={(v) => void save({ youtube_track: v })}
-              />
-              {!channel.youtubeTrackFile && (
-                <p className="text-[14px] font-medium text-honey-ink">Attach the track, or YouTube videos will not post.</p>
+              <AudioFile channelId={channel.id} slot="song" title="Your song" file={channel.songFile} onChanged={onChanged} />
+              {!channel.songFile && (
+                <p className="text-[14px] font-medium text-honey-ink">Attach your song, or videos set to "My song" will not post.</p>
               )}
             </>
           )}
-        </fieldset>
+
+          <fieldset className="space-y-3 border-t border-line pt-4">
+            <legend className="mb-2 text-[14px] font-semibold">TikTok</legend>
+            {!channel.post_tiktok && (
+              <p className="text-[13px] text-ink-soft">TikTok posting is off for this channel (Posting, above). This is used once it is on.</p>
+            )}
+            <Choices
+              label="TikTok song"
+              value={channel.tiktok_audio}
+              disabled={saving}
+              onChange={(v) => void save({ tiktok_audio: v })}
+              options={[
+                { key: 'my_song', label: 'My song' },
+                { key: 'tiktok_sound', label: 'TikTok library' },
+                { key: 'original', label: "No song (Grok's sound)" },
+              ]}
+            />
+            {channel.tiktok_audio === 'tiktok_sound' && (
+              <>
+                <SavedText
+                  id="tiktok-sound"
+                  label="TikTok sound link"
+                  placeholder="https://www.tiktok.com/music/Chicken-Banana-7465696476092042006"
+                  hint={
+                    'In the TikTok app open the sound, tap Share → Copy link, and paste it here. A sound name ("Chicken Banana - Crazy Music Channel") works too. ' +
+                    'TikTok adds the sound with its credit. If TikTok cannot find it, the video is not posted to TikTok.'
+                  }
+                  value={sound}
+                  onSave={(v) => void save({ tiktok_sound: v })}
+                />
+                {TIKTOK_LINK.test(sound) && (
+                  <p className="text-[13px]">
+                    <a href={sound} target="_blank" rel="noreferrer" className={linkClass}>
+                      Open this sound on TikTok
+                    </a>
+                  </p>
+                )}
+                {!sound && <p className="text-[14px] font-medium text-honey-ink">Paste a TikTok sound link, or TikTok videos will not post.</p>}
+              </>
+            )}
+          </fieldset>
+
+          <fieldset className="space-y-3 border-t border-line pt-4">
+            <legend className="mb-2 text-[14px] font-semibold">YouTube</legend>
+            {!channel.post_youtube && (
+              <p className="text-[13px] text-ink-soft">YouTube posting is off for this channel (Posting, above). This is used once it is on.</p>
+            )}
+            <Choices
+              label="YouTube song"
+              value={channel.youtube_audio}
+              disabled={saving}
+              onChange={(v) => void save({ youtube_audio: v })}
+              options={[
+                { key: 'my_song', label: 'My song' },
+                { key: 'youtube_library', label: 'YouTube Audio Library' },
+                { key: 'original', label: "No song (Grok's sound)" },
+              ]}
+            />
+            {channel.youtube_audio === 'youtube_library' && (
+              <>
+                <p className="text-[13px] text-ink-soft">
+                  <a href="https://studio.youtube.com/channel/UC/music" target="_blank" rel="noreferrer" className={linkClass}>
+                    Open YouTube Audio Library
+                  </a>
+                  {' '}→ find a song → Download, then attach the file here. YouTube gives these songs no link, so the file is
+                  needed.
+                </p>
+                <AudioFile
+                  channelId={channel.id}
+                  slot="youtube-track"
+                  title="YouTube Audio Library song"
+                  file={channel.youtubeTrackFile}
+                  onChanged={onChanged}
+                />
+                <SavedText
+                  id="youtube-credit"
+                  label="Credit line (added to the description)"
+                  placeholder="Music: Track name by Artist (YouTube Audio Library)"
+                  hint="Some library songs ask for this credit. Leave empty if yours does not."
+                  value={channel.youtube_track}
+                  onSave={(v) => void save({ youtube_track: v })}
+                />
+                {!channel.youtubeTrackFile && (
+                  <p className="text-[14px] font-medium text-honey-ink">Attach the song, or YouTube videos will not post.</p>
+                )}
+              </>
+            )}
+          </fieldset>
+        </>
       )}
     </Section>
   );
