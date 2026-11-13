@@ -18,6 +18,9 @@ process.env.KINDRED_NO_NOTIFY = '1';
 // No calls to the Jev API from tests unless a test asks for it (KINDRED_TEST_LIVE_JEV=1).
 if (process.env.KINDRED_TEST_LIVE_JEV !== '1') process.env.KINDRED_NO_JEV = '1';
 
+// The shared launch-time plan lives in the git-tracked channel_seeds folder; tests must not read or write the real one.
+process.env.KINDRED_SCHEDULE_PLAN_FILE = path.join(TEST_STORAGE, 'schedule_plan.json');
+
 /** Removes the temp storage folder. Call once at the end of each test file. */
 export function cleanup(): void {
   try {
