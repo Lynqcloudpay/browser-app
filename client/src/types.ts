@@ -265,4 +265,8 @@ export interface Insights {
   bestHours: Array<{ hour: number; avgViews: number }>;
   nextMessage: string;
   refresh: { state: 'running' | 'done' | 'error'; message: string; at: string } | null;
+  /** What the manager decided for the last run. */
+  lastDecision: { at: string; trend: string; mode: string; reason: string } | null;
+  /** Trends this channel has used, with how their videos did, best first. */
+  trendScores: Array<{ name: string; videos: number; avgViews: number | null; winner: boolean }>;
 }

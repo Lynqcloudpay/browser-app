@@ -486,26 +486,253 @@ export function pickBestDay(candidates: string[][], weights: Record<number, numb
   return best;
 }
 
-/** The message sent to the channel's ChatGPT chat. "next" alone unless smart prompts are on and there is something to say. */
-export function nextMessage(channelId: number): string {
-  if (!smartOn(channelId, 'smartPrompts')) return 'next';
-  return buildNextMessage(
-    listTrends(channelId).filter((t) => t.usable).map((t) => t.name),
-    topVideos(channelId, 3).filter((v) => v.views > 0).map((v) => v.title)
+/** Trends used by the last few runs are skipped, so every video follows a different one. */
+export const RECENT_TRENDS = 4;
+
+/**
+ * The message for a run: "next." plus ONE trend for this video. Only the trend is named, never earlier titles:
+ * quoting the most viewed titles made ChatGPT copy them ("SNOOT DANCE" twice).
+ */
+export function buildNextMessage(trend: { name: string; detail?: string } | null): string {
+  if (!trend) return 'next';
+  const why = trend.detail ? ` (${trend.detail.slice(0, 120)})` : '';
+  return (
+    `next. Base this video on the trend "${trend.name.slice(0, 60)}"${why}. ` +
+    'Use a new animal, a new joke and new title words, never an earlier video\'s. Keep the same answer format.'
   );
 }
 
-export function buildNextMessage(trends: string[], winners: string[]): string {
-  const t = trends.slice(0, 3).map((s) => s.slice(0, 50));
-  const w = winners.slice(0, 2).map((s) => `"${s.slice(0, 70)}"`);
-  if (!t.length && !w.length) return 'next';
-  const parts = ['next.'];
-  if (t.length) parts.push(`Trending now and kid-friendly: ${t.join('; ')}.`);
-  // Winning titles are named only as ideas NOT to repeat: quoting them as examples made ChatGPT copy them
-  // ("This Baby Tapir's SNOOT DANCE" came back as "This Baby Anteater's SNOOT DANCE").
-  if (w.length) parts.push(`Our most viewed videos lately were ${w.join(', ')}: keep that energy but do not reuse their jokes or title words.`);
-  parts.push('Use a new animal and a new idea. Use one of the trends if it fits the character. Keep the same answer format.');
-  return parts.join(' ');
+/** What the page shows: the trend itself is chosen when the run starts. */
+export function nextMessage(channelId: number): string {
+  if (!smartOn(channelId, 'smartPrompts')) return 'next';
+  const n = listTrends(channelId).filter((t) => t.usable).length;
+  return n ? buildNextMessage({ name: `one of ${n} trends, picked by Jev when the run starts` }) : 'next';
+}
+
+/** Index drawn in proportion to `weights` (all zero or empty: the first). */
+export function weightedIndex(weights: number[], rng: () => number = Math.random): number {
+  const total = weights.reduce((a, b) => a + Math.max(0, b), 0);
+  if (!(total > 0)) return 0;
+  let r = rng() * total;
+  for (let i = 0; i < weights.length; i++) {
+    r -= Math.max(0, weights[i]);
+    if (r < 0) return i;
+  }
+  return weights.length - 1;
+}
+
+/** Jev: which of these trends is getting the most attention right now? Probabilities per trend, or null. */
+async function trendHeat(trends: Array<{ name: string; detail: string; views?: number | null }>): Promise<number[] | null> {
+  if (!jevAvailable() || trends.length < 2) return null;
+  const key = (t: { name: string }, i: number) =>
+    `${t.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'trend'}_${i}`;
+  const criteria: Record<string, string> = {};
+  trends.forEach((t, i) => {
+    criteria[key(t, i)] = `${t.name}${t.detail ? ` — ${t.detail}` : ''}${t.views ? ` (${t.views.toLocaleString('en-US')} views)` : ''}`;
+  });
+  try {
+    const res = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.TYPESAFE_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'jev-latest',
+        state: { today: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) },
+        questions: {
+          hottest: {
+            type: 'choice',
+            instructions: 'Which of these trends is getting the most attention from viewers on TikTok and YouTube Shorts right now?',
+            criteria,
+          },
+        },
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return null;
+    const probs: Record<string, number> = (await res.json())?.answers?.hottest?.probabilities || {};
+    const out = trends.map((t, i) => Number(probs[key(t, i)]) || 0);
+    return out.some((v) => v > 0) ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------- the manager: test new trends, repeat winners
+
+/** A video is a winner when it got at least this many views AND twice the channel's typical (median) video. */
+export const WIN_MIN_VIEWS = 20;
+/** Share of runs that test an untried trend while proven winners exist (before any winner: every run tests). */
+export const EXPLORE_RATE = 0.35;
+
+export interface TrendScore {
+  name: string;
+  detail: string;
+  /** Videos made with this trend, and their average total views (TikTok + YouTube). */
+  videos: number;
+  avgViews: number | null;
+  winner: boolean;
+  /** Still in the current trend list and rated kid-safe + a fit. */
+  usable: boolean;
+}
+
+const median = (xs: number[]) => {
+  if (!xs.length) return 0;
+  const v = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(v.length / 2);
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+};
+
+/** Views per video (both platforms added) for this channel's videos, keyed by job id. */
+function viewsByJob(channelId: number): Map<string, number> {
+  const rows = db
+    .prepare('SELECT job_id, SUM(views) AS v FROM video_stats WHERE channel_id = ? AND job_id IS NOT NULL GROUP BY job_id')
+    .all(channelId) as Array<{ job_id: string; v: number }>;
+  return new Map(rows.map((r) => [r.job_id, r.v]));
+}
+
+export function winnerThreshold(allViews: number[]): number {
+  return Math.max(WIN_MIN_VIEWS, 2 * median(allViews));
+}
+
+/** Titles of this channel's winning videos: their ideas may be repeated. */
+export function winnerTitles(channelId: number): string[] {
+  const views = viewsByJob(channelId);
+  const bar = winnerThreshold([...views.values()]);
+  const jobs = db.prepare('SELECT id, concept_title FROM jobs WHERE channel_id = ? AND concept_title IS NOT NULL').all(channelId) as any[];
+  return jobs.filter((j) => (views.get(j.id) ?? 0) >= bar).map((j) => String(j.concept_title));
+}
+
+/** Every trend the channel has used or can use, with how its videos did. */
+export function trendScores(channelId: number): TrendScore[] {
+  const views = viewsByJob(channelId);
+  const bar = winnerThreshold([...views.values()]);
+  const byTrend = new Map<string, number[]>();
+  for (const j of db.prepare('SELECT id, trend FROM jobs WHERE channel_id = ? AND trend IS NOT NULL').all(channelId) as any[]) {
+    if (!views.has(j.id)) continue; // not measured yet: neither a winner nor a loser
+    byTrend.set(j.trend, [...(byTrend.get(j.trend) || []), views.get(j.id)!]);
+  }
+  const usable = listTrends(channelId).filter((t) => t.usable);
+  const names = new Set([...usable.map((t) => t.name), ...byTrend.keys()]);
+  return [...names].map((name) => {
+    const v = byTrend.get(name) || [];
+    const avg = v.length ? v.reduce((x, y) => x + y, 0) / v.length : null;
+    const t = usable.find((u) => u.name === name);
+    return { name, detail: t?.detail || '', videos: v.length, avgViews: avg, winner: avg !== null && avg >= bar, usable: !!t };
+  });
+}
+
+export interface TrendDecision {
+  trend: { name: string; detail: string } | null;
+  mode: 'test' | 'repeat' | 'none';
+  reason: string;
+}
+
+/** Jev as marketing manager: which trend should the next video use to grow views? Probabilities per candidate. */
+async function managerChoice(candidates: TrendScore[], typicalViews: number): Promise<number[] | null> {
+  if (!jevAvailable() || candidates.length < 2) return null;
+  const key = (t: { name: string }, i: number) =>
+    `${t.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'trend'}_${i}`;
+  const criteria: Record<string, string> = {};
+  candidates.forEach((t, i) => {
+    criteria[key(t, i)] =
+      t.videos > 0
+        ? `${t.name}: our ${t.videos} video(s) with it averaged ${Math.round(t.avgViews || 0)} views${t.winner ? ' (a proven winner)' : ''}`
+        : `${t.name}: not tried yet${t.detail ? ` — ${t.detail}` : ''}`;
+  });
+  try {
+    const res = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.TYPESAFE_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'jev-latest',
+        state: {
+          today: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
+          our_typical_video_views: Math.round(typicalViews),
+        },
+        questions: {
+          manager: {
+            type: 'choice',
+            instructions:
+              "As the kids' channel's social media marketing manager, which trend should the next short video use to get the most views?",
+            criteria,
+          },
+        },
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return null;
+    const probs: Record<string, number> = (await res.json())?.answers?.manager?.probabilities || {};
+    const out = candidates.map((t, i) => Number(probs[key(t, i)]) || 0);
+    return out.some((v) => v > 0) ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The trend for this run, decided like a marketing manager:
+ *  - TEST: until a trend has proven itself (and on EXPLORE_RATE of runs after that), try an untried trend, picked by
+ *    Jev's "most attention right now" weights.
+ *  - REPEAT: otherwise use the trends that WORKED. Jev (as manager) weighs proven winners against everything else,
+ *    with each trend's real average views beside it; a winner can come back as often as it keeps winning.
+ * Without Jev the same plan runs on the numbers alone. The decision is recorded for the page.
+ */
+export async function pickTrendForRun(channelId: number, rng: () => number = Math.random): Promise<TrendDecision> {
+  const scores = trendScores(channelId);
+  const used = readInsightsState(channelId).usedTrends || [];
+  const recent = new Set(used.slice(-RECENT_TRENDS));
+  const winners = scores.filter((t) => t.winner);
+  const untried = scores.filter((t) => t.usable && t.videos === 0 && !recent.has(t.name));
+  const typical = median([...viewsByJob(channelId).values()]);
+  let decision: TrendDecision;
+
+  if (untried.length && (!winners.length || rng() < EXPLORE_RATE)) {
+    const heat = await trendHeat(untried);
+    const t = untried[weightedIndex(heat ? heat.map((p) => Math.sqrt(p) + 0.05) : untried.map(() => 1), rng)];
+    decision = {
+      trend: t,
+      mode: 'test',
+      reason: `Testing a new trend (${untried.length} not tried yet${winners.length ? `; ${winners.length} proven winner(s) on hold this time` : ''}).`,
+    };
+  } else {
+    // Winners always; other tried trends and fresh ones too, unless they were just used and did not win.
+    const pool = scores.filter((t) => t.winner || ((t.usable || t.videos > 0) && !recent.has(t.name)));
+    const all = pool.length ? pool : scores.filter((t) => t.usable || t.videos > 0);
+    // Never the same trend twice in a row unless it is a winner.
+    const fresh = all.filter((t) => t.winner || t.name !== used[used.length - 1]);
+    const candidates = fresh.length ? fresh : all;
+    if (!candidates.length) return { trend: null, mode: 'none', reason: 'No usable trends yet: refresh insights.' };
+    const jev = await managerChoice(candidates, typical);
+    // Numbers alone: a trend's average views (winners clearly ahead); untried ones count as a typical video.
+    const byViews = candidates.map((t) => (t.avgViews ?? typical) + 1);
+    const weights = jev ? jev.map((p, i) => p + 0.02 * (byViews[i] / Math.max(...byViews))) : byViews;
+    const t = candidates[weightedIndex(weights, rng)];
+    decision = {
+      trend: t,
+      mode: t.winner ? 'repeat' : 'test',
+      reason: t.winner
+        ? `Repeating a winner: its videos averaged ${Math.round(t.avgViews || 0)} views (typical ${Math.round(typical)}).`
+        : `Trying "${t.name}"${t.videos ? ` again (avg ${Math.round(t.avgViews || 0)} views so far)` : ''}${jev ? ', chosen by Jev' : ''}.`,
+    };
+  }
+  writeInsightsState(channelId, {
+    usedTrends: [...used, decision.trend!.name].slice(-20),
+    lastDecision: { at: new Date().toISOString(), trend: decision.trend!.name, mode: decision.mode, reason: decision.reason },
+  });
+  console.log(`[insights] channel ${channelId}: ${decision.mode} "${decision.trend!.name}". ${decision.reason}`);
+  return decision;
+}
+
+/** The message for a run that is starting. Picks (and records) this video's trend. */
+export async function nextMessageForRun(channelId: number): Promise<{ message: string; trend: string | null }> {
+  if (!smartOn(channelId, 'smartPrompts')) return { message: 'next', trend: null };
+  const d = await pickTrendForRun(channelId);
+  if (!d.trend) return { message: 'next', trend: null };
+  // A winner may be repeated on purpose: say so, so ChatGPT keeps what worked (with a new animal).
+  const message =
+    d.mode === 'repeat'
+      ? `next. Base this video on the trend "${d.trend.name.slice(0, 60)}": our videos with it get the most views, so keep that style and music, with a new animal. Keep the same answer format.`
+      : buildNextMessage(d.trend);
+  return { message, trend: d.trend.name };
 }
 
 // ---------------------------------------------------------------- rotation (sounds, comments)
@@ -515,6 +742,9 @@ interface RotationState {
   comment?: string;
   collectedAt?: string;
   privateAccount?: boolean;
+  /** Trends used by recent runs, oldest first. */
+  usedTrends?: string[];
+  lastDecision?: { at: string; trend: string; mode: string; reason: string };
 }
 const stateFile = (channelId: number) => path.join(channelDir(channelId), 'insights_state.json');
 
@@ -581,6 +811,8 @@ export function insightsView(channelId: number) {
     videos: topVideos(channelId, 10),
     bestHours,
     nextMessage: nextMessage(channelId),
+    lastDecision: st.lastDecision || null,
+    trendScores: trendScores(channelId).filter((t) => t.videos > 0).sort((a, b) => (b.avgViews ?? 0) - (a.avgViews ?? 0)),
   };
 }
 

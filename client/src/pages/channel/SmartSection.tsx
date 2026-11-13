@@ -207,7 +207,7 @@ export function SmartSection({ channel }: { channel: ChannelView }) {
 
           <FeatureSwitch
             label="Smarter prompts"
-            help="Tell the ChatGPT chat which trends fit and which videos got the most views, so the next idea follows what works."
+            help="Each video follows one trend that Jev picks like a marketing manager: new trends get tested, and the ones that get views are repeated."
             checked={s.smartPrompts}
             disabled={saving}
             onChange={(v) => void save({ smartPrompts: v })}
@@ -285,6 +285,37 @@ export function SmartSection({ channel }: { channel: ChannelView }) {
                 {data.refresh.message}
               </p>
             )}
+
+            <div>
+              <h4 className="mb-2 text-[13px] font-semibold">Jev's strategy</h4>
+              <p className="text-[14px]">
+                Tests new trends first, then repeats the ones that get views (as often as they keep winning).
+              </p>
+              {data.lastDecision ? (
+                <p className="mt-1 text-[13px] text-ink-soft">
+                  Last video: <span className="font-semibold text-ink">{data.lastDecision.trend}</span>.{' '}
+                  {data.lastDecision.reason}
+                </p>
+              ) : (
+                <p className="mt-1 text-[13px] text-ink-soft">No video made with a trend yet.</p>
+              )}
+              {data.trendScores.length > 0 && (
+                <ul className="mt-2 space-y-1 text-[13px]">
+                  {data.trendScores.slice(0, 8).map((t) => (
+                    <li key={t.name}>
+                      <span className="font-semibold">{t.name}</span>
+                      <span className="text-ink-soft">
+                        {' '}
+                        — {t.videos} video{t.videos === 1 ? '' : 's'}, avg {Math.round(t.avgViews ?? 0).toLocaleString()} views
+                      </span>
+                      {t.winner && (
+                        <span className="ml-2 rounded bg-leaf-wash px-1.5 py-0.5 text-[12px] font-semibold text-leaf-ink">Winner</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
 
             <div>
               <h4 className="mb-2 text-[13px] font-semibold">Trends that fit</h4>

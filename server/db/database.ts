@@ -55,6 +55,7 @@ export function initDatabase(): void {
   addColumnIfMissing('runs', 'timings_json', 'TEXT');
   addColumnIfMissing('channels', 'smart_json', 'TEXT');
   addColumnIfMissing('jobs', 'hook_score', 'REAL');
+  addColumnIfMissing('jobs', 'trend', 'TEXT');
   // Smart features (server/engine/insights.ts): views per posted video, and trends with Jev's judgments.
   db.exec(`
     CREATE TABLE IF NOT EXISTS video_stats (

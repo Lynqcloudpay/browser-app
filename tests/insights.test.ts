@@ -13,6 +13,11 @@ import {
   matchJob,
   nextInRotation,
   nextMessage,
+  nextMessageForRun,
+  weightedIndex,
+  pickTrendForRun,
+  trendScores,
+  winnerTitles,
   parseCount,
   parseSmart,
   parseTikTokStudioPosts,
@@ -107,7 +112,6 @@ async function run(): Promise<void> {
   assert.strictEqual(repeatsEarlierIdea('This Baby Penguin Slides Into a SNOWBALL FIGHT! 🍎🐧', history), null);
   assert.strictEqual(repeatsEarlierIdea('Mr. Apple & Friends Dance Battle', ['Mr. Apple & Friends Dance Battle']), 'Mr. Apple & Friends Dance Battle');
   assert.ok(retryMessage('A', 'B').startsWith('next.') && retryMessage('A', 'B').includes('"B"'));
-  assert.ok(!buildNextMessage([], ['Baby Tapir Dance']).includes('Use one of these ideas if it fits'), 'winners are not offered as ideas to copy');
 
   // TikTok link: the row of THIS post, never a failed row or another video's row
   const rows = [
@@ -138,9 +142,14 @@ async function run(): Promise<void> {
   assert.ok(isUsable({ kid_safe: 0.9, fits: 0.8 }));
   assert.ok(!isUsable({ kid_safe: 0.5, fits: 0.9 }), 'not clearly safe: never used');
   assert.ok(!isUsable({ kid_safe: null, fits: null }), 'unjudged (no Jev): never used');
-  assert.strictEqual(buildNextMessage([], []), 'next');
-  const msg = buildNextMessage(['Capybara spa', 'Penguin slide'], ['Baby Tapir Dance']);
-  assert.ok(msg.startsWith('next.') && msg.includes('Capybara spa') && msg.includes('"Baby Tapir Dance"'));
+  assert.strictEqual(buildNextMessage(null), 'next');
+  const msg = buildNextMessage({ name: 'Capybara spa', detail: 'calm and cute' });
+  assert.ok(msg.startsWith('next.') && msg.includes('"Capybara spa" (calm and cute)'));
+  assert.ok(msg.length < 260, 'short: it is typed into ChatGPT');
+  assert.strictEqual(weightedIndex([0, 1, 0], () => 0.5), 1);
+  assert.strictEqual(weightedIndex([1, 3], () => 0.2), 0);
+  assert.strictEqual(weightedIndex([1, 3], () => 0.3), 1);
+  assert.strictEqual(weightedIndex([], () => 0.5), 0);
   assert.strictEqual(nextInRotation(['a', 'b', 'c'], undefined), 'a');
   assert.strictEqual(nextInRotation(['a', 'b', 'c'], 'c'), 'a');
   assert.strictEqual(nextInRotation(['a', 'b'], 'gone'), 'a');
@@ -179,6 +188,7 @@ async function run(): Promise<void> {
     saveStats(id, 'tiktok', parseTikTokStudioPosts(TIKTOK_POSTS)); // a second read updates, never doubles
     saveTrends(id, 'tiktok', [
       { name: 'Baby Capybara Spa Day', detail: 'Nature', views: 1, kidSafe: 0.95, fits: 0.9 },
+      { name: 'Penguin Slide Challenge', detail: '', views: 3, kidSafe: 0.92, fits: 0.85 },
       { name: 'UFC fight', detail: '', views: 2, kidSafe: 0.05, fits: 0.1 },
     ]);
     const top = topVideos(id, 5);
@@ -190,10 +200,16 @@ async function run(): Promise<void> {
       body: JSON.stringify({ enabled: true, soundRotation: true, sounds: ['Song A', 'Song B'], firstComment: true }),
     })).json();
     assert.strictEqual(on.settings.enabled, true);
-    assert.strictEqual(on.trends[0].name, 'Baby Capybara Spa Day', 'usable trend first');
+    assert.ok(on.trends[0].usable && on.trends[1].usable, 'usable trends first');
     assert.strictEqual(on.trends.find((t: any) => t.name === 'UFC fight').usable, false);
-    assert.ok(on.nextMessage.includes('Baby Capybara Spa Day') && !on.nextMessage.includes('UFC'), 'only safe, fitting trends reach ChatGPT');
+    assert.ok(on.nextMessage.startsWith('next.') && on.nextMessage.includes('one of 2 trends'), 'page preview');
     assert.strictEqual(nextMessage(id), on.nextMessage);
+    // Each run gets ONE trend; never the unsafe one, and never the same one twice in a row.
+    const picks: string[] = [];
+    for (let i = 0; i < 6; i++) picks.push((await nextMessageForRun(id)).message);
+    assert.ok(picks.every((m) => !m.includes('UFC')), 'unsafe trend never sent');
+    assert.ok(picks.every((m) => m.includes('Baby Capybara Spa Day') || m.includes('Penguin Slide Challenge')));
+    for (let i = 1; i < picks.length; i++) assert.notStrictEqual(picks[i], picks[i - 1], 'a different trend each run');
     assert.strictEqual(collectDue(id), true, 'never collected: due');
     writeInsightsState(id, { collectedAt: new Date().toISOString() });
     assert.strictEqual(collectDue(id), false, 'collected just now: not due');
@@ -213,6 +229,33 @@ async function run(): Promise<void> {
     assert.strictEqual(master.settings.soundRotation, true, 'master off keeps the choices for later');
     assert.strictEqual(tikTokSoundForRun(id, 'Own sound'), 'Own sound', 'master off: every feature off');
     assert.strictEqual(commentForRun(id), null);
+
+    // The manager: test untried trends, repeat what got views
+    const ch2: any = await (await fetch(`${base}/api/channels`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Mr. Kiwi' }),
+    })).json();
+    const k = ch2.id;
+    await fetch(`${base}/api/channels/${k}/smart`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true }) });
+    const addJob = (jid: string, title: string, trend: string, views: number) => {
+      db.prepare("INSERT INTO jobs (id, channel_id, concept_title, trend, state, created_at, updated_at) VALUES (?, ?, ?, ?, 'published', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").run(jid, k, title, trend);
+      db.prepare("INSERT INTO video_stats (channel_id, platform, title, posted_at, views, job_id, fetched_at) VALUES (?, 'tiktok', ?, ?, ?, ?, 'now')").run(k, title, jid, views, jid);
+    };
+    addJob('k1', "Kiwi's SNOOT DANCE Party", 'Dance A', 200);
+    addJob('k2', 'Kiwi Bakes a Cake', 'Dance B', 2);
+    addJob('k3', 'Kiwi Goes Skiing', 'Dance B', 3);
+    saveTrends(k, 'chatgpt', ['Dance A', 'Dance B', 'Dance C'].map((name) => ({ name, detail: '', views: null, kidSafe: 0.9, fits: 0.9 })));
+    const scores = trendScores(k);
+    assert.deepStrictEqual(scores.filter((t) => t.winner).map((t) => t.name), ['Dance A'], '200 views vs typical 3: a winner');
+    assert.deepStrictEqual(winnerTitles(k), ["Kiwi's SNOOT DANCE Party"], "a winner's idea may be repeated");
+    const explore = await pickTrendForRun(k, () => 0.1);
+    assert.deepStrictEqual([explore.mode, explore.trend?.name], ['test', 'Dance C'], 'below the explore rate: test the untried trend');
+    const exploit = await pickTrendForRun(k, () => 0.9);
+    assert.deepStrictEqual([exploit.mode, exploit.trend?.name], ['repeat', 'Dance A'], 'otherwise repeat the winner');
+    const again = await pickTrendForRun(k, () => 0.9);
+    assert.strictEqual(again.trend?.name, 'Dance A', 'a winner can repeat back to back');
+    assert.ok((await nextMessageForRun(k)).message.startsWith('next.'));
+    const view: any = await (await fetch(`${base}/api/channels/${k}/insights`)).json();
+    assert.ok(view.lastDecision && view.trendScores[0].name === 'Dance A', 'the page shows the decision and what worked');
     console.log('ok insights through the API');
   } finally {
     server.close();

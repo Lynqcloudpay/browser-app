@@ -108,8 +108,11 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
   default, stored in `channels.smart_json`): after a post (at most every 6 h) or "Refresh now", `collectInsights` reads views
   from TikTok Studio → Posts and YouTube Studio → Shorts (`video_stats`), TikTok Studio → Inspiration topics, and a
   ChatGPT **temporary** chat research answer (`TRENDLIST`/`ENDLIST`; the page text loses the bullets, so lines are
-  "Name: why"); Jev rates each trend kid-safe (>= 0.7) and a fit (>= 0.75) (`trends`). Smart prompts send "next." plus usable
-  trends and top videos (`nextMessage`); title check (`rateHook`) asks ChatGPT once more below 0.4; best times draws 30
+  "Name: why"); Jev rates each trend kid-safe (>= 0.7) and a fit (>= 0.75) (`trends`). Smart prompts send "next." plus ONE usable
+  trend per run, chosen like a marketing manager (`pickTrendForRun`): untried trends are tested (every run until a
+  winner exists, then 35%), otherwise Jev's manager Choice (with each trend's real average views) picks, and a winner
+  (avg views >= max(20, 2x the channel median), `jobs.trend` + `video_stats`) may repeat, even back to back. A
+  winner's title may be copied; `repeatsEarlierIdea` only guards non-winners; title check (`rateHook`) asks ChatGPT once more below 0.4; best times draws 30
   random days and keeps the best-viewed hours (`pickBestDay`); TikTok sounds and first comments rotate
   (`nextInRotation`). The TikTok first comment uses `[data-e2e="comment-icon"|"comment-input"|"comment-post"]`. YouTube
   made-for-kids videos have comments disabled, so there is no YouTube comment. `isPrivateAccount` on tiktok.com/explore

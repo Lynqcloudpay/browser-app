@@ -31,7 +31,7 @@ import {
   commentForRun,
   HOOK_RETRY_BELOW,
   judgeTrends,
-  nextMessage,
+  nextMessageForRun,
   parseTikTokStudioPosts,
   parseTikTokTopics,
   parseTrendList,
@@ -45,6 +45,7 @@ import {
   writeInsightsState,
   channelProfile,
   recentTitles,
+  winnerTitles,
   repeatsEarlierIdea,
   retryMessage,
   type TrendItem,
@@ -3915,7 +3916,7 @@ export class ChannelBrowserAgent {
     this.grokPrepAbandoned = false;
     const grokReady = this.prepareGrok(prepDuration, prepResolution);
     // A retry sends "next" again, which only asks ChatGPT for another prompt: nothing is spent or posted.
-    const message = nextMessage(this.channelId);
+    const { message, trend: runTrend } = await nextMessageForRun(this.channelId);
     if (message !== 'next') console.log(`[ChannelBrowserAgent-${this.channelId}] Smart prompt message: ${message}`);
     let chatGptResult = await this.retryStep('Writing the prompt in ChatGPT', say, async (n) => {
       if (n > 1) say('Writing a new prompt in ChatGPT (second try)…');
@@ -3924,7 +3925,9 @@ export class ChannelBrowserAgent {
 
     // Never make the same video twice: a title that copies an earlier video's distinctive phrase ("SNOOT DANCE") asks
     // ChatGPT for a different idea, at most twice. Nothing is spent yet; Grok has not been asked.
-    const earlier = recentTitles(this.channelId);
+    // A winning video's idea may come back on purpose (the manager repeats what gets views): only non-winners count.
+    const winners = new Set(winnerTitles(this.channelId));
+    const earlier = recentTitles(this.channelId).filter((t) => !winners.has(t));
     for (let tries = 0; ; tries++) {
       const copied = repeatsEarlierIdea(chatGptResult.scriptPackage.concept_title, earlier);
       if (!copied) break;
@@ -4039,6 +4042,7 @@ export class ChannelBrowserAgent {
     );
     options.onJob?.(jobId);
     if (hookScore !== null) db.prepare('UPDATE jobs SET hook_score = ? WHERE id = ?').run(hookScore, jobId);
+    if (runTrend) db.prepare('UPDATE jobs SET trend = ? WHERE id = ?').run(runTrend, jobId);
 
     say('Picking a cover frame…');
     const coverPath = await this.makeCoverImage(finalVideoPath, jobId);
