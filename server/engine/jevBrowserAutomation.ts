@@ -870,6 +870,14 @@ export class ChannelBrowserAgent {
       // Writing-card format (e.g. Mr Watermelon): no "Plain text" code block; the prompt is the body of a ChatGPT
       // "writing" card — a <header> with the story title (or just "Writing"), then the prompt text. The newest card
       // that reads as a video prompt wins. Read separately so the code-block path above is unchanged.
+      // A reply can hold several cards: the video prompt, then a title card and a YouTube "description — SEO" card.
+      // The description talks about a "15-second animated video" too, so it passes isVideoPromptText; as the newest
+      // card it was sent to Grok (Mr. Marshmallow). A video prompt states the frame ("9:16" / "vertical"); a
+      // description has hashtags or asks viewers to subscribe.
+      function isDescriptionText(text: string): boolean {
+        const hashtags = (text.match(/(^|\s)#[\p{L}\d_]+/gu) || []).length;
+        return hashtags >= 3 || /\bsubscribe\b/i.test(text) || !/9\s*:\s*16|vertical/i.test(text);
+      }
       let writingPrompt = '';
       let writingTitle = '';
       for (const card of Array.from(document.querySelectorAll('[data-testid="chatgpt-writing-block"]'))) {
@@ -878,6 +886,7 @@ export class ChannelBrowserAgent {
         const headText = header ? ((header as HTMLElement).innerText || '').trim() : '';
         const body = headText && full.startsWith(headText) ? full.slice(headText.length).trim() : full;
         if (!isVideoPromptText(body)) continue; // e.g. a title + hashtags card
+        if (isDescriptionText(body)) continue; // e.g. a YouTube description / SEO card after the prompt
         writingPrompt = body;
         writingTitle = headText && !/^(writing|start writing)$/i.test(headText) ? headText : '';
         if (!writingTitle) {
@@ -3597,11 +3606,22 @@ export class ChannelBrowserAgent {
         await page.keyboard.press('Escape').catch(() => {});
       }
 
+      // The share dialog usually has no link: read the newest Reel from the account's own Reels tab instead. Never
+      // fall back to instagram.com itself (a link that opens the home page, not the video).
+      const reelUrl =
+        shareUrl ||
+        (confirmed
+          ? await this.instagramReelLink(page).catch((e: any) => {
+              console.warn('[ChannelBrowserAgent] Could not read the new Instagram Reel link:', e?.message || e);
+              return null;
+            })
+          : null);
+
       if (confirmed) {
-        console.log('[ChannelBrowserAgent] Video shared as Instagram Reel!');
-        return { success: true, verified: true, shareUrl: shareUrl || 'https://www.instagram.com/', message: 'Video successfully uploaded and shared to Instagram Reels.' };
+        console.log(`[ChannelBrowserAgent] Video shared as Instagram Reel! ${reelUrl || '(link not found yet)'}`);
+        return { success: true, verified: true, shareUrl: reelUrl || undefined, message: 'Video successfully uploaded and shared to Instagram Reels.' };
       }
-      return { success: true, verified: false, shareUrl: shareUrl || 'https://www.instagram.com/', message: 'Instagram Share was clicked, confirmation pending.' };
+      return { success: true, verified: false, shareUrl: reelUrl || undefined, message: 'Instagram Share was clicked, confirmation pending.' };
     } catch (err: any) {
       await snap('failed');
       console.warn('[ChannelBrowserAgent] Instagram upload error:', err.message);
@@ -3610,6 +3630,42 @@ export class ChannelBrowserAgent {
     } finally {
       page.off('filechooser', onChooser);
     }
+  }
+
+  /**
+   * Link of the Reel just shared: the newest non-pinned Reel on the account's own Reels tab that no earlier video of
+   * this channel saved. Instagram lists a new Reel only after processing, so this waits up to 60 seconds.
+   */
+  private async instagramReelLink(page: Page): Promise<string | null> {
+    const profileHref = await page
+      .getByRole('link', { name: /^\s*Profile\s*$/i })
+      .or(page.locator('a:has(img[alt$="profile picture" i])'))
+      .first()
+      .getAttribute('href', { timeout: 5000 })
+      .catch(() => null);
+    const user = (profileHref || '').match(/^(?:https:\/\/www\.instagram\.com)?\/([A-Za-z0-9._]+)\/?$/)?.[1];
+    if (!user) return null;
+    const known = (
+      db.prepare('SELECT instagram_share_url AS u FROM jobs WHERE channel_id = ? AND instagram_share_url IS NOT NULL').all(this.channelId) as Array<{ u: string }>
+    ).map((r) => r.u);
+    await page.goto(`https://www.instagram.com/${user}/reels/`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    const start = Date.now();
+    while (Date.now() - start < 60_000) {
+      await page.waitForTimeout(4000);
+      const items = await page
+        .locator('a[href*="/reel/"], a[href*="/p/"]')
+        .evaluateAll((els) =>
+          els.map((a) => ({
+            href: (a as HTMLAnchorElement).href,
+            pinned: !!a.querySelector('svg[aria-label*="pinned" i], [aria-label*="pinned" i]'),
+          }))
+        )
+        .catch(() => [] as Array<{ href: string; pinned: boolean }>);
+      const link = pickInstagramReelLink(items, known);
+      if (link) return link;
+      await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+    }
+    return null;
   }
 
   // ───────────────────────── Facebook Reels upload ─────────────────────────
@@ -3761,7 +3817,8 @@ export class ChannelBrowserAgent {
 
       await snap(confirmed ? 'published' : 'unconfirmed');
       const currentUrl = page.url();
-      const shareUrl = currentUrl.includes('/reel/') ? currentUrl : 'https://www.facebook.com/';
+      // No link rather than facebook.com itself, which opens the feed instead of the video.
+      const shareUrl = currentUrl.includes('/reel/') ? currentUrl : undefined;
 
       if (confirmed) {
         console.log('[ChannelBrowserAgent] Video published as Facebook Reel!');
@@ -4834,6 +4891,24 @@ export async function tikTokVideoLink(page: Page, title = ''): Promise<string | 
     )
     .catch(() => []);
   return pickTikTokLink(items, title);
+}
+
+/**
+ * Pure part of instagramReelLink, for tests: the first Reel/post link on the account's grid that is not pinned (pinned
+ * posts sit first whatever their age) and was not saved for an earlier video. Links are returned in one canonical form.
+ */
+export function pickInstagramReelLink(items: Array<{ href: string; pinned: boolean }>, known: string[] = []): string | null {
+  const canon = (h: string) => {
+    const m = (h || '').match(/instagram\.com\/(?:[A-Za-z0-9._]+\/)?(reel|p)\/([A-Za-z0-9_-]+)/);
+    return m ? `https://www.instagram.com/${m[1]}/${m[2]}/` : null;
+  };
+  const seen = new Set(known.map(canon).filter(Boolean) as string[]);
+  for (const item of items) {
+    const url = canon(item.href);
+    if (!url || item.pinned) continue;
+    return seen.has(url) ? null : url; // the newest is an old video: the new Reel is not listed yet
+  }
+  return null;
 }
 
 /** Pure part of tikTokVideoLink, for tests. */

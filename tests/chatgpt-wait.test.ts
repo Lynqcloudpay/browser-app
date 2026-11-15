@@ -187,6 +187,30 @@ async function main(): Promise<void> {
       console.log(`ok writing-card format ${withStop ? 'with' : 'WITHOUT'} a Stop button (${secs}s, ${got.grokPrompt.length} chars)`);
     }
 
+    // ── Mr. Marshmallow: prompt card, then a title card and a YouTube "description — SEO" card, all headed "Writing" ──
+    // The description mentions a "15-second animated video" and is the newest card; it was once pasted into Grok.
+    const mmPrompt = [
+      'Create an ADORABLE, FUNNY, EXACTLY 15-SECOND vertical 9:16 3D animated children\'s YouTube Short using the uploaded reference image.',
+      'The baby parrot character opens a pirate chest and finds golden treasure; the scene stays bright and simple.',
+      'Cheerful original pirate music and one metallic CLINK. No morphing or duplicate characters.',
+    ];
+    const mmDescription = [
+      'WAIT! DID THAT BABY PARROT JUST TRY TO EAT A GOLDEN TREASURE?!',
+      'Welcome back to Marshmallow Village for another adorable and hilarious 3D animated kids cartoon!',
+      'Watch this funny 15-second animated YouTube Short for the cutest pirate treasure surprise!',
+      'Subscribe to Mr. Marshmallow for more funny animal cartoons and characters!',
+      '#Shorts #MrMarshmallow #PirateTreasure #FunnyParrot #MarshmallowVillage',
+    ];
+    await page.setContent(`<!doctype html><html><body><main>
+      ${writingCard('Writing', mmPrompt)}
+      <h3>YouTube Shorts Title</h3>${writingCard('Writing', ['The Pirate Parrot Tried to EAT the Golden Treasure! #Shorts'])}
+      <h3>YouTube Description — SEO Optimized</h3>${writingCard('Writing', mmDescription)}
+    </main></body></html>`);
+    const mm = await agent.extractPromptAndTitleFromChatGpt(page);
+    assert(mm.writingPrompt.includes('pirate chest'), `the video prompt card is read, not the description (got "${mm.writingPrompt.slice(0, 80)}")`);
+    assert(!/subscribe|#MrMarshmallow/i.test(mm.writingPrompt), 'the SEO description is never read as the prompt');
+    console.log('ok prompt card chosen over a later SEO description card');
+
     // ── channel 1's format must not change: its title/hashtag card is not mistaken for a prompt ──
     await page.setContent(standInPage());
     const ch1 = await agent.extractPromptAndTitleFromChatGpt(page);

@@ -35,6 +35,12 @@ export function locateMedia(savedPath: string | null | undefined): { file: strin
   return null;
 }
 
+/** Early Instagram/Facebook posts saved the site's home page as their link; that opens the feed, not the video. */
+export function videoLink(url?: string | null): string | null {
+  if (!url) return null;
+  return /^https?:\/\/(www\.)?(instagram|facebook)\.com\/?$/i.test(url.trim()) ? null : url;
+}
+
 function toVideo(row: any) {
   const video = locateMedia(row.video_path);
   // Older videos have no saved cover path, but their cover is named after the job.
@@ -69,8 +75,8 @@ function toVideo(row: any) {
     size_mb: sizeMb,
     tiktok_url: row.tiktok_share_url || null,
     youtube_url: row.youtube_share_url || null,
-    instagram_url: row.instagram_share_url || null,
-    facebook_url: row.facebook_share_url || null,
+    instagram_url: videoLink(row.instagram_share_url),
+    facebook_url: videoLink(row.facebook_share_url),
     tiktok_status: row.tiktok_status || null,
     youtube_status: row.youtube_status || null,
     instagram_status: row.instagram_status || null,
