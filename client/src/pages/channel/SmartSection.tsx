@@ -199,7 +199,7 @@ export function SmartSection({ channel }: { channel: ChannelView }) {
         <>
           <FeatureSwitch
             label="Read views and trends"
-            help="After a video posts (at most every 6 hours), read views from TikTok and YouTube Studio, TikTok's trending topics, and ask ChatGPT what is trending. Jev keeps only kid-safe trends that fit this channel."
+            help="When you click Refresh now, read views from TikTok and YouTube Studio, TikTok's trending topics, and ask ChatGPT what is trending. Jev keeps only kid-safe trends that fit this channel. Never runs by itself after a video."
             checked={s.collect}
             disabled={saving}
             onChange={(v) => void save({ collect: v })}

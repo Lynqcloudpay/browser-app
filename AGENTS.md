@@ -105,7 +105,7 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
 - **YouTube "Verify it's you"** is never clicked through: before Publish the upload fails with a clear message; after
   Publish it is reported as unconfirmed (never a failure, or the repost could post twice).
 - **Smart features** (`server/engine/insights.ts`, channel page → Smart features; master switch + one switch each, all off by
-  default, stored in `channels.smart_json`): after a post (at most every 6 h) or "Refresh now", `collectInsights` reads views
+  default, stored in `channels.smart_json`): only on "Refresh now" (never automatically after a post: the owner asked for manual refresh), `collectInsights` reads views
   from TikTok Studio → Posts and YouTube Studio → Shorts (`video_stats`), TikTok Studio → Inspiration topics, and a
   ChatGPT **temporary** chat research answer (`TRENDLIST`/`ENDLIST`; the page text loses the bullets, so lines are
   "Name: why"); Jev rates each trend kid-safe (>= 0.7) and a fit (>= 0.75) (`trends`). Smart prompts send "next." plus ONE usable

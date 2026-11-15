@@ -27,7 +27,6 @@ import {
 } from './channels';
 import { makeMutedVideo, makeVideoWithSong } from './audioMix';
 import {
-  collectDue,
   commentForRun,
   detailsQuestion,
   HOOK_RETRY_BELOW,
@@ -3994,7 +3993,7 @@ export class ChannelBrowserAgent {
    */
   /** The file (and TikTok sound) each platform gets, from the channel's audio settings. */
   /**
-   * Smart features after a post: comment on the new TikTok video, then refresh the insights when they are due.
+   * Smart features after a post: comment on the new TikTok video. Insights are refreshed only with "Refresh now".
    * Best effort and capped in time: nothing here can fail or undo the post.
    */
   private async afterPosting(tiktokUrl: string | undefined, say: (step: string) => void): Promise<void> {
@@ -4006,10 +4005,8 @@ export class ChannelBrowserAgent {
         console.log(`[ChannelBrowserAgent-${this.channelId}] First comment: ${res.ok ? 'posted' : res.message}`);
       }
     }
-    if (collectDue(this.channelId)) {
-      say('Updating insights (views and trends)…');
-      await this.collectInsights(say).catch((err: any) => console.warn(`[insights] collection failed: ${err?.message || err}`));
-    }
+    // Insights (views and trends) are never refreshed here: the owner wants them updated only with "Refresh now",
+    // so a run ends right after posting instead of spending minutes in TikTok Studio, YouTube Studio and ChatGPT.
   }
 
   /** Opens a TikTok video, types `text` in its comment box and posts it. */
