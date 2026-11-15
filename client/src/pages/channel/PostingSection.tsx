@@ -10,7 +10,9 @@ export function PostingSection({ channel, patch }: { channel: ChannelView; patch
   const [saving, setSaving] = useState(false);
 
   const save = async (
-    change: Partial<Pick<ChannelView, 'post_tiktok' | 'post_youtube' | 'youtube_made_for_kids' | 'keep_browser_open'>>,
+    change: Partial<
+      Pick<ChannelView, 'post_tiktok' | 'post_youtube' | 'post_instagram' | 'post_facebook' | 'youtube_made_for_kids' | 'keep_browser_open'>
+    >,
   ) => {
     setSaving(true);
     try {
@@ -22,7 +24,7 @@ export function PostingSection({ channel, patch }: { channel: ChannelView; patch
     }
   };
 
-  const nothingOn = !channel.post_tiktok && !channel.post_youtube;
+  const nothingOn = !channel.post_tiktok && !channel.post_youtube && !channel.post_instagram && !channel.post_facebook;
 
   return (
     <Section title="Where to post" description="Each finished video goes to the platforms turned on here, from the accounts signed in for this channel.">
@@ -33,6 +35,14 @@ export function PostingSection({ channel, patch }: { channel: ChannelView; patch
       <Switch checked={channel.post_youtube} disabled={saving} onChange={(v) => void save({ post_youtube: v })}>
         <span className="block font-semibold">YouTube Shorts</span>
         <span className="block text-[14px] text-ink-soft">Posts publicly to the YouTube channel signed in for this channel.</span>
+      </Switch>
+      <Switch checked={channel.post_instagram} disabled={saving} onChange={(v) => void save({ post_instagram: v })}>
+        <span className="block font-semibold">Instagram Reels</span>
+        <span className="block text-[14px] text-ink-soft">Shares as a Reel to the Instagram account signed in for this channel.</span>
+      </Switch>
+      <Switch checked={channel.post_facebook} disabled={saving} onChange={(v) => void save({ post_facebook: v })}>
+        <span className="block font-semibold">Facebook Reels</span>
+        <span className="block text-[14px] text-ink-soft">Publishes as a Reel to the Facebook account or Page signed in for this channel.</span>
       </Switch>
       {channel.post_youtube && (
         <div className="border-t border-line pt-4">
@@ -46,7 +56,7 @@ export function PostingSection({ channel, patch }: { channel: ChannelView; patch
         <Switch checked={channel.keep_browser_open} disabled={saving} onChange={(v) => void save({ keep_browser_open: v })}>
           <span className="block font-semibold">Keep the browser open between videos</span>
           <span className="block text-[14px] text-ink-soft">
-            Faster: the next video skips opening the browser and checking logins. The TikTok and YouTube tabs are closed after each post to save memory.
+            Faster: the next video skips opening the browser and checking logins. Posting tabs are closed after each post to save memory.
           </span>
         </Switch>
       </div>

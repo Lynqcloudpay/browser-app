@@ -62,20 +62,27 @@ export function stageFromStep(step: string, currentStage: RunStage = 'login'): R
   if (/^writing a new prompt/i.test(step)) next = 'chatgpt';
   else if (/^generating the video/i.test(step)) next = 'grok';
   else if (/cover frame|safety check/i.test(step)) next = 'qa';
-  else if (/^uploading|upload failed|^posted/i.test(step)) next = 'post';
+  else if (/^uploading|upload failed|^posted|(?:tiktok|youtube|instagram|facebook)\s+(?:not\s+posted|upload)/i.test(step)) next = 'post';
   return STAGE_ORDER.indexOf(next) >= STAGE_ORDER.indexOf(currentStage) ? next : currentStage;
 }
 
 /** Turns a finished pipeline result into the one sentence the operator reads, and whether it counts as a success. */
 export function describeResult(result: PipelineResult, republish: boolean): { ok: boolean; message: string } {
-  const platform = (name: string, status: string) => {
+  const platform = (name: string, status?: string) => {
     if (status === 'published') return `${name}: posted`;
     if (status === 'submitted') return `${name}: Post was clicked but ${name} did not confirm it, so check the account`;
     if (status === 'failed') return `${name}: failed`;
     if (status === 'skipped') return `${name}: skipped, not signed in`;
     return '';
   };
-  const parts = [platform('TikTok', result.tiktokStatus), platform('YouTube', result.youtubeStatus)].filter(Boolean).join('. ');
+  const parts = [
+    platform('TikTok', result.tiktokStatus),
+    platform('YouTube', result.youtubeStatus),
+    platform('Instagram', result.instagramStatus),
+    platform('Facebook', result.facebookStatus),
+  ]
+    .filter(Boolean)
+    .join('. ');
   const title = `"${result.title}"`;
 
   if (!result.qaPassed) {
@@ -145,28 +152,48 @@ async function withTimeLimit<T>(agent: ChannelBrowserAgent, work: () => Promise<
 export function platformsToRepost(result: PipelineResult): string[] {
   if (!result.qaPassed) return [];
   return result.postFailed.filter((name) => {
-    const status = name === 'TikTok' ? result.tiktokStatus : result.youtubeStatus;
+    const status =
+      name === 'TikTok'
+        ? result.tiktokStatus
+        : name === 'YouTube'
+          ? result.youtubeStatus
+          : name === 'Instagram'
+            ? result.instagramStatus
+            : name === 'Facebook'
+              ? result.facebookStatus
+              : '';
     return status === 'failed';
   });
 }
 
 /** Combines the first pipeline result with a later re-post of the same video. */
 export function mergeRepost(first: PipelineResult, again: PipelineResult): PipelineResult {
-  const accepted = (s: string) => s === 'published' || s === 'submitted';
-  const tiktokStatus = accepted(again.tiktokStatus) || !accepted(first.tiktokStatus) ? again.tiktokStatus : first.tiktokStatus;
-  const youtubeStatus = accepted(again.youtubeStatus) || !accepted(first.youtubeStatus) ? again.youtubeStatus : first.youtubeStatus;
+  const accepted = (s?: string) => s === 'published' || s === 'submitted';
+  const mergeStatus = (a?: string, b?: string) => (accepted(b) || !accepted(a) ? b : a);
+  const tiktokStatus = mergeStatus(first.tiktokStatus, again.tiktokStatus) || 'off';
+  const youtubeStatus = mergeStatus(first.youtubeStatus, again.youtubeStatus) || 'off';
+  const instagramStatus = mergeStatus(first.instagramStatus, again.instagramStatus);
+  const facebookStatus = mergeStatus(first.facebookStatus, again.facebookStatus);
   const failed = [
     first.postFailed.includes('TikTok') && !accepted(tiktokStatus) ? 'TikTok' : '',
     first.postFailed.includes('YouTube') && !accepted(youtubeStatus) ? 'YouTube' : '',
+    first.postFailed.includes('Instagram') && !accepted(instagramStatus) ? 'Instagram' : '',
+    first.postFailed.includes('Facebook') && !accepted(facebookStatus) ? 'Facebook' : '',
   ].filter(Boolean);
   return {
     ...first,
     tiktokStatus,
     youtubeStatus,
+    instagramStatus,
+    facebookStatus,
     tiktokVerified: first.tiktokVerified || again.tiktokVerified,
     youtubeVerified: first.youtubeVerified || again.youtubeVerified,
+    instagramVerified: first.instagramVerified || again.instagramVerified,
+    facebookVerified: first.facebookVerified || again.facebookVerified,
     tiktokUrl: again.tiktokUrl || first.tiktokUrl,
     youtubeUrl: again.youtubeUrl || first.youtubeUrl,
+    instagramUrl: again.instagramUrl || first.instagramUrl,
+    facebookUrl: again.facebookUrl || first.facebookUrl,
     postedAnywhere: first.postedAnywhere || again.postedAnywhere,
     postedEverywhere: failed.length === 0 && (first.postedEverywhere || again.postedEverywhere),
     postFailed: failed,

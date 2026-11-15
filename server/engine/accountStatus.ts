@@ -4,8 +4,8 @@ import { accountStatusFile } from './channels';
 
 /** Last known sign-in state of each platform in the app's browser (stored per-channel, git-ignored). */
 
-export type AccountKey = 'chatgpt' | 'grok' | 'tiktok' | 'youtube';
-export const ACCOUNT_KEYS: AccountKey[] = ['chatgpt', 'grok', 'tiktok', 'youtube'];
+export type AccountKey = 'chatgpt' | 'grok' | 'tiktok' | 'youtube' | 'instagram' | 'facebook';
+export const ACCOUNT_KEYS: AccountKey[] = ['chatgpt', 'grok', 'tiktok', 'youtube', 'instagram', 'facebook'];
 
 export interface AccountStatus {
   state: 'in' | 'out' | 'unknown';

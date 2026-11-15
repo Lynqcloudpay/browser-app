@@ -74,6 +74,8 @@ async function main(): Promise<void> {
     assert.strictEqual(stageFromStep('Running the kids-safety check…', 'qa'), 'qa');
     assert.strictEqual(stageFromStep('Uploading to TikTok and posting…', 'qa'), 'post');
     assert.strictEqual(stageFromStep('Uploading to YouTube…', 'post'), 'post');
+    assert.strictEqual(stageFromStep('Uploading to Instagram…', 'qa'), 'post');
+    assert.strictEqual(stageFromStep('Uploading to Facebook…', 'qa'), 'post');
     assert.strictEqual(stageFromStep('Checking your TikTok login…', 'post'), 'post', 'stations never move backwards');
     console.log('ok progress messages map to the right station');
 
@@ -86,6 +88,11 @@ async function main(): Promise<void> {
     assert(!partial.ok && /YouTube did not go through/.test(partial.message) && /Post to YouTube/.test(partial.message), 'a partial post is flagged, not reported as done');
     const held = describeResult(result({ qaPassed: false }), false);
     assert(held.ok && /held/.test(held.message));
+    const igFbPartial = describeResult(
+      result({ tiktokStatus: 'published', instagramStatus: 'published', facebookStatus: 'failed', postedAnywhere: true, postFailed: ['Facebook'] }),
+      false
+    );
+    assert(!igFbPartial.ok && /Instagram: posted/.test(igFbPartial.message) && /Facebook: failed/.test(igFbPartial.message));
     console.log('ok run results are worded and classified correctly');
 
     // ── Next scheduled time ──
@@ -130,12 +137,21 @@ async function main(): Promise<void> {
     const stillFailed = mergeRepost(partlyPosted, result({ tiktokStatus: 'published', youtubeStatus: 'failed', postFailed: ['YouTube'] }));
     assert.deepStrictEqual(stillFailed.postFailed, ['YouTube']);
     assert.strictEqual(stillFailed.tiktokStatus, 'published', 'TikTok stays posted');
+    const igFbPartly = result({ instagramStatus: 'failed', facebookStatus: 'published', postedAnywhere: true, postFailed: ['Instagram'] });
+    assert.deepStrictEqual(platformsToRepost(igFbPartly), ['Instagram']);
+    const igMerged = mergeRepost(igFbPartly, result({ instagramStatus: 'published', instagramVerified: true, instagramUrl: 'https://www.instagram.com/reel/abc/', facebookStatus: 'published', postedAnywhere: true, postedEverywhere: true }));
+    assert.strictEqual(igMerged.instagramStatus, 'published');
+    assert.strictEqual(igMerged.instagramUrl, 'https://www.instagram.com/reel/abc/');
+    assert.deepStrictEqual(igMerged.postFailed, []);
     console.log('ok unattended recovery rules');
 
     // ── Which videos can be posted again ──
     assert(canPostVideo('ready_to_publish') && canPostVideo('failed') && canPostVideo('scheduled'));
     assert(canPostVideo('published', 'published', 'failed'), 'posted on TikTok, failed on YouTube: retry the missing one');
     assert(canPostVideo('published', 'submitted', 'published'), 'posted but unconfirmed on one platform: can be sent again');
+    assert(canPostVideo('published', 'published', 'published', 'failed', 'published'), 'failed on Instagram: can retry');
+    assert(canPostVideo('published', 'published', 'published', 'published', 'submitted'), 'unconfirmed on Facebook: can retry');
+    assert(!canPostVideo('published', 'published', 'published', 'published', 'published'), 'posted everywhere: nothing to send');
     assert(!canPostVideo('published', 'published', 'published'), 'posted everywhere: nothing to send');
     assert(!canPostVideo('published', null, null), 'older videos with no per-platform record are not offered again');
     assert(!canPostVideo('held_for_review') && !canPostVideo('rejected'));

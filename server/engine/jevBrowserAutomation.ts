@@ -96,6 +96,12 @@ export interface PipelineResult {
   youtubeStatus: string;
   youtubeVerified: boolean;
   youtubeUrl?: string;
+  instagramStatus?: string;
+  instagramVerified?: boolean;
+  instagramUrl?: string;
+  facebookStatus?: string;
+  facebookVerified?: boolean;
+  facebookUrl?: string;
   postedEverywhere: boolean;
   /** True when at least one platform accepted the post (confirmed or not). */
   postedAnywhere: boolean;
@@ -2102,7 +2108,7 @@ export class ChannelBrowserAgent {
    */
   private async siteLoginState(
     page: Page,
-    site: 'chatgpt' | 'grok' | 'tiktok' | 'youtube'
+    site: AccountKey
   ): Promise<{ state: 'in' | 'out' | 'unknown'; why: string }> {
     try {
       const url = page.url();
@@ -2113,7 +2119,14 @@ export class ChannelBrowserAgent {
         return false;
       };
       const authHost = /auth\.openai\.com|auth0\.com|accounts\.google\.com|appleid\.apple\.com|login\.live\.com|accounts\.x\.ai|x\.com\/i\/flow|twitter\.com\/i\/flow/i;
-      const host = { chatgpt: 'chatgpt.com', grok: 'grok.com', tiktok: 'tiktok.com', youtube: 'youtube.com' }[site];
+      const host = {
+        chatgpt: 'chatgpt.com',
+        grok: 'grok.com',
+        tiktok: 'tiktok.com',
+        youtube: 'youtube.com',
+        instagram: 'instagram.com',
+        facebook: 'facebook.com',
+      }[site];
 
       // Check if ANY page or popup in this context is currently on an OAuth auth host
       try {
@@ -2185,6 +2198,48 @@ export class ChannelBrowserAgent {
         return { state: 'unknown', why: 'page not ready' };
       }
 
+      if (site === 'instagram') {
+        if (/\/accounts\/login|\/challenge/i.test(url)) return { state: 'out', why: 'login URL' };
+        if (await visible(page.locator('input[name="username"], input[name="password"]'))) {
+          return { state: 'out', why: 'Instagram login form visible' };
+        }
+        if (await anyVisible(named(/^\s*(Log in|Sign up)\s*$/i))) return { state: 'out', why: '"Log in" button' };
+        if (
+          await visible(
+            page.locator('svg[aria-label="New post"], svg[aria-label="Create"], svg[aria-label="Home"], a[href="/explore/"], a[href*="/direct/"]')
+          )
+        ) {
+          return { state: 'in', why: 'Instagram navigation visible' };
+        }
+        if (await anyVisible([page.getByRole('link', { name: /^\s*(Create|Profile|Reels)\s*$/i })])) {
+          return { state: 'in', why: 'Instagram nav link visible' };
+        }
+        return { state: 'unknown', why: 'page not ready' };
+      }
+
+      if (site === 'facebook') {
+        if (/\/login|\/checkpoint/i.test(url)) return { state: 'out', why: 'login URL' };
+        if (await visible(page.locator('input[name="email"], input[name="pass"], button[name="login"]'))) {
+          return { state: 'out', why: 'Facebook login form visible' };
+        }
+        if (await anyVisible(named(/^\s*(Log in|Log Into Facebook|Create new account)\s*$/i))) {
+          return { state: 'out', why: '"Log in" button' };
+        }
+        if (
+          await visible(
+            page.locator(
+              '[aria-label="Your profile" i], [aria-label="Account" i], [aria-label="Account Controls and Settings" i], [aria-label="Create" i], [aria-label="Menu" i], [role="navigation"]'
+            )
+          )
+        ) {
+          return { state: 'in', why: 'Facebook navigation visible' };
+        }
+        if ((await page.locator('input[type="file"]').count().catch(() => 0)) > 0) {
+          return { state: 'in', why: 'Facebook Reels upload form present' };
+        }
+        return { state: 'unknown', why: 'page not ready' };
+      }
+
       if (/\/login/i.test(url)) return { state: 'out', why: 'login URL' };
       if (await anyVisible(named(/^\s*(Log in|Use QR code)\s*$/i))) return { state: 'out', why: '"Log in" button' };
       if ((await page.locator('input[type="file"]').count().catch(() => 0)) > 0) return { state: 'in', why: 'upload form present' };
@@ -2207,12 +2262,12 @@ export class ChannelBrowserAgent {
   public async ensureLoggedIn(
     context: BrowserContext,
     say: (step: string, kind?: 'running' | 'waiting_login') => void,
-    targets: { tiktok: boolean; youtube: boolean },
+    targets: { tiktok: boolean; youtube: boolean; instagram?: boolean; facebook?: boolean },
     maxWaitMs = 10 * 60 * 1000,
     /** False when only posting an existing video: ChatGPT and Grok are not needed then. */
     needCreationSites = true
-  ): Promise<{ skipped: Array<'youtube'> }> {
-    type SiteKey = 'chatgpt' | 'grok' | 'tiktok' | 'youtube';
+  ): Promise<{ skipped: Array<'youtube' | 'instagram' | 'facebook'> }> {
+    type SiteKey = AccountKey;
     const sites: Array<{ key: SiteKey; name: string; url: string; host: string; optional?: boolean }> = needCreationSites
       ? [
           { key: 'chatgpt', name: 'ChatGPT', url: this.getConfiguredChatGptUrl() || 'https://chatgpt.com/', host: 'chatgpt.com' },
@@ -2220,9 +2275,11 @@ export class ChannelBrowserAgent {
         ]
       : [];
     if (targets.tiktok) sites.push({ key: 'tiktok', name: 'TikTok', url: 'https://www.tiktok.com/tiktokstudio/upload', host: 'tiktok.com' });
-    // YouTube is optional: if nobody signs in, the run still makes the video and posts to TikTok.
+    // YouTube, Instagram, and Facebook are optional: if nobody signs in, the run still posts to the other enabled platforms.
     if (targets.youtube) sites.push({ key: 'youtube', name: 'YouTube', url: 'https://studio.youtube.com/', host: 'youtube.com', optional: true });
-    const skipped: Array<'youtube'> = [];
+    if (targets.instagram) sites.push({ key: 'instagram', name: 'Instagram', url: 'https://www.instagram.com/', host: 'instagram.com', optional: true });
+    if (targets.facebook) sites.push({ key: 'facebook', name: 'Facebook', url: 'https://www.facebook.com/reels/create', host: 'facebook.com', optional: true });
+    const skipped: Array<'youtube' | 'instagram' | 'facebook'> = [];
     const framesDir = FRAMES_DIR;
     fs.mkdirSync(framesDir, { recursive: true });
     this.skipLogin = false;
@@ -2327,7 +2384,7 @@ export class ChannelBrowserAgent {
       if (!ok && site.optional) {
         say(`${site.name} was not signed in — skipping ${site.name} for this run.`);
         console.warn(`[ChannelBrowserAgent-${this.channelId}] ${site.name} sign-in timed out; continuing without it.`);
-        skipped.push(site.key as 'youtube');
+        skipped.push(site.key as 'youtube' | 'instagram' | 'facebook');
         continue;
       }
       if (!ok) throw new Error(`${site.name} is not signed in. Run again and sign into ${site.name} in the browser window.`);
@@ -2369,6 +2426,18 @@ export class ChannelBrowserAgent {
       url: 'https://studio.youtube.com/',
       host: 'youtube.com',
       cookieDomains: /(^|\.)(youtube\.com|google\.com|googleusercontent\.com|ggpht\.com)$/i,
+    },
+    instagram: {
+      name: 'Instagram',
+      url: 'https://www.instagram.com/',
+      host: 'instagram.com',
+      cookieDomains: /(^|\.)(instagram\.com|cdninstagram\.com|fbcdn\.net)$/i,
+    },
+    facebook: {
+      name: 'Facebook',
+      url: 'https://www.facebook.com/reels/create',
+      host: 'facebook.com',
+      cookieDomains: /(^|\.)(facebook\.com|fb\.com|fbcdn\.net|messenger\.com)$/i,
     },
   };
   public readonly ACCOUNT_SITES = ChannelBrowserAgent.ACCOUNT_SITES;
@@ -2412,7 +2481,7 @@ export class ChannelBrowserAgent {
       if (st.state === 'out') this.siteVerifiedAt.delete(key);
       else this.siteVerifiedAt.set(key, Date.now());
     }
-    if (this.keepBrowserOpen()) await this.releaseTabs(['tiktok.com', 'youtube.com']);
+    if (this.keepBrowserOpen()) await this.releaseTabs(['tiktok.com', 'youtube.com', 'instagram.com', 'facebook.com']);
     else await this.shutdown();
   }
 
@@ -3341,6 +3410,369 @@ export class ChannelBrowserAgent {
     }
   }
 
+  // ───────────────────────── Instagram Reels upload ─────────────────────────
+
+  /**
+   * Upload the finished vertical video as an Instagram Reel via instagram.com web UI.
+   */
+  public async uploadToInstagramViaBrowser(
+    videoPath: string,
+    title: string,
+    hook: string,
+    _coverPath?: string
+  ): Promise<{ success: boolean; verified?: boolean; shareUrl?: string; message: string }> {
+    const context = await this.launchContext(false);
+    const page = context.pages().find((p) => !p.isClosed() && p.url().includes('instagram.com')) || (await context.newPage());
+    await page.bringToFront().catch(() => {});
+
+    fs.mkdirSync(FRAMES_DIR, { recursive: true });
+    const snap = (tag: string) => page.screenshot({ path: path.join(FRAMES_DIR, `instagram_${tag}_${Date.now()}.png`) }).catch(() => {});
+    const onChooser = async (chooser: FileChooser) => {
+      await chooser.setFiles(videoPath).catch(() => {});
+    };
+    page.on('filechooser', onChooser);
+
+    let postClicked = false;
+    try {
+      if (!this.isValidVideoFile(videoPath)) {
+        return { success: false, message: 'Refusing to upload: the video file is missing or not a valid MP4.' };
+      }
+
+      console.log('[ChannelBrowserAgent] Navigating to Instagram...');
+      await page.evaluate('window.onbeforeunload = null;').catch(() => {});
+      await page.goto('https://www.instagram.com/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(3000);
+      await dismissPopups(page);
+
+      const needsLogin =
+        /\/accounts\/login|\/challenge/i.test(page.url()) ||
+        (await page.locator('input[name="username"], input[name="password"]').filter({ visible: true }).count().catch(() => 0)) > 0 ||
+        (await page.getByRole('button', { name: /^\s*Log in\s*$/i }).filter({ visible: true }).count().catch(() => 0)) > 0;
+      if (needsLogin) {
+        await snap('needs_login');
+        return { success: false, message: 'Instagram is not signed in. Sign into Instagram in the channel browser window first.' };
+      }
+
+      // Click Create / New post in the left sidebar or top bar
+      const createCandidates = [
+        page.locator('a:has(svg[aria-label="New post"]), a:has(svg[aria-label="Create"]), [role="button"]:has(svg[aria-label="New post"])'),
+        page.locator('svg[aria-label="New post"], svg[aria-label="Create"]'),
+        page.getByRole('link', { name: /^\s*Create\s*$/i }),
+        page.locator('span:text-is("Create")'),
+      ];
+      let createBtn: Locator | null = null;
+      for (const loc of createCandidates) {
+        if ((await loc.filter({ visible: true }).count().catch(() => 0)) > 0) {
+          createBtn = loc.filter({ visible: true }).first();
+          break;
+        }
+      }
+      if (!createBtn) {
+        createBtn = await findWithJev(page, 'open the Create / New post dialog to upload a video', 'Instagram web');
+      }
+      if (!createBtn) {
+        await snap('no_create_btn');
+        return { success: false, message: 'Could not find Instagram Create / New post button.' };
+      }
+      await createBtn.click({ timeout: 10000 });
+      await page.waitForTimeout(1000);
+
+      // Some Instagram layouts open a small submenu ("Post", "AI", "Ad") under Create
+      const postSubItem = page.locator('[role="menuitem"], [role="menu"] a, [role="menu"] [role="button"], span:text-is("Post")')
+        .filter({ hasText: /^\s*Post\s*$/i })
+        .filter({ visible: true })
+        .first();
+      if (await postSubItem.waitFor({ state: 'visible', timeout: 2500 }).then(() => true).catch(() => false)) {
+        await postSubItem.click({ timeout: 5000 }).catch(() => {});
+        await page.waitForTimeout(800);
+      }
+
+      const dialog = page.locator('[role="dialog"]').filter({ visible: true }).last();
+      await dialog.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+
+      const fileInput = page.locator('div[role="dialog"] input[type="file"], input[type="file"]').first();
+      if ((await fileInput.waitFor({ state: 'attached', timeout: 10000 }).then(() => true).catch(() => false))) {
+        console.log('[ChannelBrowserAgent] Uploading MP4 to Instagram:', videoPath);
+        await fileInput.setInputFiles(videoPath);
+      } else {
+        const selectBtn = page.getByRole('button', { name: /select from computer/i }).first();
+        if (!(await selectBtn.isVisible({ timeout: 5000 }).catch(() => false))) {
+          await snap('no_file_input');
+          return { success: false, message: 'Instagram upload file selector did not appear.' };
+        }
+        await selectBtn.click({ timeout: 8000 });
+      }
+      await page.waitForTimeout(2500);
+
+      // Dismiss "Video posts are now shared as reels" announcement if it appears
+      const reelsModalOk = page.locator('[role="dialog"] button:has-text("OK"), button:text-is("OK")').filter({ visible: true }).first();
+      if (await reelsModalOk.waitFor({ state: 'visible', timeout: 4000 }).then(() => true).catch(() => false)) {
+        await reelsModalOk.click({ timeout: 4000 }).catch(() => {});
+        await page.waitForTimeout(800);
+      }
+
+      // Click Next twice (Crop -> Edit/Cover -> Caption/Share)
+      for (let step = 0; step < 2; step++) {
+        let nextBtn: Locator | null = page.locator('div[role="dialog"] button, div[role="dialog"] [role="button"]')
+          .filter({ hasText: /^\s*Next\s*$/i })
+          .filter({ visible: true })
+          .first();
+        if (!(await nextBtn.waitFor({ state: 'visible', timeout: 15000 }).then(() => true).catch(() => false))) {
+          nextBtn = await findWithJev(page, 'go to the next step in the Instagram upload dialog (Next button)', 'Instagram Reel upload');
+        }
+        if (!nextBtn) {
+          await snap(`no_next_step_${step}`);
+          return { success: false, message: `Instagram Next button not found at step ${step + 1}.` };
+        }
+        await nextBtn.click({ timeout: 10000 });
+        await page.waitForTimeout(1500);
+      }
+
+      // Fill caption
+      const cleanTitle = title.replace(/\s*\(ChatGPT Browser\)\s*/gi, '').replace(/^["']|["']$/g, '').trim();
+      const caption = [cleanTitle, hook].filter(Boolean).join('\n\n').slice(0, 2200);
+      const captionBox = page
+        .locator('div[role="dialog"] div[role="textbox"][contenteditable="true"], div[aria-label*="caption" i][contenteditable="true"], textarea[aria-label*="caption" i]')
+        .filter({ visible: true })
+        .first();
+      if (await captionBox.waitFor({ state: 'visible', timeout: 15000 }).then(() => true).catch(() => false)) {
+        await captionBox.click();
+        await page.waitForTimeout(200);
+        await page.keyboard.insertText(caption);
+        await page.waitForTimeout(500);
+      } else {
+        console.warn('[ChannelBrowserAgent] Instagram caption box not found; sharing without caption.');
+      }
+
+      await snap('before_share');
+
+      // Click Share
+      let shareBtn: Locator | null = page.locator('div[role="dialog"] button, div[role="dialog"] [role="button"]')
+        .filter({ hasText: /^\s*Share\s*$/i })
+        .filter({ visible: true })
+        .first();
+      if (!(await shareBtn.waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false))) {
+        shareBtn = await findWithJev(page, 'publish the Instagram Reel now (Share button)', 'Instagram Reel upload');
+      }
+      if (!shareBtn) {
+        await snap('no_share_btn');
+        return { success: false, message: 'Instagram Share button not found, so nothing was posted.' };
+      }
+
+      console.log('[ChannelBrowserAgent] Clicking Instagram Share...');
+      postClicked = true;
+      await shareBtn.click({ timeout: 15000 });
+
+      // Wait up to 90s for upload + confirmation
+      const confirmStart = Date.now();
+      let confirmed = false;
+      while (Date.now() - confirmStart < 90_000) {
+        await page.waitForTimeout(2000);
+        const doneText = await page
+          .locator('text=/your (reel|post) has been shared|reel shared|post shared/i, img[alt*="Animated checkmark" i], img[alt*="checkmark" i]')
+          .filter({ visible: true })
+          .count()
+          .catch(() => 0);
+        if (doneText > 0) {
+          confirmed = true;
+          break;
+        }
+      }
+
+      await snap(confirmed ? 'published' : 'unconfirmed');
+      const shareUrl = await page
+        .locator('a[href*="/reel/"], a[href*="/p/"]')
+        .first()
+        .getAttribute('href')
+        .then((href) => (href ? (href.startsWith('http') ? href : `https://www.instagram.com${href}`) : null))
+        .catch(() => null);
+
+      const closeBtn = page.locator('button[aria-label="Close"], svg[aria-label="Close"]').filter({ visible: true }).first();
+      if (await closeBtn.isVisible().catch(() => false)) {
+        await closeBtn.click().catch(() => {});
+      } else {
+        await page.keyboard.press('Escape').catch(() => {});
+      }
+
+      if (confirmed) {
+        console.log('[ChannelBrowserAgent] Video shared as Instagram Reel!');
+        return { success: true, verified: true, shareUrl: shareUrl || 'https://www.instagram.com/', message: 'Video successfully uploaded and shared to Instagram Reels.' };
+      }
+      return { success: true, verified: false, shareUrl: shareUrl || 'https://www.instagram.com/', message: 'Instagram Share was clicked, confirmation pending.' };
+    } catch (err: any) {
+      await snap('failed');
+      console.warn('[ChannelBrowserAgent] Instagram upload error:', err.message);
+      if (postClicked) return { success: true, verified: false, message: `Share was clicked, then: ${err.message}` };
+      return { success: false, message: err.message };
+    } finally {
+      page.off('filechooser', onChooser);
+    }
+  }
+
+  // ───────────────────────── Facebook Reels upload ─────────────────────────
+
+  /**
+   * Upload the finished vertical video as a Facebook Reel via facebook.com/reels/create.
+   */
+  public async uploadToFacebookViaBrowser(
+    videoPath: string,
+    title: string,
+    hook: string
+  ): Promise<{ success: boolean; verified?: boolean; shareUrl?: string; message: string }> {
+    const context = await this.launchContext(false);
+    const page = context.pages().find((p) => !p.isClosed() && p.url().includes('facebook.com')) || (await context.newPage());
+    await page.bringToFront().catch(() => {});
+
+    fs.mkdirSync(FRAMES_DIR, { recursive: true });
+    const snap = (tag: string) => page.screenshot({ path: path.join(FRAMES_DIR, `facebook_${tag}_${Date.now()}.png`) }).catch(() => {});
+    const onChooser = async (chooser: FileChooser) => {
+      await chooser.setFiles(videoPath).catch(() => {});
+    };
+    page.on('filechooser', onChooser);
+
+    let postClicked = false;
+    try {
+      if (!this.isValidVideoFile(videoPath)) {
+        return { success: false, message: 'Refusing to upload: the video file is missing or not a valid MP4.' };
+      }
+
+      console.log('[ChannelBrowserAgent] Navigating to Facebook Reels creator...');
+      await page.evaluate('window.onbeforeunload = null;').catch(() => {});
+      await page.goto('https://www.facebook.com/reels/create', { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(3000);
+      await dismissPopups(page);
+
+      const needsLogin =
+        /\/login|\/checkpoint/i.test(page.url()) ||
+        (await page.locator('input[name="email"], input[name="pass"], button[name="login"]').filter({ visible: true }).count().catch(() => 0)) > 0 ||
+        (await page.getByRole('button', { name: /^\s*(Log in|Log Into Facebook)\s*$/i }).filter({ visible: true }).count().catch(() => 0)) > 0;
+      if (needsLogin) {
+        await snap('needs_login');
+        return { success: false, message: 'Facebook is not signed in. Sign into Facebook in the channel browser window first.' };
+      }
+
+      // Attach video to file input
+      const fileInput = page.locator('input[type="file"][accept*="video"], input[type="file"]').first();
+      if (!(await fileInput.waitFor({ state: 'attached', timeout: 20000 }).then(() => true).catch(() => false))) {
+        await snap('no_file_input');
+        return { success: false, message: 'Facebook Reels file upload input did not load.' };
+      }
+      console.log('[ChannelBrowserAgent] Uploading MP4 to Facebook Reels:', videoPath);
+      await fileInput.setInputFiles(videoPath);
+      await page.waitForTimeout(3000);
+
+      // Step through Next buttons (typically Trim/Audio -> Details) until Publish/Share or caption box appears
+      const publishLocator = () =>
+        page
+          .locator('[aria-label="Publish"], button[type="submit"], [role="button"], button')
+          .filter({ hasText: /^\s*(Publish|Share|Post)\s*$/i })
+          .filter({ visible: true })
+          .first();
+      const nextLocator = () =>
+        page
+          .locator('[aria-label="Next"], [role="button"], button')
+          .filter({ hasText: /^\s*Next\s*$/i })
+          .filter({ visible: true })
+          .first();
+
+      for (let step = 0; step < 3; step++) {
+        if (await publishLocator().isVisible().catch(() => false)) break;
+        const nextBtn = nextLocator();
+        if (await nextBtn.waitFor({ state: 'visible', timeout: 15000 }).then(() => true).catch(() => false)) {
+          await page
+            .waitForFunction(
+              () => {
+                const btns = Array.from(document.querySelectorAll('[aria-label="Next"], [role="button"], button'));
+                const b = btns.find((el) => /^\s*next\s*$/i.test(el.textContent || ''));
+                return !!b && b.getAttribute('aria-disabled') !== 'true' && !(b as HTMLButtonElement).disabled;
+              },
+              undefined,
+              { timeout: 60_000 }
+            )
+            .catch(() => {});
+          await nextBtn.click({ timeout: 10000 }).catch(() => {});
+          await page.waitForTimeout(1500);
+        } else {
+          break;
+        }
+      }
+
+      // Fill Reel caption
+      const cleanTitle = title.replace(/\s*\(ChatGPT Browser\)\s*/gi, '').replace(/^["']|["']$/g, '').trim();
+      const caption = [cleanTitle, hook].filter(Boolean).join('\n\n').slice(0, 2200);
+      const descBox = page
+        .locator('div[role="textbox"][aria-label*="Describe your reel" i], div[role="textbox"][contenteditable="true"], textarea[placeholder*="Describe your reel" i]')
+        .filter({ visible: true })
+        .first();
+      if (await descBox.waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false)) {
+        await descBox.click();
+        await page.waitForTimeout(200);
+        await page.keyboard.insertText(caption);
+        await page.waitForTimeout(500);
+      } else {
+        console.warn('[ChannelBrowserAgent] Facebook Reel description box not found; publishing without text.');
+      }
+
+      await snap('before_publish');
+
+      let pubBtn: Locator | null = publishLocator();
+      if (!(await pubBtn.waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false))) {
+        pubBtn = await findWithJev(page, 'publish the Facebook Reel now (the Publish or Share button)', 'Facebook Reels creator');
+      }
+      if (!pubBtn) {
+        await snap('no_publish_btn');
+        return { success: false, message: 'Facebook Reel Publish button not found, so nothing was posted.' };
+      }
+
+      await page
+        .waitForFunction(
+          () => {
+            const btns = Array.from(document.querySelectorAll('[aria-label="Publish"], [role="button"], button'));
+            const b = btns.find((el) => /^\s*(publish|share|post)\s*$/i.test(el.textContent || ''));
+            return !!b && b.getAttribute('aria-disabled') !== 'true' && !(b as HTMLButtonElement).disabled;
+          },
+          undefined,
+          { timeout: 120_000 }
+        )
+        .catch(() => {});
+
+      console.log('[ChannelBrowserAgent] Clicking Facebook Publish...');
+      postClicked = true;
+      await pubBtn.click({ timeout: 15000 });
+
+      const confirmStart = Date.now();
+      let confirmed = false;
+      while (Date.now() - confirmStart < 60_000) {
+        await page.waitForTimeout(2000);
+        const bodyText = await page.evaluate(() => document.body.innerText || '').catch(() => '');
+        if (
+          !page.url().includes('/reels/create') ||
+          /your reel (is being processed|has been published|was published)|reel published|your video is processing/i.test(bodyText)
+        ) {
+          confirmed = true;
+          break;
+        }
+      }
+
+      await snap(confirmed ? 'published' : 'unconfirmed');
+      const currentUrl = page.url();
+      const shareUrl = currentUrl.includes('/reel/') ? currentUrl : 'https://www.facebook.com/';
+
+      if (confirmed) {
+        console.log('[ChannelBrowserAgent] Video published as Facebook Reel!');
+        return { success: true, verified: true, shareUrl, message: 'Video successfully uploaded and published to Facebook Reels.' };
+      }
+      return { success: true, verified: false, shareUrl, message: 'Facebook Publish was clicked, processing confirmation pending.' };
+    } catch (err: any) {
+      await snap('failed');
+      console.warn('[ChannelBrowserAgent] Facebook upload error:', err.message);
+      if (postClicked) return { success: true, verified: false, message: `Publish was clicked, then: ${err.message}` };
+      return { success: false, message: err.message };
+    } finally {
+      page.off('filechooser', onChooser);
+    }
+  }
+
   // ───────────────────────── Pipeline ─────────────────────────
 
   /** Thrown out of a run that the operator stopped. */
@@ -3429,12 +3861,20 @@ export class ChannelBrowserAgent {
       const ch = getChannel(this.channelId);
       const wantTikTok = (ch ? !!ch.post_tiktok : true) && job.tiktok_status !== 'published';
       const wantYouTube = (ch ? !!ch.post_youtube : true) && job.youtube_status !== 'published';
-      if (!wantTikTok && !wantYouTube) {
+      const wantInstagram = (ch ? !!ch.post_instagram : false) && job.instagram_status !== 'published';
+      const wantFacebook = (ch ? !!ch.post_facebook : false) && job.facebook_status !== 'published';
+      if (!wantTikTok && !wantYouTube && !wantInstagram && !wantFacebook) {
         throw new Error('Nothing to post: every platform switched on for this channel already has this video.');
       }
 
       const browser = await this.launchContext(false);
-      const login = await this.ensureLoggedIn(browser, say, { tiktok: wantTikTok, youtube: wantYouTube }, 10 * 60 * 1000, false);
+      const login = await this.ensureLoggedIn(
+        browser,
+        say,
+        { tiktok: wantTikTok, youtube: wantYouTube, instagram: wantInstagram, facebook: wantFacebook },
+        10 * 60 * 1000,
+        false
+      );
       this.throwIfCancelled();
 
       const coverPath = job.thumbnail_path && fs.existsSync(job.thumbnail_path) ? job.thumbnail_path : null;
@@ -3446,8 +3886,19 @@ export class ChannelBrowserAgent {
         coverPath,
         tiktok: wantTikTok,
         youtube: wantYouTube && !login.skipped.includes('youtube'),
+        instagram: wantInstagram && !login.skipped.includes('instagram'),
+        facebook: wantFacebook && !login.skipped.includes('facebook'),
         youtubeMadeForKids: ch ? !!ch.youtube_made_for_kids : true,
-        previous: { tiktokStatus: job.tiktok_status, tiktokUrl: job.tiktok_share_url, youtubeStatus: job.youtube_status, youtubeUrl: job.youtube_share_url },
+        previous: {
+          tiktokStatus: job.tiktok_status,
+          tiktokUrl: job.tiktok_share_url,
+          youtubeStatus: job.youtube_status,
+          youtubeUrl: job.youtube_share_url,
+          instagramStatus: wantInstagram && login.skipped.includes('instagram') ? 'skipped' : job.instagram_status,
+          instagramUrl: job.instagram_share_url,
+          facebookStatus: wantFacebook && login.skipped.includes('facebook') ? 'skipped' : job.facebook_status,
+          facebookUrl: job.facebook_share_url,
+        },
         say,
       });
 
@@ -3461,7 +3912,7 @@ export class ChannelBrowserAgent {
         durationSeconds: Number(job.duration_seconds) || 0,
         qaPassed: true,
         ...posted,
-        message: `Existing video -> TikTok: ${posted.tiktokStatus} -> YouTube: ${posted.youtubeStatus}`,
+        message: `Existing video -> TikTok: ${posted.tiktokStatus} -> YouTube: ${posted.youtubeStatus} -> Instagram: ${posted.instagramStatus} -> Facebook: ${posted.facebookStatus}`,
       };
     });
   }
@@ -3744,10 +4195,40 @@ export class ChannelBrowserAgent {
     coverPath: string | null;
     tiktok: boolean;
     youtube: boolean;
+    instagram?: boolean;
+    facebook?: boolean;
     youtubeMadeForKids: boolean;
-    previous?: { tiktokStatus?: string | null; tiktokUrl?: string | null; youtubeStatus?: string | null; youtubeUrl?: string | null };
+    previous?: {
+      tiktokStatus?: string | null;
+      tiktokUrl?: string | null;
+      youtubeStatus?: string | null;
+      youtubeUrl?: string | null;
+      instagramStatus?: string | null;
+      instagramUrl?: string | null;
+      facebookStatus?: string | null;
+      facebookUrl?: string | null;
+    };
     say: (step: string, kind?: 'running' | 'waiting_login') => void;
-  }): Promise<Pick<PipelineResult, 'tiktokStatus' | 'tiktokVerified' | 'tiktokUrl' | 'youtubeStatus' | 'youtubeVerified' | 'youtubeUrl' | 'postedEverywhere' | 'postedAnywhere' | 'postFailed'>> {
+  }): Promise<
+    Pick<
+      PipelineResult,
+      | 'tiktokStatus'
+      | 'tiktokVerified'
+      | 'tiktokUrl'
+      | 'youtubeStatus'
+      | 'youtubeVerified'
+      | 'youtubeUrl'
+      | 'instagramStatus'
+      | 'instagramVerified'
+      | 'instagramUrl'
+      | 'facebookStatus'
+      | 'facebookVerified'
+      | 'facebookUrl'
+      | 'postedEverywhere'
+      | 'postedAnywhere'
+      | 'postFailed'
+    >
+  > {
     const { say } = input;
     // Audio per platform (original, the channel's song, or a muted file for a TikTok library sound), made before
     // any upload. A platform whose audio cannot be prepared is not posted, never posted with the wrong sound.
@@ -3759,6 +4240,12 @@ export class ChannelBrowserAgent {
     let youtubeStatus = input.previous?.youtubeStatus || 'off';
     let youtubeUrl: string | undefined = input.previous?.youtubeUrl || undefined;
     let youtubeVerified = youtubeStatus === 'published';
+    let instagramStatus = input.previous?.instagramStatus || 'off';
+    let instagramUrl: string | undefined = input.previous?.instagramUrl || undefined;
+    let instagramVerified = instagramStatus === 'published';
+    let facebookStatus = input.previous?.facebookStatus || 'off';
+    let facebookUrl: string | undefined = input.previous?.facebookUrl || undefined;
+    let facebookVerified = facebookStatus === 'published';
 
     const tiktokTask = async () => {
       if (!input.tiktok) return;
@@ -3830,43 +4317,142 @@ export class ChannelBrowserAgent {
       }
     };
 
-    // TikTok and YouTube upload at the same time, each in its own tab: the uploads are the slowest part of a run,
-    // and Playwright keeps background tabs fully live. Each platform keeps its own retry and its own status.
-    say(input.tiktok && input.youtube ? 'Uploading to TikTok and YouTube at the same time…' : input.tiktok ? 'Uploading to TikTok and posting…' : 'Uploading to YouTube…');
-    await Promise.all([tiktokTask(), youtubeTask()]);
+    const instagramTask = async () => {
+      if (!input.instagram) return;
+      this.throwIfCancelled();
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Uploading the video to Instagram Reels...`);
+      instagramStatus = 'failed';
+      try {
+        let ig = await this.uploadToInstagramViaBrowser(input.videoPath, input.title, input.hook, input.coverPath || undefined);
+        if (!ig.success && !this.cancelRequested && !/not signed in/i.test(ig.message)) {
+          say(`Instagram upload failed (${ig.message.slice(0, 120)}). Trying once more…`);
+          await this.releaseTabs(['instagram.com']);
+          ig = await this.uploadToInstagramViaBrowser(input.videoPath, input.title, input.hook, input.coverPath || undefined);
+        }
+        if (ig.success) {
+          instagramVerified = !!ig.verified;
+          instagramStatus = instagramVerified ? 'published' : 'submitted';
+          instagramUrl = ig.shareUrl || instagramUrl;
+        } else {
+          console.warn('[ChannelBrowserAgent] Instagram upload did not complete:', ig.message);
+          say(`Instagram upload failed: ${ig.message}`);
+        }
+      } catch (igErr: any) {
+        console.warn('[ChannelBrowserAgent] Instagram upload error:', igErr.message);
+      }
+    };
+
+    const facebookTask = async () => {
+      if (!input.facebook) return;
+      this.throwIfCancelled();
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Uploading the video to Facebook Reels...`);
+      facebookStatus = 'failed';
+      try {
+        let fb = await this.uploadToFacebookViaBrowser(input.videoPath, input.title, input.hook);
+        if (!fb.success && !this.cancelRequested && !/not signed in/i.test(fb.message)) {
+          say(`Facebook upload failed (${fb.message.slice(0, 120)}). Trying once more…`);
+          await this.releaseTabs(['facebook.com']);
+          fb = await this.uploadToFacebookViaBrowser(input.videoPath, input.title, input.hook);
+        }
+        if (fb.success) {
+          facebookVerified = !!fb.verified;
+          facebookStatus = facebookVerified ? 'published' : 'submitted';
+          facebookUrl = fb.shareUrl || facebookUrl;
+        } else {
+          console.warn('[ChannelBrowserAgent] Facebook upload did not complete:', fb.message);
+          say(`Facebook upload failed: ${fb.message}`);
+        }
+      } catch (fbErr: any) {
+        console.warn('[ChannelBrowserAgent] Facebook upload error:', fbErr.message);
+      }
+    };
+
+    // Enabled platforms upload at the same time, each in its own tab.
+    const activeNames = [
+      input.tiktok ? 'TikTok' : '',
+      input.youtube ? 'YouTube' : '',
+      input.instagram ? 'Instagram' : '',
+      input.facebook ? 'Facebook' : '',
+    ].filter(Boolean);
+    const activeText =
+      activeNames.length <= 1
+        ? activeNames[0] || 'platforms'
+        : activeNames.length === 2
+          ? `${activeNames[0]} and ${activeNames[1]}`
+          : `${activeNames.slice(0, -1).join(', ')}, and ${activeNames[activeNames.length - 1]}`;
+    say(
+      activeNames.length > 1
+        ? `Uploading to ${activeText} at the same time…`
+        : input.tiktok
+          ? 'Uploading to TikTok and posting…'
+          : `Uploading to ${activeText}…`
+    );
+    await Promise.all([tiktokTask(), youtubeTask(), instagramTask(), facebookTask()]);
 
     this.throwIfCancelled();
 
     // Posting tabs are the heaviest pages and are not needed until the next video: free them once the platform
     // confirmed the post. A tab whose post failed stays open so the problem can be seen.
     if (this.keepBrowserOpen()) {
-      const done = [input.tiktok && tiktokVerified ? 'tiktok.com' : '', input.youtube && youtubeVerified ? 'youtube.com' : ''].filter(Boolean);
+      const done = [
+        input.tiktok && tiktokVerified ? 'tiktok.com' : '',
+        input.youtube && youtubeVerified ? 'youtube.com' : '',
+        input.instagram && instagramVerified ? 'instagram.com' : '',
+        input.facebook && facebookVerified ? 'facebook.com' : '',
+      ].filter(Boolean);
       if (done.length) await this.releaseTabs(done);
     }
 
-    const attempted = [input.tiktok ? tiktokVerified : null, input.youtube ? youtubeVerified : null].filter((v) => v !== null);
+    const attempted = [
+      input.tiktok ? tiktokVerified : null,
+      input.youtube ? youtubeVerified : null,
+      input.instagram ? instagramVerified : null,
+      input.facebook ? facebookVerified : null,
+    ].filter((v) => v !== null);
     // The browser window may close only when every place we posted to in this pass confirmed the post.
     const postedEverywhere = attempted.length > 0 && attempted.every(Boolean);
-    const anyPublished = tiktokStatus === 'published' || youtubeStatus === 'published';
-    const anySubmitted = tiktokStatus === 'submitted' || youtubeStatus === 'submitted';
+    const anyPublished =
+      tiktokStatus === 'published' ||
+      youtubeStatus === 'published' ||
+      instagramStatus === 'published' ||
+      facebookStatus === 'published';
+    const anySubmitted =
+      tiktokStatus === 'submitted' ||
+      youtubeStatus === 'submitted' ||
+      instagramStatus === 'submitted' ||
+      facebookStatus === 'submitted';
     // What THIS pass did. A platform posted by an earlier run must not make a failed retry look like a success.
     const accepted = (status: string) => status === 'published' || status === 'submitted';
-    const postedNow = (input.tiktok && accepted(tiktokStatus)) || (input.youtube && accepted(youtubeStatus));
-    const postFailed = [input.tiktok && !accepted(tiktokStatus) ? 'TikTok' : '', input.youtube && !accepted(youtubeStatus) ? 'YouTube' : ''].filter(Boolean);
+    const postedNow =
+      (input.tiktok && accepted(tiktokStatus)) ||
+      (input.youtube && accepted(youtubeStatus)) ||
+      (!!input.instagram && accepted(instagramStatus)) ||
+      (!!input.facebook && accepted(facebookStatus));
+    const postFailed = [
+      input.tiktok && !accepted(tiktokStatus) ? 'TikTok' : '',
+      input.youtube && !accepted(youtubeStatus) ? 'YouTube' : '',
+      input.instagram && !accepted(instagramStatus) ? 'Instagram' : '',
+      input.facebook && !accepted(facebookStatus) ? 'Facebook' : '',
+    ].filter(Boolean);
     // 'scheduled' = Post was clicked somewhere but no platform confirmed; 'failed' = the video exists and nothing went out.
     const finalState = anyPublished ? 'published' : anySubmitted ? 'scheduled' : 'failed';
 
     db.prepare(`
       UPDATE jobs
-      SET state = ?, tiktok_status = ?, youtube_status = ?, tiktok_share_url = ?, youtube_share_url = ?,
+      SET state = ?, tiktok_status = ?, youtube_status = ?, instagram_status = ?, facebook_status = ?,
+          tiktok_share_url = ?, youtube_share_url = ?, instagram_share_url = ?, facebook_share_url = ?,
           hold_reason = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(
       finalState,
       tiktokStatus,
       youtubeStatus,
+      instagramStatus,
+      facebookStatus,
       tiktokUrl || null,
       youtubeUrl || null,
+      instagramUrl || null,
+      facebookUrl || null,
       finalState === 'failed' ? 'The video was made, but posting did not go through. Use "Post now" to try again.' : null,
       input.jobId
     );
@@ -3878,6 +4464,12 @@ export class ChannelBrowserAgent {
       youtubeStatus,
       youtubeVerified,
       youtubeUrl,
+      instagramStatus,
+      instagramVerified,
+      instagramUrl,
+      facebookStatus,
+      facebookVerified,
+      facebookUrl,
       postedEverywhere,
       postedAnywhere: postedNow,
       postFailed,
@@ -3956,10 +4548,19 @@ export class ChannelBrowserAgent {
     const targets = {
       tiktok: ch ? !!ch.post_tiktok : true,
       youtube: ch ? !!ch.post_youtube : true,
+      instagram: ch ? !!ch.post_instagram : false,
+      facebook: ch ? !!ch.post_facebook : false,
       youtubeMadeForKids: ch ? !!ch.youtube_made_for_kids : true,
     };
-    const login = await this.ensureLoggedIn(browser, say, { tiktok: targets.tiktok, youtube: targets.youtube });
+    const login = await this.ensureLoggedIn(browser, say, {
+      tiktok: targets.tiktok,
+      youtube: targets.youtube,
+      instagram: targets.instagram,
+      facebook: targets.facebook,
+    });
     const youtubeOn = targets.youtube && !login.skipped.includes('youtube');
+    const instagramOn = targets.instagram && !login.skipped.includes('instagram');
+    const facebookOn = targets.facebook && !login.skipped.includes('facebook');
     this.throwIfCancelled();
 
     // 1. ChatGPT: Generate prompt & script
@@ -4118,7 +4719,7 @@ export class ChannelBrowserAgent {
     });
     this.throwIfCancelled();
 
-    // 5. Post — ONLY when QA passed. TikTok first, then YouTube.
+    // 5. Post — ONLY when QA passed. Parallel across enabled platforms.
     let posted: Awaited<ReturnType<typeof ChannelBrowserAgent.prototype.postVideo>>;
     if (qaResult.passed) {
       posted = await this.postVideo({
@@ -4129,8 +4730,14 @@ export class ChannelBrowserAgent {
         coverPath,
         tiktok: targets.tiktok,
         youtube: youtubeOn,
+        instagram: instagramOn,
+        facebook: facebookOn,
         youtubeMadeForKids: targets.youtubeMadeForKids,
-        previous: { youtubeStatus: targets.youtube && !youtubeOn ? 'skipped' : 'off' },
+        previous: {
+          youtubeStatus: targets.youtube && !youtubeOn ? 'skipped' : 'off',
+          instagramStatus: targets.instagram && !instagramOn ? 'skipped' : 'off',
+          facebookStatus: targets.facebook && !facebookOn ? 'skipped' : 'off',
+        },
         say,
       });
     } else {
@@ -4142,6 +4749,12 @@ export class ChannelBrowserAgent {
         youtubeStatus: targets.youtube ? 'held_for_review' : 'off',
         youtubeVerified: false,
         youtubeUrl: undefined,
+        instagramStatus: targets.instagram ? 'held_for_review' : 'off',
+        instagramVerified: false,
+        instagramUrl: undefined,
+        facebookStatus: targets.facebook ? 'held_for_review' : 'off',
+        facebookVerified: false,
+        facebookUrl: undefined,
         postedEverywhere: false,
         postedAnywhere: false,
         postFailed: [],
@@ -4160,7 +4773,7 @@ export class ChannelBrowserAgent {
       durationSeconds: videoDuration,
       qaPassed: qaResult.passed,
       ...posted,
-      message: `ChatGPT prompt -> Grok video (${videoDuration}s${grokRes.width && grokRes.height ? ', ' + grokRes.width + 'x' + grokRes.height : ''}, original sound) -> QA ${qaResult.passed ? 'passed' : 'held'} -> TikTok: ${posted.tiktokStatus} -> YouTube: ${posted.youtubeStatus}`,
+      message: `ChatGPT prompt -> Grok video (${videoDuration}s${grokRes.width && grokRes.height ? ', ' + grokRes.width + 'x' + grokRes.height : ''}, original sound) -> QA ${qaResult.passed ? 'passed' : 'held'} -> TikTok: ${posted.tiktokStatus} -> YouTube: ${posted.youtubeStatus} -> Instagram: ${posted.instagramStatus} -> Facebook: ${posted.facebookStatus}`,
     };
   }
 }

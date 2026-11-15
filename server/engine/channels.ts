@@ -21,6 +21,8 @@ export interface Channel {
   grok_duration: 6 | 10 | 15;
   post_tiktok: boolean;
   post_youtube: boolean;
+  post_instagram: boolean;
+  post_facebook: boolean;
   youtube_made_for_kids: boolean;
   hashtag_hint: string;
   schedule_enabled: boolean;
@@ -156,6 +158,8 @@ function rowToChannel(row: any): Channel {
     grok_duration: [6, 10, 15].includes(Number(row.grok_duration)) ? (Number(row.grok_duration) as 6 | 10 | 15) : 15,
     post_tiktok: Boolean(row.post_tiktok),
     post_youtube: Boolean(row.post_youtube),
+    post_instagram: Boolean(row.post_instagram),
+    post_facebook: Boolean(row.post_facebook),
     youtube_made_for_kids: Boolean(row.youtube_made_for_kids),
     hashtag_hint: row.hashtag_hint || '',
     schedule_enabled: Boolean(row.schedule_enabled),
@@ -212,6 +216,8 @@ export function exportChannelsToSeeds(): void {
       grok_duration: c.grok_duration,
       post_tiktok: c.post_tiktok,
       post_youtube: c.post_youtube,
+      post_instagram: c.post_instagram,
+      post_facebook: c.post_facebook,
       youtube_made_for_kids: c.youtube_made_for_kids,
       hashtag_hint: c.hashtag_hint,
       schedule_enabled: c.schedule_enabled,
@@ -300,12 +306,12 @@ export function importChannelsFromSeeds(): void {
         db.prepare(`
           INSERT INTO channels (
             id, name, chatgpt_chat_url, chatgpt_chat_name, grok_resolution, grok_duration,
-            post_tiktok, post_youtube, youtube_made_for_kids, hashtag_hint,
+            post_tiktok, post_youtube, post_instagram, post_facebook, youtube_made_for_kids, hashtag_hint,
             schedule_enabled, schedule_times, keep_browser_open, hold_flagged_videos,
             created_at, updated_at
           ) VALUES (
             ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?,
             ?, ?
           )
@@ -318,6 +324,8 @@ export function importChannelsFromSeeds(): void {
           seed.grok_duration || 15,
           seed.post_tiktok ? 1 : 0,
           seed.post_youtube ? 1 : 0,
+          seed.post_instagram ? 1 : 0,
+          seed.post_facebook ? 1 : 0,
           seed.youtube_made_for_kids ? 1 : 0,
           seed.hashtag_hint || '',
           0, // schedule_enabled starts off on new machine to prevent double posting
@@ -333,7 +341,8 @@ export function importChannelsFromSeeds(): void {
           UPDATE channels SET
             name = ?, chatgpt_chat_url = ?, chatgpt_chat_name = ?,
             grok_resolution = ?, grok_duration = ?, post_tiktok = ?,
-            post_youtube = ?, youtube_made_for_kids = ?, hashtag_hint = ?,
+            post_youtube = ?, post_instagram = ?, post_facebook = ?,
+            youtube_made_for_kids = ?, hashtag_hint = ?,
             keep_browser_open = ?, hold_flagged_videos = ?
           WHERE id = ?
         `).run(
@@ -344,6 +353,8 @@ export function importChannelsFromSeeds(): void {
           seed.grok_duration || 15,
           seed.post_tiktok ? 1 : 0,
           seed.post_youtube ? 1 : 0,
+          seed.post_instagram ? 1 : 0,
+          seed.post_facebook ? 1 : 0,
           seed.youtube_made_for_kids ? 1 : 0,
           seed.hashtag_hint || '',
           seed.keep_browser_open === undefined ? 1 : (seed.keep_browser_open ? 1 : 0),
@@ -404,11 +415,11 @@ export function createChannel(name: string): Channel {
   const res = db.prepare(`
     INSERT INTO channels (
       name, chatgpt_chat_url, chatgpt_chat_name, grok_resolution, grok_duration,
-      post_tiktok, post_youtube, youtube_made_for_kids, hashtag_hint,
+      post_tiktok, post_youtube, post_instagram, post_facebook, youtube_made_for_kids, hashtag_hint,
       schedule_enabled, schedule_times, created_at, updated_at
     ) VALUES (
       ?, '', '', '720p', 15,
-      1, 1, 1, '',
+      1, 1, 0, 0, 1, '',
       0, '[]', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
     )
   `).run(cleanName);
@@ -469,6 +480,14 @@ export function updateChannel(id: number, patch: Partial<Channel>): Channel {
   if (patch.post_youtube !== undefined) {
     updates.push('post_youtube = ?');
     params.push(patch.post_youtube ? 1 : 0);
+  }
+  if (patch.post_instagram !== undefined) {
+    updates.push('post_instagram = ?');
+    params.push(patch.post_instagram ? 1 : 0);
+  }
+  if (patch.post_facebook !== undefined) {
+    updates.push('post_facebook = ?');
+    params.push(patch.post_facebook ? 1 : 0);
   }
   if (patch.youtube_made_for_kids !== undefined) {
     updates.push('youtube_made_for_kids = ?');

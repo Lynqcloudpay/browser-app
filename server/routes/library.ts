@@ -69,8 +69,12 @@ function toVideo(row: any) {
     size_mb: sizeMb,
     tiktok_url: row.tiktok_share_url || null,
     youtube_url: row.youtube_share_url || null,
+    instagram_url: row.instagram_share_url || null,
+    facebook_url: row.facebook_share_url || null,
     tiktok_status: row.tiktok_status || null,
     youtube_status: row.youtube_status || null,
+    instagram_status: row.instagram_status || null,
+    facebook_status: row.facebook_status || null,
     qa: row.qa_id ? { passed: Boolean(row.qa_passed), score: Number(row.qa_score) || 0, flags, reviewerAction: row.qa_reviewer_action } : null,
     created_at: sqliteToIso(row.created_at),
     updated_at: sqliteToIso(row.updated_at),
@@ -99,10 +103,19 @@ const idParam = (req: Request) => String(req.params.id);
  * Whether "Post now" is allowed. A video that reached one platform but failed or went unconfirmed on the other is
  * "published" overall, and can still be sent again to the missing platform.
  */
-export function canPostVideo(state: string, tiktokStatus?: string | null, youtubeStatus?: string | null): boolean {
+export function canPostVideo(
+  state: string,
+  tiktokStatus?: string | null,
+  youtubeStatus?: string | null,
+  instagramStatus?: string | null,
+  facebookStatus?: string | null
+): boolean {
   const needsRetry = (status?: string | null) => status === 'failed' || status === 'submitted';
   if (['ready_to_publish', 'failed', 'scheduled'].includes(state)) return true;
-  return state === 'published' && (needsRetry(tiktokStatus) || needsRetry(youtubeStatus));
+  return (
+    state === 'published' &&
+    (needsRetry(tiktokStatus) || needsRetry(youtubeStatus) || needsRetry(instagramStatus) || needsRetry(facebookStatus))
+  );
 }
 
 libraryRouter.get(
@@ -168,7 +181,7 @@ libraryRouter.post(
   '/videos/:id/publish',
   route(async (req, res) => {
     const row = getRow(idParam(req));
-    if (!canPostVideo(row.state, row.tiktok_status, row.youtube_status)) {
+    if (!canPostVideo(row.state, row.tiktok_status, row.youtube_status, row.instagram_status, row.facebook_status)) {
       throw new HttpError(400, row.state === 'held_for_review' ? 'Approve this video first.' : 'This video cannot be posted from its current state.');
     }
     const video = locateMedia(row.video_path);

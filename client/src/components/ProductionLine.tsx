@@ -48,7 +48,7 @@ export function ProductionLine({ channel, run, accountBusy, pending, onStart, on
   const head = headIdx === -1 ? STAGES.length - 1 : headIdx;
   const platforms = platformsText(channel);
   const blockReason = !platforms
-    ? 'Turn on TikTok or YouTube Shorts below before making a video.'
+    ? 'Turn on at least one platform (TikTok, YouTube Shorts, Instagram Reels, or Facebook Reels) before making a video.'
     : accountBusy
       ? 'Wait for the login check or account switch to finish.'
       : null;

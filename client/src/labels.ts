@@ -50,6 +50,8 @@ export const LOGIN_SITES: { key: string; label: string }[] = [
   { key: 'grok', label: 'Grok' },
   { key: 'tiktok', label: 'TikTok' },
   { key: 'youtube', label: 'YouTube' },
+  { key: 'instagram', label: 'Instagram' },
+  { key: 'facebook', label: 'Facebook' },
 ];
 
 export function isRunBusy(run: Pick<RunStatus, 'state'> | null | undefined): boolean {
@@ -60,10 +62,16 @@ export function isAccountBusy(acc: AccountsOverview | null | undefined): boolean
   return acc?.op.state === 'working' || acc?.op.state === 'waiting_login';
 }
 
-/** "TikTok and YouTube Shorts", "TikTok", "YouTube Shorts", or "" when nothing is on. */
-export function platformsText(ch: Pick<Channel, 'post_tiktok' | 'post_youtube'>): string {
-  if (ch.post_tiktok && ch.post_youtube) return 'TikTok and YouTube Shorts';
-  if (ch.post_tiktok) return 'TikTok';
-  if (ch.post_youtube) return 'YouTube Shorts';
-  return '';
+/** Human list of enabled posting destinations, or "" when nothing is on. */
+export function platformsText(ch: Pick<Channel, 'post_tiktok' | 'post_youtube' | 'post_instagram' | 'post_facebook'>): string {
+  const names = [
+    ch.post_tiktok ? 'TikTok' : '',
+    ch.post_youtube ? 'YouTube Shorts' : '',
+    ch.post_instagram ? 'Instagram Reels' : '',
+    ch.post_facebook ? 'Facebook Reels' : '',
+  ].filter(Boolean);
+  if (names.length === 0) return '';
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
 }

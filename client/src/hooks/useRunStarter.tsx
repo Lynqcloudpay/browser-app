@@ -17,7 +17,7 @@ export function useRunStarter() {
     if (startingId !== null) return;
     const platforms = platformsText(ch);
     if (!platforms) {
-      toast.error('Turn on TikTok or YouTube Shorts for this channel before making a video.');
+      toast.error('Turn on at least one platform (TikTok, YouTube Shorts, Instagram Reels, or Facebook Reels) before making a video.');
       return;
     }
     const ok = await confirm({

@@ -34,7 +34,12 @@ export function VideoCard({ video, showChannel, busy, actions }: VideoCardProps)
   const BadgeIcon = badge.icon;
   // Posted on one platform but failed or unconfirmed on the other: the file can be sent again to the missing one.
   const platformProblems = (
-    [['TikTok', video.tiktok_status], ['YouTube', video.youtube_status]] as const
+    [
+      ['TikTok', video.tiktok_status],
+      ['YouTube', video.youtube_status],
+      ['Instagram', video.instagram_status],
+      ['Facebook', video.facebook_status],
+    ] as const
   ).filter(([, status]) => status === 'failed' || status === 'submitted');
   const partlyPosted = video.state === 'published' && platformProblems.length > 0;
   const canPost =
@@ -116,7 +121,7 @@ export function VideoCard({ video, showChannel, busy, actions }: VideoCardProps)
           </p>
         )}
 
-        {(video.tiktok_url || video.youtube_url) && (
+        {(video.tiktok_url || video.youtube_url || video.instagram_url || video.facebook_url) && (
           <div className="flex flex-wrap gap-3 text-[13px] font-semibold">
             {video.tiktok_url && (
               <a href={video.tiktok_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-md underline underline-offset-4">
@@ -126,6 +131,16 @@ export function VideoCard({ video, showChannel, busy, actions }: VideoCardProps)
             {video.youtube_url && (
               <a href={video.youtube_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-md underline underline-offset-4">
                 YouTube <ExternalLink className="size-3.5" aria-hidden="true" />
+              </a>
+            )}
+            {video.instagram_url && (
+              <a href={video.instagram_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-md underline underline-offset-4">
+                Instagram <ExternalLink className="size-3.5" aria-hidden="true" />
+              </a>
+            )}
+            {video.facebook_url && (
+              <a href={video.facebook_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-md underline underline-offset-4">
+                Facebook <ExternalLink className="size-3.5" aria-hidden="true" />
               </a>
             )}
           </div>

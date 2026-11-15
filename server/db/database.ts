@@ -46,6 +46,12 @@ export function initDatabase(): void {
   addColumnIfMissing('jobs', 'channel_id', 'INTEGER');
   addColumnIfMissing('jobs', 'tiktok_status', 'TEXT');
   addColumnIfMissing('jobs', 'youtube_status', 'TEXT');
+  addColumnIfMissing('jobs', 'instagram_status', 'TEXT');
+  addColumnIfMissing('jobs', 'instagram_share_url', 'TEXT');
+  addColumnIfMissing('jobs', 'facebook_status', 'TEXT');
+  addColumnIfMissing('jobs', 'facebook_share_url', 'TEXT');
+  addColumnIfMissing('channels', 'post_instagram', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing('channels', 'post_facebook', 'INTEGER NOT NULL DEFAULT 0');
   addColumnIfMissing('channels', 'keep_browser_open', 'INTEGER NOT NULL DEFAULT 1');
   addColumnIfMissing('channels', 'hold_flagged_videos', 'INTEGER NOT NULL DEFAULT 0');
   addColumnIfMissing('channels', 'tiktok_audio', "TEXT NOT NULL DEFAULT 'original'");

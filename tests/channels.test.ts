@@ -33,6 +33,8 @@ function runChannelsTests(): void {
   const ch2 = createChannel('Pip The Curious Fox');
   assert.strictEqual(ch2.name, 'Pip The Curious Fox');
   assert(ch2.id > 1, 'Channel 2 ID must be > 1');
+  assert.strictEqual(ch2.post_instagram, false, 'post_instagram defaults to false');
+  assert.strictEqual(ch2.post_facebook, false, 'post_facebook defaults to false');
   assert(fs.existsSync(channelDir(ch2.id)), 'Channel 2 directory must be created');
   console.log(`ok Created Channel ${ch2.id}: ${ch2.name}`);
 
@@ -41,6 +43,8 @@ function runChannelsTests(): void {
     chatgpt_chat_url: 'https://chatgpt.com/c/test-pip',
     grok_resolution: '480p',
     grok_duration: 10,
+    post_instagram: true,
+    post_facebook: true,
     hashtag_hint: '#PipTheFox',
     schedule_enabled: true,
     schedule_times: ['09:00', '15:30'],
@@ -48,6 +52,8 @@ function runChannelsTests(): void {
   assert.strictEqual(updated.chatgpt_chat_url, 'https://chatgpt.com/c/test-pip');
   assert.strictEqual(updated.grok_resolution, '480p');
   assert.strictEqual(updated.grok_duration, 10);
+  assert.strictEqual(updated.post_instagram, true);
+  assert.strictEqual(updated.post_facebook, true);
   assert.strictEqual(updated.hashtag_hint, '#PipTheFox');
   assert.strictEqual(updated.schedule_enabled, true);
   assert.deepStrictEqual(updated.schedule_times, ['09:00', '15:30']);

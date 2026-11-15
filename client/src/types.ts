@@ -25,6 +25,8 @@ export interface Channel {
   grok_duration: 6 | 10 | 15;
   post_tiktok: boolean;
   post_youtube: boolean;
+  post_instagram: boolean;
+  post_facebook: boolean;
   youtube_made_for_kids: boolean;
   /** Keep the channel's browser window open between videos (on by default). */
   keep_browser_open: boolean;
@@ -155,8 +157,12 @@ export interface Video {
   size_mb: number | null;
   tiktok_url: string | null;
   youtube_url: string | null;
+  instagram_url: string | null;
+  facebook_url: string | null;
   tiktok_status: string | null;
   youtube_status: string | null;
+  instagram_status: string | null;
+  facebook_status: string | null;
   qa: VideoQa | null;
   created_at: string;
   updated_at: string;
