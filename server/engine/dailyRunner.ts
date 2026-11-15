@@ -230,7 +230,7 @@ async function makeVideoUnattended(
         hooks.onProgress(`${repost.join(' and ')} did not post. Posting it again in 2 minutes…`);
         await pause(channelId, REPOST_DELAY_MS);
         try {
-          const again = await withTimeLimit(agent, () => agent.publishExistingVideo(result.jobId, { onProgress: hooks.onProgress, onJob }));
+          const again = await withTimeLimit(agent, () => agent.publishExistingVideo(result.jobId, { onProgress: hooks.onProgress, onJob, only: repost }));
           result = mergeRepost(result, again);
         } catch (err: any) {
           if (err?.code === 'RUN_CANCELLED') throw err;

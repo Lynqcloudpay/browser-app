@@ -3568,8 +3568,10 @@ export class ChannelBrowserAgent {
       let confirmed = false;
       while (Date.now() - confirmStart < 90_000) {
         await page.waitForTimeout(2000);
+        // A `text=` selector cannot be joined to CSS with a comma (it throws, so this never matched): use .or().
         const doneText = await page
-          .locator('text=/your (reel|post) has been shared|reel shared|post shared/i, img[alt*="Animated checkmark" i], img[alt*="checkmark" i]')
+          .getByText(/your (reel|post) has been shared|reel shared|post shared/i)
+          .or(page.locator('img[alt*="checkmark" i]'))
           .filter({ visible: true })
           .count()
           .catch(() => 0);
@@ -3580,10 +3582,11 @@ export class ChannelBrowserAgent {
       }
 
       await snap(confirmed ? 'published' : 'unconfirmed');
+      // Only a link inside the share dialog is ours: the home feed behind it is full of other people's /p/ and /reel/ links.
       const shareUrl = await page
-        .locator('a[href*="/reel/"], a[href*="/p/"]')
+        .locator('[role="dialog"] a[href*="/reel/"], [role="dialog"] a[href*="/p/"]')
         .first()
-        .getAttribute('href')
+        .getAttribute('href', { timeout: 2000 })
         .then((href) => (href ? (href.startsWith('http') ? href : `https://www.instagram.com${href}`) : null))
         .catch(() => null);
 
@@ -3745,8 +3748,10 @@ export class ChannelBrowserAgent {
       while (Date.now() - confirmStart < 60_000) {
         await page.waitForTimeout(2000);
         const bodyText = await page.evaluate(() => document.body.innerText || '').catch(() => '');
+        const url = page.url();
+        // Leaving the creator counts only if it did not land on a sign-in or security check page.
         if (
-          !page.url().includes('/reels/create') ||
+          (!url.includes('/reels/create') && !/\/login|\/checkpoint/i.test(url)) ||
           /your reel (is being processed|has been published|was published)|reel published|your video is processing/i.test(bodyText)
         ) {
           confirmed = true;
@@ -3850,7 +3855,13 @@ export class ChannelBrowserAgent {
    * Posts a video that already exists on disk (made earlier, but held, failed or never confirmed).
    * Only platforms that are switched on for the channel and have no confirmed post yet are attempted.
    */
-  public async publishExistingVideo(jobId: string, options: Pick<PipelineOptions, 'onProgress' | 'onJob'> = {}): Promise<PipelineResult> {
+  public async publishExistingVideo(
+    jobId: string,
+    options: Pick<PipelineOptions, 'onProgress' | 'onJob'> & {
+      /** Limit this pass to these platforms (the automatic re-post sends only the ones that failed). */
+      only?: string[];
+    } = {}
+  ): Promise<PipelineResult> {
     return this.withPipelineLock(options.onProgress, async () => {
       const say = (step: string, kind: 'running' | 'waiting_login' = 'running') => options.onProgress?.(step, kind);
       const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId) as any;
@@ -3859,10 +3870,13 @@ export class ChannelBrowserAgent {
       options.onJob?.(jobId);
 
       const ch = getChannel(this.channelId);
-      const wantTikTok = (ch ? !!ch.post_tiktok : true) && job.tiktok_status !== 'published';
-      const wantYouTube = (ch ? !!ch.post_youtube : true) && job.youtube_status !== 'published';
-      const wantInstagram = (ch ? !!ch.post_instagram : false) && job.instagram_status !== 'published';
-      const wantFacebook = (ch ? !!ch.post_facebook : false) && job.facebook_status !== 'published';
+      // A platform whose Post was clicked but not confirmed ('submitted') may already be live: the automatic re-post
+      // passes `only` so it never sends one of those again (a duplicate post). "Post now" (no `only`) still may.
+      const allowed = (name: string) => !options.only || options.only.includes(name);
+      const wantTikTok = allowed('TikTok') && (ch ? !!ch.post_tiktok : true) && job.tiktok_status !== 'published';
+      const wantYouTube = allowed('YouTube') && (ch ? !!ch.post_youtube : true) && job.youtube_status !== 'published';
+      const wantInstagram = allowed('Instagram') && (ch ? !!ch.post_instagram : false) && job.instagram_status !== 'published';
+      const wantFacebook = allowed('Facebook') && (ch ? !!ch.post_facebook : false) && job.facebook_status !== 'published';
       if (!wantTikTok && !wantYouTube && !wantInstagram && !wantFacebook) {
         throw new Error('Nothing to post: every platform switched on for this channel already has this video.');
       }
