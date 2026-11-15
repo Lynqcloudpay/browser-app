@@ -16,16 +16,28 @@ export const SCENE_SECONDS = 15;
 const BEGIN = 'SCENES_BEGIN';
 const END = 'SCENES_END';
 
-/** The message sent to ChatGPT: turn one 15-second Grok prompt into `count` standalone scene prompts. */
+/**
+ * The message sent to ChatGPT: the channel chat's "next" answer is a 15-second clip, so it is used only as the idea, and
+ * ChatGPT writes a real 1-minute story (hook, problem, twist, payoff) in `count` scene prompts. Splitting the short
+ * clip instead stretched one small action over a minute with nothing to follow (owner's feedback).
+ */
 export function scenesQuestion(basePrompt: string, title: string, count = LONG_SCENES, seconds = SCENE_SECONDS): string {
   return [
     `Below is a Grok Imagine video prompt for a ${seconds}-second kids' cartoon called "${title}".`,
-    `Turn it into ONE longer story told in exactly ${count} scenes of ${seconds} seconds each (${count * seconds} seconds in total).`,
+    `Use it only as the IDEA (characters, setting, style, rules): write a NEW, complete ${count * seconds}-second story around`,
+    `that idea, told in exactly ${count} scenes of ${seconds} seconds each. Do NOT stretch the short clip's single action over`,
+    `${count} scenes: a viewer must be able to follow a real story for the full ${count * seconds} seconds, with something new`,
+    'happening in every scene. Story shape:',
+    '- Scene 1: the hook and setup. Within the first seconds something surprising or funny happens, and we learn what the characters want.',
+    '- Scene 2: they try, and a problem or obstacle appears.',
+    '- Scene 3: the problem gets bigger or takes a funny twist; the tension peaks.',
+    '- Scene 4: the payoff: the problem is solved in a surprising, funny way, with a happy, heartwarming ending.',
+    'Keep it simple enough for young children: few characters, one location (or two that are clearly connected), clear actions.',
     'Each scene is generated SEPARATELY in Grok. Scene 1 starts from the character reference image; every later scene starts',
     'from the exact LAST FRAME of the scene before it, which is given to Grok as the starting image. So every scene prompt must:',
     '- describe the characters, their look and the setting in full, word for word the same in every scene (Grok sees only this prompt and one image);',
     '- for scenes 2 and later, begin with "Starting exactly from the image:" and continue the action smoothly from where the previous scene ended;',
-    `- describe only what happens in that scene's ${seconds} seconds: scene 1 sets up the story, the middle scenes build it, the last scene has the funny ending;`,
+    `- describe only what happens in that scene's ${seconds} seconds, beat by beat (what the characters do and say);`,
     '- end each scene on a clear, well-lit shot with the characters fully visible, facing the camera, no motion blur (that frame starts the next scene);',
     `- keep the original prompt's rules, style, sound and safety notes, and end with the same settings line, set to ${seconds} seconds.`,
     '',
