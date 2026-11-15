@@ -2,7 +2,7 @@ import { cleanup } from './helpers/env';
 import assert from 'assert';
 import { chromium } from 'playwright';
 
-import { tikTokVideoLink, pickInstagramReelLink } from '../server/engine/jevBrowserAutomation';
+import { tikTokVideoLink, pickInstagramReelLink, setInstagramCover } from '../server/engine/jevBrowserAutomation';
 import { videoLink } from '../server/routes/library';
 
 /**
@@ -45,6 +45,32 @@ async function main(): Promise<void> {
     assert.strictEqual(videoLink('https://www.facebook.com'), null, 'nor is facebook.com');
     assert.strictEqual(videoLink('https://www.instagram.com/reel/ABC/'), 'https://www.instagram.com/reel/ABC/', 'a real Reel link is kept');
     console.log('ok home-page links are hidden');
+
+    // ── Instagram cover: our frame goes to the cover picker, the video picker is restored afterwards ──
+    const fs = await import('fs');
+    const os = await import('os');
+    const pathMod = await import('path');
+    const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'kindred-cover-'));
+    const coverFile = pathMod.join(dir, 'cover.jpg');
+    fs.writeFileSync(coverFile, Buffer.from('/9j/4AAQSkZJRgABAQ==', 'base64'));
+    // a) the cover's image input is in the Edit dialog
+    await page.setContent(`<div role="dialog"><span>Cover photo</span><input type="file" accept="image/jpeg,image/png"></div>`);
+    const chooser = { file: '/the/video.mp4' };
+    assert.strictEqual(await setInstagramCover(page, coverFile, chooser), true, 'image input: cover set');
+    assert.strictEqual(await page.locator('input[type="file"]').evaluate((i: HTMLInputElement) => i.files?.[0]?.name), 'cover.jpg', 'the cover file reached the input');
+    // b) only a "Select from computer" button that opens the native picker
+    await page.setContent(`<div role="dialog"><input id="h" type="file" accept="image/*,video/*" style="display:none">
+      <button onclick="document.getElementById('h').click()">Select from computer</button></div>`);
+    let given = '';
+    page.on('filechooser', async (fc) => { given = chooser.file; await fc.setFiles(chooser.file).catch(() => {}); });
+    assert.strictEqual(await setInstagramCover(page, coverFile, chooser), true, 'button: cover set through the picker');
+    assert.strictEqual(given, coverFile, 'the picker was handed the cover, not the video');
+    assert.strictEqual(chooser.file, '/the/video.mp4', 'the picker gives the video again afterwards');
+    // c) no cover controls: false, nothing clicked
+    await page.setContent(`<div role="dialog"><button>Next</button></div>`);
+    assert.strictEqual(await setInstagramCover(page, coverFile, chooser), false, 'no cover controls: not set');
+    fs.rmSync(dir, { recursive: true, force: true });
+    console.log('ok Instagram cover');
   } finally {
     await browser.close();
   }

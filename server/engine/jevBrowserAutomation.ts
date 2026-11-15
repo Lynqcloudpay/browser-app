@@ -25,7 +25,7 @@ import {
   songPath,
   youtubeTrackPath,
 } from './channels';
-import { makeMutedVideo, makeVideoWithSong } from './audioMix';
+import { makeMutedVideo, makeVideoWithSong, makeReelsCopy } from './audioMix';
 import {
   commentForRun,
   detailsQuestion,
@@ -3427,7 +3427,7 @@ export class ChannelBrowserAgent {
     videoPath: string,
     title: string,
     hook: string,
-    _coverPath?: string
+    coverPath?: string
   ): Promise<{ success: boolean; verified?: boolean; shareUrl?: string; message: string }> {
     const context = await this.launchContext(false);
     const page = context.pages().find((p) => !p.isClosed() && p.url().includes('instagram.com')) || (await context.newPage());
@@ -3435,8 +3435,10 @@ export class ChannelBrowserAgent {
 
     fs.mkdirSync(FRAMES_DIR, { recursive: true });
     const snap = (tag: string) => page.screenshot({ path: path.join(FRAMES_DIR, `instagram_${tag}_${Date.now()}.png`) }).catch(() => {});
-    const onChooser = async (chooser: FileChooser) => {
-      await chooser.setFiles(videoPath).catch(() => {});
+    // The same native picker serves the video and the cover: `chooserFile` says which file it gets right now.
+    const chooser = { file: videoPath };
+    const onChooser = async (fc: FileChooser) => {
+      await fc.setFiles(chooser.file).catch(() => {});
     };
     page.on('filechooser', onChooser);
 
@@ -3521,6 +3523,16 @@ export class ChannelBrowserAgent {
 
       // Click Next twice (Crop -> Edit/Cover -> Caption/Share)
       for (let step = 0; step < 2; step++) {
+        // On the Edit step, use the app's chosen frame as the cover. Grok's first frame is the channel's reference image,
+        // so Instagram's automatic cover made every Reel in the grid look the same.
+        if (step === 1 && coverPath && fs.existsSync(coverPath)) {
+          const ok = await setInstagramCover(page, coverPath, chooser).catch((e: any) => {
+            console.warn('[ChannelBrowserAgent] Instagram cover error:', e?.message || e);
+            return false;
+          });
+          console.log(`[ChannelBrowserAgent] Instagram cover: ${ok ? 'set from the chosen frame' : 'not set, Instagram picks its own'}`);
+          if (!ok) await snap('cover_not_set');
+        }
         let nextBtn: Locator | null = page.locator('div[role="dialog"] button, div[role="dialog"] [role="button"]')
           .filter({ hasText: /^\s*Next\s*$/i })
           .filter({ visible: true })
@@ -4385,17 +4397,26 @@ export class ChannelBrowserAgent {
       }
     };
 
+    // Instagram and Facebook get one clean copy of the video (no embedded cover picture stream, plain AAC sound): with
+    // Grok's raw file Instagram showed the Reel as having no audio. If the copy cannot be made, the original is used.
+    let reelsFile: Promise<string> | null = null;
+    const reelsVideo = () =>
+      (reelsFile ??= makeReelsCopy(input.videoPath).catch((err: any) => {
+        console.warn(`[ChannelBrowserAgent-${this.channelId}] Clean Reels copy failed, uploading the original file: ${err?.message || err}`);
+        return input.videoPath;
+      }));
+
     const instagramTask = async () => {
       if (!input.instagram) return;
       this.throwIfCancelled();
       console.log(`[ChannelBrowserAgent-${this.channelId}] Uploading the video to Instagram Reels...`);
       instagramStatus = 'failed';
       try {
-        let ig = await this.uploadToInstagramViaBrowser(input.videoPath, input.title, input.hook, input.coverPath || undefined);
+        let ig = await this.uploadToInstagramViaBrowser(await reelsVideo(), input.title, input.hook, input.coverPath || undefined);
         if (!ig.success && !this.cancelRequested && !/not signed in/i.test(ig.message)) {
           say(`Instagram upload failed (${ig.message.slice(0, 120)}). Trying once more…`);
           await this.releaseTabs(['instagram.com']);
-          ig = await this.uploadToInstagramViaBrowser(input.videoPath, input.title, input.hook, input.coverPath || undefined);
+          ig = await this.uploadToInstagramViaBrowser(await reelsVideo(), input.title, input.hook, input.coverPath || undefined);
         }
         if (ig.success) {
           instagramVerified = !!ig.verified;
@@ -4416,11 +4437,11 @@ export class ChannelBrowserAgent {
       console.log(`[ChannelBrowserAgent-${this.channelId}] Uploading the video to Facebook Reels...`);
       facebookStatus = 'failed';
       try {
-        let fb = await this.uploadToFacebookViaBrowser(input.videoPath, input.title, input.hook);
+        let fb = await this.uploadToFacebookViaBrowser(await reelsVideo(), input.title, input.hook);
         if (!fb.success && !this.cancelRequested && !/not signed in/i.test(fb.message)) {
           say(`Facebook upload failed (${fb.message.slice(0, 120)}). Trying once more…`);
           await this.releaseTabs(['facebook.com']);
-          fb = await this.uploadToFacebookViaBrowser(input.videoPath, input.title, input.hook);
+          fb = await this.uploadToFacebookViaBrowser(await reelsVideo(), input.title, input.hook);
         }
         if (fb.success) {
           facebookVerified = !!fb.verified;
@@ -4888,6 +4909,38 @@ export async function tikTokVideoLink(page: Page, title = ''): Promise<string | 
     )
     .catch(() => []);
   return pickTikTokLink(items, title);
+}
+
+/**
+ * Instagram's Edit step (video): the "Cover photo" area has a "Select from computer" control backed by an image file
+ * input. Prefer setting that input directly; otherwise click the control while the shared picker hands out the cover.
+ * True only when a file was actually given to Instagram. Best effort: the caller posts with Instagram's own cover if not.
+ */
+export async function setInstagramCover(page: Page, coverPath: string, chooser: { file: string }): Promise<boolean> {
+  const dialog = page.locator('[role="dialog"]').filter({ visible: true }).last();
+  const imageInput = dialog.locator('input[type="file"][accept*="image"]:not([accept*="video"])').first();
+  if ((await imageInput.count().catch(() => 0)) > 0) {
+    await imageInput.setInputFiles(coverPath);
+    await page.waitForTimeout(1500);
+    return true;
+  }
+  const pick = dialog
+    .getByRole('button', { name: /select from computer/i })
+    .or(dialog.getByText(/^\s*Select from computer\s*$/i))
+    .filter({ visible: true })
+    .first();
+  if (!(await pick.isVisible({ timeout: 4000 }).catch(() => false))) return false;
+  const previous = chooser.file;
+  chooser.file = coverPath;
+  try {
+    const opened = page.waitForEvent('filechooser', { timeout: 8000 }).then(() => true).catch(() => false);
+    await pick.click({ timeout: 5000 });
+    const ok = await opened;
+    await page.waitForTimeout(1500);
+    return ok;
+  } finally {
+    chooser.file = previous;
+  }
 }
 
 /**

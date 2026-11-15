@@ -80,6 +80,31 @@ export async function makeMutedVideo(videoPath: string): Promise<string> {
 }
 
 /**
+ * Copy for Instagram/Facebook Reels: only the first video stream and the first audio stream. Grok's MP4 also carries
+ * an embedded cover picture as an extra (mjpeg) video stream, and Instagram labelled such a Reel as having no audio.
+ * The picture is dropped, the video is copied untouched, the sound is re-encoded as plain AAC 44.1 kHz stereo, and
+ * the index goes first (faststart). A file without any audio stream fails, so it is never posted silently.
+ */
+export async function makeReelsCopy(videoPath: string): Promise<string> {
+  const out = variantPath(videoPath, 'reels');
+  if (fs.existsSync(out) && fs.statSync(out).size > 0) return out;
+  const { ffmpeg } = tools();
+  await execFileAsync(
+    ffmpeg,
+    [
+      '-y', '-v', 'error',
+      '-i', videoPath,
+      '-map', '0:v:0', '-map', '0:a:0',
+      '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-ar', '44100', '-ac', '2',
+      '-movflags', '+faststart',
+      out,
+    ],
+    { timeout: 120_000 }
+  );
+  return out;
+}
+
+/**
  * Same video with Grok's sound replaced by the song: the song starts at 0, loops if shorter than the video, is cut at
  * the video's end and fades out over the last half second.
  */

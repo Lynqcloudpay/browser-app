@@ -8,7 +8,7 @@ import { AddressInfo } from 'net';
 
 import { createApp } from '../server/index';
 import { shutdownAllAgents } from '../server/engine/agentRegistry';
-import { audioToolsAvailable, detectSongExtension, makeMutedVideo, makeVideoWithSong, mediaDuration } from '../server/engine/audioMix';
+import { audioToolsAvailable, detectSongExtension, makeMutedVideo, makeVideoWithSong, makeReelsCopy, mediaDuration } from '../server/engine/audioMix';
 import { parseSoundQuery, parseTikTokSoundLink, pickSoundResult, tikTokRowsFor } from '../server/engine/jevBrowserAutomation';
 
 const ffprobeStreams = (file: string) =>
@@ -84,8 +84,21 @@ async function run(): Promise<void> {
     assert.deepStrictEqual(ffprobeStreams(mixed).sort(), ['audio', 'video'], 'song file has one audio track');
     const [dv, dm] = [await mediaDuration(video), await mediaDuration(mixed)];
     assert.ok(Math.abs(dv - dm) < 0.2, `short song loops to the full video length (${dv} vs ${dm})`);
+
+    // Grok-style file: video + audio + an embedded cover picture (attached mjpeg stream). The Reels copy keeps only
+    // one video and one audio stream, and the sound is still there.
+    const cover = path.join(dir, 'cover.jpg');
+    const withPic = path.join(dir, 'with_pic.mp4');
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=red:s=180x320:d=1', '-frames:v', '1', cover]);
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', video, '-i', cover, '-map', '0', '-map', '1', '-c', 'copy',
+      '-c:v:1', 'mjpeg', '-disposition:v:1', 'attached_pic', withPic]);
+    assert.deepStrictEqual(ffprobeStreams(withPic).sort(), ['audio', 'video', 'video'], 'stand-in has the extra picture stream');
+    const reels = await makeReelsCopy(withPic);
+    assert.deepStrictEqual(ffprobeStreams(reels).sort(), ['audio', 'video'], 'Reels copy: one video and one audio stream');
+    const reelsVol = execFileSync('sh', ['-c', `ffmpeg -i "${reels}" -map 0:a -af volumedetect -f null - 2>&1 | grep max_volume`]).toString();
+    assert.ok(!/-inf|-9\d/.test(reelsVol), `Reels copy still has sound (${reelsVol.trim()})`);
     fs.rmSync(dir, { recursive: true, force: true });
-    console.log('ok mute and song mixing');
+    console.log('ok mute and song mixing, Reels copy');
   } else {
     console.log('note: ffmpeg not installed, mixing checks skipped');
   }
