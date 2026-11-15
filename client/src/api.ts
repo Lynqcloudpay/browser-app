@@ -85,6 +85,8 @@ function query(params: Record<string, string | number | undefined | null>): stri
 export interface StartRunBody {
   targetDurationSec: number;
   targetResolution: string;
+  /** Make the video and run the safety check, but post nowhere. */
+  noPost?: boolean;
 }
 
 export interface DetectChatGptResult {

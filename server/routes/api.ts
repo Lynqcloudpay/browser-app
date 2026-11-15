@@ -361,7 +361,12 @@ apiRouter.post(
     const trigger = req.body?.trigger === 'schedule' ? 'schedule' : 'button';
     const targetDurationSec = req.body?.targetDurationSec !== undefined ? Number(req.body.targetDurationSec) : undefined;
     const targetResolution = req.body?.targetResolution === '480p' || req.body?.targetResolution === '720p' ? req.body.targetResolution : undefined;
-    const result = startRun(trigger, id, targetDurationSec, targetResolution);
+    // noPost: make the video (and check it) without posting; longVideo: override the channel's 1-minute setting.
+    const extra = {
+      noPost: req.body?.noPost === true,
+      longVideo: typeof req.body?.longVideo === 'boolean' ? req.body.longVideo : undefined,
+    };
+    const result = startRun(trigger, id, targetDurationSec, targetResolution, extra);
     if (!result.started) return res.status(409).json({ error: result.reason, ...getRunStatus(id) });
     res.status(202).json({ started: true, ...getRunStatus(id) });
   })

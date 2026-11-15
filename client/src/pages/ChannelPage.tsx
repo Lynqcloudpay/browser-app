@@ -115,6 +115,7 @@ export function ChannelPage({ id }: { id: number }) {
           accountBusy={accountBusy}
           pending={startingId === id ? 'start' : pending}
           onStart={() => void start(channel)}
+          onMakeOnly={() => void start(channel, { noPost: true })}
           onStop={() => void stop()}
           onSkipLogin={() => void skipLogin()}
         />

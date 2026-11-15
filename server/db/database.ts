@@ -54,6 +54,7 @@ export function initDatabase(): void {
   addColumnIfMissing('channels', 'post_facebook', 'INTEGER NOT NULL DEFAULT 0');
   addColumnIfMissing('channels', 'keep_browser_open', 'INTEGER NOT NULL DEFAULT 1');
   addColumnIfMissing('channels', 'hold_flagged_videos', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing('channels', 'long_video', 'INTEGER NOT NULL DEFAULT 0');
   addColumnIfMissing('channels', 'tiktok_audio', "TEXT NOT NULL DEFAULT 'original'");
   addColumnIfMissing('channels', 'tiktok_sound', "TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing('channels', 'youtube_audio', "TEXT NOT NULL DEFAULT 'original'");

@@ -31,6 +31,8 @@ export interface Channel {
   keep_browser_open: boolean;
   /** Hold a video for a person when the safety check flags words in it. Off: post anyway and record the flags. */
   hold_flagged_videos: boolean;
+  /** One-minute videos: the story is made as 4 Grok scenes of 15 s, joined (longVideo.ts). */
+  long_video: boolean;
   /** TikTok audio: keep Grok's sound, mute it and use the channel's own song, or mute it and pick a TikTok sound. */
   tiktok_audio: TikTokAudio;
   /** Name of the TikTok library sound to search for (tiktok_audio = 'tiktok_sound'). */
@@ -166,6 +168,7 @@ function rowToChannel(row: any): Channel {
     schedule_times: Array.isArray(times) ? times : [],
     keep_browser_open: row.keep_browser_open === undefined || row.keep_browser_open === null ? true : Boolean(row.keep_browser_open),
     hold_flagged_videos: Boolean(row.hold_flagged_videos),
+    long_video: Boolean(row.long_video),
     tiktok_audio: asTikTokAudio(row.tiktok_audio),
     tiktok_sound: row.tiktok_sound || '',
     youtube_audio: asYouTubeAudio(row.youtube_audio),
@@ -224,6 +227,7 @@ export function exportChannelsToSeeds(): void {
       schedule_times: c.schedule_times,
       keep_browser_open: c.keep_browser_open,
       hold_flagged_videos: c.hold_flagged_videos,
+      long_video: c.long_video,
       tiktok_audio: c.tiktok_audio,
       tiktok_sound: c.tiktok_sound,
       youtube_audio: c.youtube_audio,
@@ -500,6 +504,10 @@ export function updateChannel(id: number, patch: Partial<Channel>): Channel {
   if (patch.schedule_enabled !== undefined) {
     updates.push('schedule_enabled = ?');
     params.push(patch.schedule_enabled ? 1 : 0);
+  }
+  if (patch.long_video !== undefined) {
+    updates.push('long_video = ?');
+    params.push(patch.long_video ? 1 : 0);
   }
   if (patch.hold_flagged_videos !== undefined) {
     updates.push('hold_flagged_videos = ?');

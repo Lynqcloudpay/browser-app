@@ -25,7 +25,8 @@ import {
   songPath,
   youtubeTrackPath,
 } from './channels';
-import { makeMutedVideo, makeVideoWithSong, makeReelsCopy } from './audioMix';
+import { makeMutedVideo, makeVideoWithSong, makeReelsCopy, concatClips, lastFrame, mediaDuration } from './audioMix';
+import { LONG_SCENES, SCENE_SECONDS, scenesQuestion, parseScenes } from './longVideo';
 import {
   commentForRun,
   detailsQuestion,
@@ -78,6 +79,10 @@ export interface PipelineOptions {
   onProgress?: (step: string, kind?: 'running' | 'waiting_login') => void;
   /** Called once the video's row exists in the database, with its id. */
   onJob?: (jobId: string) => void;
+  /** Make the video (and run the safety check) but post nowhere: it waits on the Videos page for "Post now". */
+  noPost?: boolean;
+  /** 1-minute video from scenes; defaults to the channel's setting. */
+  longVideo?: boolean;
 }
 
 export interface PipelineResult {
@@ -102,6 +107,8 @@ export interface PipelineResult {
   facebookVerified?: boolean;
   facebookUrl?: string;
   postedEverywhere: boolean;
+  /** The run was asked not to post (make-only): nothing was attempted anywhere. */
+  madeOnly?: boolean;
   /** True when at least one platform accepted the post (confirmed or not). */
   postedAnywhere: boolean;
   /** Platforms attempted in this pass that did not go through, e.g. ["YouTube"]. */
@@ -1545,7 +1552,9 @@ export class ChannelBrowserAgent {
     shotNumber = 1,
     headless = false,
     requestedDurationSec?: number,
-    resolutionOverride?: '480p' | '720p'
+    resolutionOverride?: '480p' | '720p',
+    /** Starting image instead of the channel's reference image (1-minute videos: the previous scene's last frame). */
+    startImagePath?: string
   ): Promise<{ videoPath: string; screenshotPath?: string; imagePath?: string; durationSec: number; width?: number; height?: number }> {
     if (!grokPrompt || grokPrompt.length < 50) {
       throw new Error(`Grok prompt is invalid or too short (${grokPrompt?.length || 0} chars). Aborting.`);
@@ -1670,8 +1679,8 @@ export class ChannelBrowserAgent {
       // 2. Video mode + settings from the ChatGPT prompt
       await this.configureGrokVideoMode(page, spec);
 
-      // 3. Reference image (character lock)
-      const refImagePath = referenceImagePath(this.channelId);
+      // 3. Reference image (character lock), or the given starting frame for a chained scene
+      const refImagePath = startImagePath && fs.existsSync(startImagePath) ? startImagePath : referenceImagePath(this.channelId);
       if (refImagePath && fs.existsSync(refImagePath)) {
         await this.attachGrokReferenceImage(page, refImagePath);
         // Attaching an image can change the composer's options — re-assert Video settings.
@@ -4626,6 +4635,37 @@ export class ChannelBrowserAgent {
     }
   }
 
+  /**
+   * 1-minute videos: ChatGPT, in a temporary chat in its own tab (the channel's prompt chat is untouched), turns the
+   * Grok prompt into LONG_SCENES standalone scene prompts. Asked twice at most; nothing has been spent on Grok yet.
+   */
+  private async splitIntoScenes(basePrompt: string, title: string, say: (step: string) => void): Promise<string[]> {
+    const context = await this.launchContext(false);
+    const page = await context.newPage();
+    try {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        this.throwIfCancelled();
+        say(`Splitting the story into ${LONG_SCENES} scenes in ChatGPT${attempt > 1 ? ' (second try)' : ''}…`);
+        await page.goto('https://chatgpt.com/?temporary-chat=true', { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await page.waitForTimeout(5000);
+        await dismissPopups(page).catch(() => {});
+        await this.submitChatGptPrompt(page, scenesQuestion(basePrompt, title));
+        await page.waitForTimeout(8000);
+        for (let i = 0; i < 160 && (await this.chatGptIsWriting(page)); i++) await page.waitForTimeout(1500);
+        await page.waitForTimeout(2000);
+        const scenes = parseScenes(await page.evaluate(() => document.body.innerText || '').catch(() => ''));
+        if (scenes.length === LONG_SCENES) {
+          console.log(`[ChannelBrowserAgent-${this.channelId}] Scenes: ${scenes.map((s) => s.length).join(', ')} chars.`);
+          return scenes;
+        }
+        console.warn(`[ChannelBrowserAgent-${this.channelId}] ChatGPT's scene answer could not be read (attempt ${attempt}).`);
+      }
+      throw new Error(`ChatGPT did not split the story into ${LONG_SCENES} scenes. Nothing was made or posted (no Grok credits used).`);
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
   private async runPipelineOnce(options: PipelineOptions): Promise<PipelineResult> {
     const jobId = 'job_' + crypto.randomUUID().slice(0, 10);
     console.log(`[ChannelBrowserAgent-${this.channelId}] Starting full autonomous pipeline for Job ${jobId}...`);
@@ -4634,11 +4674,14 @@ export class ChannelBrowserAgent {
     // 0. Open the browser (once) and make sure ChatGPT, Grok and TikTok are signed in — waits for the operator if not.
     const browser = await this.launchContext(false);
     const ch = getChannel(this.channelId);
+    // Make-only: no platform is a target, so their sign-ins are not checked and nothing is posted.
+    const post = !options.noPost;
+    const longVideo = options.longVideo ?? !!ch?.long_video;
     const targets = {
-      tiktok: ch ? !!ch.post_tiktok : true,
-      youtube: ch ? !!ch.post_youtube : true,
-      instagram: ch ? !!ch.post_instagram : false,
-      facebook: ch ? !!ch.post_facebook : false,
+      tiktok: post && (ch ? !!ch.post_tiktok : true),
+      youtube: post && (ch ? !!ch.post_youtube : true),
+      instagram: post && (ch ? !!ch.post_instagram : false),
+      facebook: post && (ch ? !!ch.post_facebook : false),
       youtubeMadeForKids: ch ? !!ch.youtube_made_for_kids : true,
     };
     const login = await this.ensureLoggedIn(browser, say, {
@@ -4656,7 +4699,7 @@ export class ChannelBrowserAgent {
     console.log('[ChannelBrowserAgent] SEQUENCE STEP 1: Creating prompt and script in ChatGPT...');
     say('Writing a new prompt in ChatGPT…');
     // Grok is prepared in its own tab while ChatGPT writes (both are waiting on remote servers).
-    const prepDuration = options.targetDurationSec || ch?.grok_duration || 15;
+    const prepDuration = longVideo ? SCENE_SECONDS : options.targetDurationSec || ch?.grok_duration || 15;
     const prepResolution: GrokResolution = options.targetResolution || ch?.grok_resolution || '720p';
     this.grokPreparedAt = 0;
     this.grokPrepAbandoned = false;
@@ -4724,47 +4767,76 @@ export class ChannelBrowserAgent {
     }
     this.throwIfCancelled();
 
-    // 2. Grok: one video from the exact ChatGPT prompt + the channel's reference image
+    // 2. Grok: one video from the exact ChatGPT prompt + the channel's reference image (a 1-minute video: one per scene)
     console.log('[ChannelBrowserAgent] SEQUENCE STEP 2: Generating the video in Grok Imagine...');
-    say('Generating the video in Grok (about 1–3 minutes)…');
     // If Grok's server fails ("Server failed to respond"), stop and say so. No automatic retry: it fails the same way at
     // 480p and 720p, and every attempt may use Grok credits.
-    const effDuration = options.targetDurationSec || ch?.grok_duration || 15;
+    const effDuration = longVideo ? SCENE_SECONDS : options.targetDurationSec || ch?.grok_duration || 15;
     const effResolution: GrokResolution = options.targetResolution || ch?.grok_resolution || '720p';
 
-    let grokRes: Awaited<ReturnType<typeof ChannelBrowserAgent.prototype.createVideoViaGrok>>;
-    try {
-      // Retried only when the failure came before the prompt was submitted: after that Grok may already charge for it.
-      grokRes = await this.retryStep(
-        'Setting up Grok',
-        say,
-        async (n) => {
-          if (n > 1) say('Generating the video in Grok (second try)…');
-          return this.createVideoViaGrok(grokPrompt, jobId, 1, false, effDuration, effResolution);
-        },
-        () => !this.grokSubmitted
-      );
-    } catch (err: any) {
-      if (err?.code === 'GROK_SERVER_FAILED') {
-        throw new Error(
-          `${err.message} Grok rendered the video but its server failed to deliver it. Nothing was posted. ` +
-            'Try making one video by hand in Grok: if that fails too, the problem is on Grok\'s side (or your Grok usage limit) and it should clear up later.'
+    // A 1-minute video: ChatGPT (temporary chat) splits the story into scenes before any Grok credit is spent.
+    const scenePrompts = longVideo ? await this.splitIntoScenes(grokPrompt, scriptPkg.concept_title, say) : [grokPrompt];
+    this.throwIfCancelled();
+
+    const generate = async (prompt: string, shot: number, startImage?: string) => {
+      const label = scenePrompts.length > 1 ? `scene ${shot} of ${scenePrompts.length}` : 'the video';
+      say(`Generating ${label} in Grok (about 1–3 minutes)…`);
+      try {
+        // Retried only when the failure came before the prompt was submitted: after that Grok may already charge for it.
+        const res = await this.retryStep(
+          'Setting up Grok',
+          say,
+          async (n) => {
+            if (n > 1) say(`Generating ${label} in Grok (second try)…`);
+            return this.createVideoViaGrok(prompt, jobId, shot, false, effDuration, effResolution, startImage);
+          },
+          () => !this.grokSubmitted
         );
+        if (!isValidVideoFile(res.videoPath)) {
+          throw new Error(`Grok Imagine did not produce a valid video for ${label}. Pipeline halted; nothing was uploaded.`);
+        }
+        return res;
+      } catch (err: any) {
+        if (err?.code === 'GROK_SERVER_FAILED') {
+          throw new Error(
+            `${err.message} Grok rendered ${label} but its server failed to deliver it. Nothing was posted. ` +
+              'Try making one video by hand in Grok: if that fails too, the problem is on Grok\'s side (or your Grok usage limit) and it should clear up later.'
+          );
+        }
+        throw err;
       }
-      throw err;
+    };
+
+    const clips: Array<Awaited<ReturnType<typeof ChannelBrowserAgent.prototype.createVideoViaGrok>>> = [];
+    // Scene 1 starts from the channel's reference image; every later scene starts from the LAST frame of the scene
+    // before it (uploaded to Grok as the starting image), so the video continues where the previous one stopped.
+    for (let i = 0; i < scenePrompts.length; i++) {
+      let startImage: string | undefined;
+      if (i > 0) {
+        startImage = path.join(FRAMES_DIR, `last_${jobId}_scene${i}.jpg`);
+        await lastFrame(clips[i - 1].videoPath, startImage);
+        console.log(`[ChannelBrowserAgent-${this.channelId}] Scene ${i + 1} starts from scene ${i}'s last frame: ${startImage}`);
+      }
+      clips.push(await generate(scenePrompts[i], i + 1, startImage));
+      this.throwIfCancelled();
     }
-    if (!isValidVideoFile(grokRes.videoPath)) {
-      throw new Error('Grok Imagine did not produce a valid video. Pipeline halted; nothing was uploaded.');
-    }
+    const grokRes = clips[0];
 
     const safeSlug = scriptPkg.concept_title.replace(/[^a-zA-Z0-9]+/g, '_').slice(0, 30) || 'Episode';
     const finalVideoPath = path.join(path.dirname(grokRes.videoPath), `${safeSlug}_${jobId}.mp4`);
 
-    // Raw Grok video with its original audio — no FFmpeg processing.
-    fs.renameSync(grokRes.videoPath, finalVideoPath);
-    console.log(`[ChannelBrowserAgent] Video ready (${grokRes.durationSec}s, original Grok audio): ${finalVideoPath}`);
-
-    const videoDuration = grokRes.durationSec;
+    let videoDuration = grokRes.durationSec;
+    if (clips.length > 1) {
+      say(`Joining the ${clips.length} scenes into one video…`);
+      await concatClips(clips.map((c) => c.videoPath), finalVideoPath);
+      videoDuration = await mediaDuration(finalVideoPath);
+      // The joined file is the video; the scene clips are kept next to it (shot_<job>_<n>.mp4) for a closer look.
+      console.log(`[ChannelBrowserAgent] ${clips.length} scenes joined (${videoDuration.toFixed(1)}s): ${finalVideoPath}`);
+    } else {
+      // Raw Grok video with its original audio — no FFmpeg processing.
+      fs.renameSync(grokRes.videoPath, finalVideoPath);
+      console.log(`[ChannelBrowserAgent] Video ready (${grokRes.durationSec}s, original Grok audio): ${finalVideoPath}`);
+    }
     const existingSnap = path.join(FRAMES_DIR, `shot_${jobId}_1.png`);
 
     // 3. Register the video as soon as it exists, so it is never lost if a later step fails or the run is stopped.
@@ -4774,14 +4846,15 @@ export class ChannelBrowserAgent {
         hook, hypothesis, script_text, shot_briefs_json, captions_json,
         state, video_path, thumbnail_path, duration_seconds,
         is_ai_generated, is_demo_job, created_at, updated_at
-      ) VALUES (?, ?, NULL, NULL, ?, 'short', 'all', ?, '', ?, ?, '[]', 'rendering', ?, ?, ?, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ) VALUES (?, ?, NULL, NULL, ?, ?, 'all', ?, '', ?, ?, '[]', 'rendering', ?, ?, ?, 1, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `).run(
       jobId,
       this.channelId,
       scriptPkg.concept_title,
+      clips.length > 1 ? 'long' : 'short',
       scriptPkg.hook,
       scriptPkg.script_text,
-      JSON.stringify(scriptPkg.shot_briefs),
+      JSON.stringify(clips.length > 1 ? scenePrompts.map((p, i) => ({ shot: i + 1, video_prompt: p })) : scriptPkg.shot_briefs),
       finalVideoPath,
       fs.existsSync(existingSnap) ? existingSnap : null,
       videoDuration
@@ -4801,7 +4874,7 @@ export class ChannelBrowserAgent {
     const qaResult = await inspectJob(jobId, {
       title: scriptPkg.concept_title,
       hook: scriptPkg.hook,
-      prompt: grokPrompt,
+      prompt: scenePrompts.join('\n\n'),
       videoPath: finalVideoPath,
       coverPath: thumbnailPath,
       holdOnFlags: ch ? ch.hold_flagged_videos : false,
@@ -4810,7 +4883,26 @@ export class ChannelBrowserAgent {
 
     // 5. Post — ONLY when QA passed. Parallel across enabled platforms.
     let posted: Awaited<ReturnType<typeof ChannelBrowserAgent.prototype.postVideo>>;
-    if (qaResult.passed) {
+    if (!post) {
+      console.log('[ChannelBrowserAgent] Make-only run: the video is saved and posted nowhere.');
+      posted = {
+        tiktokStatus: 'off',
+        tiktokVerified: false,
+        tiktokUrl: undefined,
+        youtubeStatus: 'off',
+        youtubeVerified: false,
+        youtubeUrl: undefined,
+        instagramStatus: 'off',
+        instagramVerified: false,
+        instagramUrl: undefined,
+        facebookStatus: 'off',
+        facebookVerified: false,
+        facebookUrl: undefined,
+        postedEverywhere: false,
+        postedAnywhere: false,
+        postFailed: [],
+      };
+    } else if (qaResult.passed) {
       posted = await this.postVideo({
         jobId,
         videoPath: finalVideoPath,
@@ -4850,7 +4942,7 @@ export class ChannelBrowserAgent {
       };
     }
 
-    await this.afterPosting(posted.tiktokVerified ? posted.tiktokUrl : undefined, say);
+    if (post) await this.afterPosting(posted.tiktokVerified ? posted.tiktokUrl : undefined, say);
 
     return {
       success: true,
@@ -4862,7 +4954,8 @@ export class ChannelBrowserAgent {
       durationSeconds: videoDuration,
       qaPassed: qaResult.passed,
       ...posted,
-      message: `ChatGPT prompt -> Grok video (${videoDuration}s${grokRes.width && grokRes.height ? ', ' + grokRes.width + 'x' + grokRes.height : ''}, original sound) -> QA ${qaResult.passed ? 'passed' : 'held'} -> TikTok: ${posted.tiktokStatus} -> YouTube: ${posted.youtubeStatus} -> Instagram: ${posted.instagramStatus} -> Facebook: ${posted.facebookStatus}`,
+      madeOnly: !post,
+      message: `ChatGPT prompt -> Grok video (${clips.length > 1 ? clips.length + ' scenes, ' : ''}${Math.round(videoDuration)}s${grokRes.width && grokRes.height ? ', ' + grokRes.width + 'x' + grokRes.height : ''}, original sound) -> QA ${qaResult.passed ? 'passed' : 'held'} -> TikTok: ${posted.tiktokStatus} -> YouTube: ${posted.youtubeStatus} -> Instagram: ${posted.instagramStatus} -> Facebook: ${posted.facebookStatus}`,
     };
   }
 }

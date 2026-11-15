@@ -27,6 +27,8 @@ export interface Channel {
   post_youtube: boolean;
   post_instagram: boolean;
   post_facebook: boolean;
+  /** One-minute videos: 4 Grok scenes of 15 seconds, joined into one video. */
+  long_video: boolean;
   youtube_made_for_kids: boolean;
   /** Keep the channel's browser window open between videos (on by default). */
   keep_browser_open: boolean;

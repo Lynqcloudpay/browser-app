@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS channels (
   post_youtube INTEGER NOT NULL DEFAULT 1,
   post_instagram INTEGER NOT NULL DEFAULT 0,
   post_facebook INTEGER NOT NULL DEFAULT 0,
+  long_video INTEGER NOT NULL DEFAULT 0,
   youtube_made_for_kids INTEGER NOT NULL DEFAULT 1,
   hashtag_hint TEXT NOT NULL DEFAULT '',
   schedule_enabled INTEGER NOT NULL DEFAULT 0,

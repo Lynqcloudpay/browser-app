@@ -35,12 +35,14 @@ export interface ProductionLineProps {
   accountBusy: boolean;
   pending: 'start' | 'stop' | 'skip' | null;
   onStart: () => void;
+  /** Make a video without posting it (a test run). */
+  onMakeOnly?: () => void;
   onStop: () => void;
   onSkipLogin: () => void;
 }
 
 /** The five-station track that shows one video moving from sign-in to post. */
-export function ProductionLine({ channel, run, accountBusy, pending, onStart, onStop, onSkipLogin }: ProductionLineProps) {
+export function ProductionLine({ channel, run, accountBusy, pending, onStart, onMakeOnly, onStop, onSkipLogin }: ProductionLineProps) {
   const busy = isRunBusy(run);
   const now = useNow(busy);
   const states = stationStates(run);
@@ -132,8 +134,13 @@ export function ProductionLine({ channel, run, accountBusy, pending, onStart, on
             <Button variant="primary" onClick={onStart} disabled={blockReason !== null} busy={pending === 'start'}>
               Make and post a video
             </Button>
+            {onMakeOnly && (
+              <Button variant="secondary" onClick={onMakeOnly} disabled={accountBusy} busy={pending === 'start'}>
+                Make one, don't post
+              </Button>
+            )}
             <p className="text-[14px] text-ink-soft">
-              Uses {channel.grok_resolution}, {channel.grok_duration}s.{' '}
+              Uses {channel.grok_resolution}, {channel.long_video ? '4 scenes of 15s (1 minute)' : `${channel.grok_duration}s`}.{' '}
               {platforms ? `Posts to ${platforms}.` : 'Posts nowhere yet.'}
             </p>
             {blockReason && <p className="w-full text-[14px] font-medium text-honey-ink">{blockReason}</p>}

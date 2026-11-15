@@ -105,6 +105,67 @@ export async function makeReelsCopy(videoPath: string): Promise<string> {
 }
 
 /**
+ * Saves the video's last frame as a JPEG (small, so Grok processes it quickly as a starting image). Reads from 0.2 s
+ * before the end, so the final frame is always found, and keeps the full resolution.
+ */
+export async function lastFrame(videoPath: string, out: string): Promise<string> {
+  const { ffmpeg } = tools();
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  await execFileAsync(
+    ffmpeg,
+    ['-y', '-v', 'error', '-sseof', '-0.2', '-i', videoPath, '-update', '1', '-q:v', '2', out],
+    { timeout: 60_000 }
+  );
+  if (!fs.existsSync(out) || fs.statSync(out).size === 0) throw new Error(`Could not read the last frame of ${path.basename(videoPath)}.`);
+  return out;
+}
+
+/**
+ * Joins scene clips into one video, in order. Every clip is scaled/padded to the first clip's size and 24 fps and its
+ * sound resampled, so clips that differ slightly still join; the sound of each clip is kept. A short audio fade at
+ * each join hides clicks. Fails if any clip has no audio (never a silent stretch).
+ */
+export async function concatClips(clips: string[], out: string): Promise<string> {
+  if (clips.length < 2) throw new Error('At least two clips are needed to join.');
+  const { ffmpeg, ffprobe } = tools();
+  const { stdout } = await execFileAsync(ffprobe, [
+    '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', clips[0],
+  ]);
+  const [w, h] = stdout.trim().split(',').map((n) => Number(n));
+  if (!w || !h) throw new Error('Could not read the first clip\'s size.');
+  for (const c of clips) {
+    const probe = await execFileAsync(ffprobe, ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', c]);
+    if (!probe.stdout.trim()) throw new Error(`A scene has no sound (${path.basename(c)}), so the clips were not joined.`);
+  }
+  const inputs = clips.flatMap((c) => ['-i', c]);
+  const filters: string[] = [];
+  for (let i = 0; i < clips.length; i++) {
+    const d = await mediaDuration(clips[i]);
+    const fadeOut = Math.max(0, d - 0.15).toFixed(2);
+    filters.push(
+      `[${i}:v:0]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24,format=yuv420p[v${i}]`,
+      `[${i}:a:0]aresample=44100,aformat=channel_layouts=stereo,afade=t=in:d=0.1,afade=t=out:st=${fadeOut}:d=0.15[a${i}]`
+    );
+  }
+  const pairs = clips.map((_c, i) => `[v${i}][a${i}]`).join('');
+  filters.push(`${pairs}concat=n=${clips.length}:v=1:a=1[v][a]`);
+  await execFileAsync(
+    ffmpeg,
+    [
+      '-y', '-v', 'error', ...inputs,
+      '-filter_complex', filters.join(';'),
+      '-map', '[v]', '-map', '[a]',
+      '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '160k',
+      '-movflags', '+faststart',
+      out,
+    ],
+    { timeout: 600_000 }
+  );
+  return out;
+}
+
+/**
  * Same video with Grok's sound replaced by the song: the song starts at 0, loops if shorter than the video, is cut at
  * the video's end and fades out over the last half second.
  */

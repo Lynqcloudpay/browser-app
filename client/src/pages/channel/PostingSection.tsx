@@ -11,7 +11,7 @@ export function PostingSection({ channel, patch }: { channel: ChannelView; patch
 
   const save = async (
     change: Partial<
-      Pick<ChannelView, 'post_tiktok' | 'post_youtube' | 'post_instagram' | 'post_facebook' | 'youtube_made_for_kids' | 'keep_browser_open'>
+      Pick<ChannelView, 'post_tiktok' | 'post_youtube' | 'post_instagram' | 'post_facebook' | 'youtube_made_for_kids' | 'keep_browser_open' | 'long_video'>
     >,
   ) => {
     setSaving(true);
@@ -52,6 +52,15 @@ export function PostingSection({ channel, patch }: { channel: ChannelView; patch
           </Switch>
         </div>
       )}
+      <div className="border-t border-line pt-4">
+        <Switch checked={channel.long_video} disabled={saving} onChange={(v) => void save({ long_video: v })}>
+          <span className="block font-semibold">1-minute videos</span>
+          <span className="block text-[14px] text-ink-soft">
+            ChatGPT splits each story into 4 scenes, Grok makes each 15-second scene from the reference image, and they are
+            joined into one 60-second video. Uses 4 times the Grok credits and takes about 4 times as long.
+          </span>
+        </Switch>
+      </div>
       <div className="border-t border-line pt-4">
         <Switch checked={channel.keep_browser_open} disabled={saving} onChange={(v) => void save({ keep_browser_open: v })}>
           <span className="block font-semibold">Keep the browser open between videos</span>

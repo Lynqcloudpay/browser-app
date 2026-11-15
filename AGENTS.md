@@ -122,6 +122,14 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
 - **Pop-ups that are not dialogs:** Grok's "Shape your scene, start to finish … Try it now" promo is a plain floating `<div>` (no `role=dialog`) with an icon button labelled "Dismiss". `popups.ts` marks small boxes (≤ 600 chars) whose text is a known nag AND that have their own Dismiss/Close/Not now button, and closes them with that button — never "Try it now". Covered by `tests/popups.test.ts`.
 - **Grok's Submit arrow is DISABLED while it processes the reference image** (a spinner on the thumbnail; Mr Watermelon's 2.3 MB PNG takes tens of seconds, Mr. Apple's 52 KB JPEG under a second), and a click/Enter on a disabled Submit is silently ignored. `submitGrokPrompt` waits until Submit is enabled, clicks once, then requires proof Grok took it (page moves to `/imagine/post/…`, a progress %, or the prompt box empties); it presses Enter once if the click is ignored, and throws with nothing submitted otherwise (so the step may be retried). Never mark a video "submitted" (`grokSubmitted`) before that proof. Test: `tests/grok-submit.test.ts`. Keep reference images small if runs feel slow.
 - **File pickers:** TikTok's "Upload cover" opens a native Mac window unless a `filechooser` listener intercepts it. Keep them.
+- **1-minute videos** (`channels.long_video`, channel page → "1-minute videos"; `server/engine/longVideo.ts`): after the
+  normal ChatGPT prompt, a ChatGPT **temporary** chat splits it into 4 scene prompts (`SCENES_BEGIN`/`SCENE n:`/`SCENES_END`,
+  `parseScenes` takes only the last complete block, so the question's own template is never read). Grok makes scene 1 from
+  the reference image and every later scene from the previous scene's **last frame** (`lastFrame`, JPEG; the owner's
+  choice, for continuity); `concatClips` joins them (scaled to the first clip, sound kept, short fades). Scene clips stay
+  as `shot_<job>_<n>.mp4`. 4× Grok credits; the attempt limit is 60 min instead of 25. Tests: `tests/long-video.test.ts`.
+- **Make one, don't post** (`POST /channels/:id/run` with `noPost: true`, optional `longVideo` override): makes and checks
+  the video, posts nowhere, skips platform sign-ins; the video waits on the Videos page for "Post now".
 - **Multi-channel:** each channel has its own browser context, reference image, ChatGPT chat, Grok settings, destinations and
   LaunchAgent (`com.kindredstudio.channel.<id>` → `scripts/dailyRun.ts --channel <id>`). Grok generations are throttled by
   `withGrokSlot`; macOS clipboard use is serialized by `withClipboard`.

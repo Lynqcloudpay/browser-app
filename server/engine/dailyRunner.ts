@@ -85,6 +85,12 @@ export function describeResult(result: PipelineResult, republish: boolean): { ok
     .join('. ');
   const title = `"${result.title}"`;
 
+  if (result.madeOnly) {
+    return {
+      ok: true,
+      message: `Made ${title} (${Math.round(result.durationSeconds)}s) without posting${result.qaPassed ? '' : '; the safety check flagged it'}. Watch it on the Videos page and use "Post now" when you are happy with it.`,
+    };
+  }
   if (!result.qaPassed) {
     return { ok: true, message: `${title} was made, but the safety check held it. Nothing was posted. Review it on the Videos page.` };
   }
@@ -112,6 +118,8 @@ type Hooks = {
 
 /** A single attempt that runs longer than this is stuck (a normal run takes 4–8 minutes): the browser is closed. */
 export const ATTEMPT_LIMIT_MS = 25 * 60 * 1000;
+/** A 1-minute video makes 4 Grok scenes (each 1–3 minutes) plus a ChatGPT split and a join, so it gets longer. */
+export const LONG_ATTEMPT_LIMIT_MS = 60 * 60 * 1000;
 /** Pause before starting over after a failure that happened before any video existed. */
 export const RETRY_DELAY_MS = 60 * 1000;
 /** Pause before posting again to a platform that failed. */
@@ -136,11 +144,11 @@ async function pause(channelId: number, ms: number): Promise<void> {
 }
 
 /** Runs one attempt with a time limit: when it is exceeded the browser is closed, which ends the stuck step. */
-async function withTimeLimit<T>(agent: ChannelBrowserAgent, work: () => Promise<T>): Promise<T> {
+async function withTimeLimit<T>(agent: ChannelBrowserAgent, work: () => Promise<T>, limitMs = ATTEMPT_LIMIT_MS): Promise<T> {
   const timer = setTimeout(() => {
-    console.warn(`[runner] Channel ${agent.channelId}: attempt passed ${ATTEMPT_LIMIT_MS / 60000} minutes — closing the browser.`);
+    console.warn(`[runner] Channel ${agent.channelId}: attempt passed ${limitMs / 60000} minutes — closing the browser.`);
     void agent.requestCancel('timeout');
-  }, ATTEMPT_LIMIT_MS);
+  }, limitMs);
   try {
     return await work();
   } finally {
@@ -214,9 +222,10 @@ function notify(title: string, message: string): void {
 async function makeVideoUnattended(
   channelId: number,
   agent: ChannelBrowserAgent,
-  options: { targetDurationSec: number; targetResolution: GrokResolution },
+  options: { targetDurationSec: number; targetResolution: GrokResolution; noPost?: boolean; longVideo?: boolean },
   hooks: Hooks
 ): Promise<PipelineResult> {
+  const limitMs = (options.longVideo ?? !!getChannel(channelId)?.long_video) ? LONG_ATTEMPT_LIMIT_MS : ATTEMPT_LIMIT_MS;
   for (let attempt = 1; ; attempt++) {
     let videoMade = false;
     const onJob = (id: string) => {
@@ -224,7 +233,7 @@ async function makeVideoUnattended(
       hooks.onJob(id);
     };
     try {
-      let result = await withTimeLimit(agent, () => agent.runFullAutonomousPipeline({ ...options, onProgress: hooks.onProgress, onJob }));
+      let result = await withTimeLimit(agent, () => agent.runFullAutonomousPipeline({ ...options, onProgress: hooks.onProgress, onJob }), limitMs);
       const repost = platformsToRepost(result);
       if (repost.length) {
         hooks.onProgress(`${repost.join(' and ')} did not post. Posting it again in 2 minutes…`);
@@ -343,7 +352,8 @@ export function startRun(
   trigger: 'button' | 'schedule',
   channelId = 1,
   targetDurationSec?: number,
-  targetResolution?: GrokResolution
+  targetResolution?: GrokResolution,
+  extra: { noPost?: boolean; longVideo?: boolean } = {}
 ): { started: boolean; reason?: string } {
   const b = begin(channelId, trigger, 'Opening the browser and checking your logins…');
   if (!b.started) return b;
@@ -356,6 +366,7 @@ export function startRun(
       {
         targetDurationSec: targetDurationSec || channel.grok_duration || 15,
         targetResolution: targetResolution || channel.grok_resolution || '720p',
+        ...extra,
       },
       hooks
     )
