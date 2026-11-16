@@ -768,25 +768,43 @@ export class ChannelBrowserAgent {
       await page.waitForTimeout(300);
     }
 
-    // Submit prompt: Press Enter natively
-    console.log(`[ChannelBrowserAgent] Submitting prompt via Enter key...`);
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(600);
-
-    // Fallback: Click ONLY the explicit send button if it is still visible and enabled (never click voice/mic buttons!)
-    const sendBtn = await page.$(
-      'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]'
-    );
-    if (sendBtn) {
-      const isDisabled = await sendBtn.getAttribute('disabled');
-      if (isDisabled === null) {
+    // Proof the message was sent: ChatGPT adds a "You said:" heading for every message of ours. Once a run's "next"
+    // was never sent, and the only reply on the page was an old one (it was refused, but a whole try was lost).
+    const sentCount = () => page.evaluate(() => (document.body.innerText.match(/You said:/g) || []).length).catch(() => 0);
+    const boxText = async () => (await element.evaluate((el: any) => (el.innerText || el.value || el.textContent || '').trim()).catch(() => '')) as string;
+    const before = await sentCount();
+    const pressSend = async () => {
+      console.log(`[ChannelBrowserAgent] Submitting prompt via Enter key...`);
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(600);
+      // Fallback: Click ONLY the explicit send button if it is still visible and enabled (never click voice/mic buttons!)
+      const sendBtn = await page.$(
+        'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send message"]'
+      );
+      if (sendBtn && (await sendBtn.getAttribute('disabled')) === null) {
         console.log('[ChannelBrowserAgent] Clicking bottom Send button...');
         await sendBtn.click({ force: true }).catch(() => {});
         await page.waitForTimeout(500);
       }
-    }
-
-    return true;
+    };
+    const wasSent = async (ms: number) => {
+      const end = Date.now() + ms;
+      while (Date.now() < end) {
+        if ((await sentCount()) > before) return true;
+        // Pages without the heading (none seen on ChatGPT so far): an emptied box is the proof.
+        if (before === 0 && (await sentCount()) === 0 && !(await boxText())) return true;
+        await page.waitForTimeout(500);
+      }
+      return false;
+    };
+    await pressSend();
+    if (await wasSent(10_000)) return true;
+    console.warn('[ChannelBrowserAgent] The message did not show up in the chat; sending it again.');
+    await element.click({ force: true }).catch(() => {});
+    if (!(await boxText())) await page.keyboard.insertText(promptText);
+    await pressSend();
+    if (await wasSent(10_000)) return true;
+    throw new Error('The message to ChatGPT was not sent (it never showed up in the chat).');
   }
 
   /**
@@ -1626,7 +1644,7 @@ export class ChannelBrowserAgent {
     }
     console.log(`[ChannelBrowserAgent-${this.channelId}] Grok: ${n - before} of ${files.length} pictures attached.`);
     // The role menu does not open while a picture is still uploading (Submit is disabled until all are done).
-    if (!(await this.waitForGrokUploads(page))) console.warn(`[ChannelBrowserAgent-${this.channelId}] Grok: pictures still uploading after 90s.`);
+    if (!(await this.waitForGrokUploads(page))) console.warn(`[ChannelBrowserAgent-${this.channelId}] Grok: pictures still uploading after 30s.`);
     await page.waitForTimeout(1000);
 
     for (let i = 0; i < files.length; i++) {
@@ -1683,12 +1701,26 @@ export class ChannelBrowserAgent {
     return confirmed();
   }
 
-  /** Waits (up to `ms`) until Grok's Submit arrow is enabled: it stays disabled while attached pictures upload. */
-  private async waitForGrokUploads(page: Page, ms = 90_000): Promise<boolean> {
-    const submit = this.grokComposer(page).locator('button[aria-label="Submit"], button[type="submit"]').first();
+  /**
+   * Waits (up to `ms`) until the composer's pictures have finished uploading: every thumbnail loaded and no spinner on
+   * the composer, twice in a row. (Grok's Submit arrow cannot tell: it also stays disabled while the prompt box is empty,
+   * so waiting for it cost 90 seconds per scene.)
+   */
+  private async waitForGrokUploads(page: Page, ms = 30_000): Promise<boolean> {
+    const composer = this.grokComposer(page);
     const end = Date.now() + ms;
+    let calm = 0;
     while (Date.now() < end) {
-      if (await submit.isEnabled().catch(() => false)) return true;
+      const busy = await composer
+        .evaluate((form) => {
+          const imgs = Array.from(form.querySelectorAll('img')) as HTMLImageElement[];
+          const loading = imgs.some((i) => !!i.getAttribute("src") && (!i.complete || i.naturalWidth === 0));
+          const spinner = !!form.querySelector('[class*="animate-spin"], [role="progressbar"], [aria-busy="true"]');
+          return loading || spinner;
+        })
+        .catch(() => false);
+      calm = busy ? 0 : calm + 1;
+      if (calm >= 2) return true;
       await page.waitForTimeout(500);
     }
     return false;
@@ -5074,18 +5106,30 @@ export class ChannelBrowserAgent {
     const reference = referenceImagePath(this.channelId);
     if (plan) {
       const picture = async (label: string, prompt: string, refs: string[], file: string) => {
-        say(`Drawing the ${label} in Grok…`);
-        try {
-          return await this.createImageViaGrok(prompt, refs, path.join(FRAMES_DIR, file));
-        } catch (err: any) {
-          if (/limit reached|usage limit|credits?|upgrade/i.test(String(err?.message))) throw err;
-          console.warn(`[ChannelBrowserAgent-${this.channelId}] The ${label} could not be made (${err?.message}); scenes go on without it.`);
-          return null;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          say(`Drawing the ${label} in Grok${attempt > 1 ? ' (second try)' : ''}…`);
+          try {
+            return await this.createImageViaGrok(prompt, refs, path.join(FRAMES_DIR, file));
+          } catch (err: any) {
+            if (/limit reached|usage limit|credits?|upgrade/i.test(String(err?.message))) throw err;
+            this.throwIfCancelled();
+            console.warn(`[ChannelBrowserAgent-${this.channelId}] The ${label} could not be made (attempt ${attempt}: ${err?.message}).`);
+          }
         }
+        console.warn(`[ChannelBrowserAgent-${this.channelId}] The ${label} could not be made; scenes go on without it.`);
+        return null;
       };
       castPicture = await picture('characters picture', plan.castImage, reference ? [reference] : [], `cast_${jobId}.jpg`);
       this.throwIfCancelled();
-      placePicture = await picture('place picture', plan.placeImage, [], `place_${jobId}.jpg`);
+      // The place is drawn FROM the characters picture (attached as @Image 1): the same village and style, and Grok then
+      // opens its picture page. Without any picture attached Grok shows a grid of results the code could not read.
+      const placeRef = castPicture || reference;
+      const placePrompt = placeRef
+        ? 'Use @Image 1 only for the place and the art style: the SAME place, props, colours and light, but with NO ' +
+          'characters at all (no Mr. Marshmallow, no animals, nobody). Only the empty place with its props.\n\n' +
+          plan.placeImage
+        : plan.placeImage;
+      placePicture = await picture('place picture', placePrompt, placeRef ? [placeRef] : [], `place_${jobId}.jpg`);
       this.throwIfCancelled();
     }
     const scenePrompts = plan ? plan.scenes.map((s, i) => sceneImageLegend(i + 1) + s) : [grokPrompt];

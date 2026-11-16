@@ -59,6 +59,8 @@ export function scenesQuestion(basePrompt: string, title: string, count = LONG_S
     'PICTURES (Grok will draw these first and attach them to every scene):',
     '- CAST IMAGE: a prompt for ONE picture of all the characters together, full body, side by side in the place, at their',
     '  correct sizes relative to Mr. Marshmallow (say the sizes, e.g. "Baby Sheep is half as tall as Mr. Marshmallow").',
+    '  Mr. Marshmallow is the star: in the front and the centre, and the TALLEST; every friend is a baby animal between',
+    '  half and three quarters of his height.',
     '  Say "Mr. Marshmallow exactly as in @Image 1". This picture is the opening shot of scene 1.',
     '- PLACE IMAGE: a prompt for ONE picture of the place alone, with every hiding spot / prop, and NO characters.',
     '- Both: soft pastel 3D cartoon, bright daylight, vertical 9:16, simple and uncluttered.',
