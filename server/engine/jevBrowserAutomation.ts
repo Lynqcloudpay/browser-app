@@ -1062,7 +1062,9 @@ export class ChannelBrowserAgent {
     pageTextBefore: string,
     sentAt: number,
     screenshotPath?: string,
-    timeoutMs = 120000
+    // 5 minutes: with ChatGPT's "High" thinking a long prompt took over 2 minutes, and the old 2-minute limit threw the
+    // answer away and restarted the whole run (twice). A finished answer is still returned as soon as it is complete.
+    timeoutMs = 300000
   ): Promise<{ grokPrompt: string; cleanTitle: string; cleanHook: string; stillWriting: boolean }> {
     let grokPrompt = '';
     let cleanTitle = '';
@@ -4687,7 +4689,8 @@ export class ChannelBrowserAgent {
         await dismissPopups(page).catch(() => {});
         await this.submitChatGptPrompt(page, scenesQuestion(basePrompt, title));
         await page.waitForTimeout(8000);
-        for (let i = 0; i < 160 && (await this.chatGptIsWriting(page)); i++) await page.waitForTimeout(1500);
+        // up to ~5 minutes, like the prompt wait (a 4-scene answer with "High" thinking is slow)
+        for (let i = 0; i < 200 && (await this.chatGptIsWriting(page)); i++) await page.waitForTimeout(1500);
         await page.waitForTimeout(2000);
         const scenes = parseScenes(await page.evaluate(() => document.body.innerText || '').catch(() => ''));
         if (scenes.length === LONG_SCENES) {
