@@ -1525,12 +1525,15 @@ export class ChannelBrowserAgent {
     const accepted = async (): Promise<boolean> =>
       page
         .evaluate((len) => {
-          const text = document.body.innerText || '';
           const box = document.querySelector('form [role="textbox"], form [contenteditable="true"], form textarea') as HTMLElement | null;
           const boxLen = box ? (((box as any).value ?? box.innerText) || '').trim().length : 0;
           return {
             moved: location.pathname.includes('/imagine/post/'),
-            progress: /\b\d{1,2}%/.test(text),
+            // Grok's progress counter is an element holding only "45%". Never search the page text: the prompt itself
+            // ("exactly 60% of Mr. Marshmallow's height") is on the page and looked like progress.
+            progress: Array.from(document.querySelectorAll('body *')).some(
+              (e) => e.childElementCount === 0 && /^\s*\d{1,2}\s*%\s*$/.test((e as HTMLElement).innerText || '')
+            ),
             emptied: boxLen < len * 0.3,
           };
         }, promptLength)
@@ -1746,6 +1749,7 @@ export class ChannelBrowserAgent {
       }
       const start = Date.now();
       let src = '';
+      let seen = '';
       while (Date.now() - start < 3 * 60 * 1000) {
         await page.waitForTimeout(2000);
         const st = await page
@@ -1757,17 +1761,27 @@ export class ChannelBrowserAgent {
             let bestArea = 0;
             for (const el of Array.from(document.querySelectorAll('img'))) {
               const i = el as HTMLImageElement;
-              if (!/\/generated\//.test(i.src) || old.includes(i.src) || i.naturalWidth <= 300) continue;
+              // Finished pictures are full size (1008x1792); a low-resolution preview while drawing is not taken.
+              if (!/\/generated\//.test(i.src) || old.includes(i.src) || !i.complete || i.naturalWidth < 700) continue;
               const r = i.getBoundingClientRect();
               if (r.width * r.height > bestArea) { best = i; bestArea = r.width * r.height; }
             }
             // With a picture attached Grok opens /imagine/post/…; with none (the place picture) it shows the results
             // as a grid right on /imagine. Both are fine: the picture only has to be new and big.
-            return { err: err ? err[0] : null, src: best && bestArea > 40000 ? best.src : '', pct: /\b\d{1,2}%/.test(text) };
+            // Progress = an element holding only "45%" (the prompt text on the page has percentages too).
+            const pct = Array.from(document.querySelectorAll('body *')).some(
+              (e) => e.childElementCount === 0 && /^\s*\d{1,2}\s*%\s*$/.test((e as HTMLElement).innerText || '')
+            );
+            return { err: err ? err[0] : null, src: best && bestArea > 40000 ? best.src : '', pct };
           }, oldSrcs)
           .catch(() => null);
         if (!st) continue;
         if (st.err && !st.src) await fail(`Grok reported: "${st.err}" while making a picture.`);
+        // Taken only when the same finished picture is shown on two checks in a row (2 seconds apart).
+        if (st.src && !st.pct && st.src !== seen) {
+          seen = st.src;
+          continue;
+        }
         if (st.src && !st.pct) {
           src = st.src;
           break;
@@ -1988,7 +2002,11 @@ export class ChannelBrowserAgent {
         const state = await page.evaluate(({ initial, minDur }) => {
           const text = document.body.innerText || '';
           const errorMatch = text.match(/server failed to respond|failed to respond|something went wrong|content moderated|couldn['’]t generate|failed to generate|generation failed|rate limit|limit reached|try again later/i);
-          const progress = text.match(/\b(\d{1,2})%/)?.[1] || null;
+          // Grok's counter is an element holding only "45%"; the prompt text on the page may contain percentages too.
+          const pctEl = Array.from(document.querySelectorAll('body *')).find(
+            (e) => e.childElementCount === 0 && /^\s*\d{1,2}\s*%\s*$/.test((e as HTMLElement).innerText || '')
+          ) as HTMLElement | undefined;
+          const progress = pctEl ? (pctEl.innerText.match(/\d{1,2}/)?.[0] ?? null) : null;
           const makeVideo = Array.from(document.querySelectorAll('button')).some((b) => /^\s*make video\s*$/i.test(b.textContent || ''));
           let best: HTMLVideoElement | null = null;
           let bestArea = 0;
