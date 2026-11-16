@@ -1,7 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { execFile, execSync } from 'child_process';
+import { execFile, execFileSync, execSync } from 'child_process';
 import { promisify } from 'util';
 import { chromium, BrowserContext, Page, FileChooser, Locator } from 'playwright';
 
@@ -606,7 +606,7 @@ export class ChannelBrowserAgent {
    * Explicitly avoids any Canvas, artifact, voice/microphone buttons, or inline message boxes.
    */
   public async submitChatGptPrompt(page: Page, promptText: string): Promise<boolean> {
-    console.log(`[ChannelBrowserAgent] Locating bottom chat composer to submit "${promptText}"...`);
+    console.log(`[ChannelBrowserAgent] Locating bottom chat composer to submit "${promptText.slice(0, 80)}${promptText.length > 80 ? '…' : ''}"...`);
     await page.bringToFront().catch(() => {});
     await page.waitForTimeout(300);
 
@@ -696,10 +696,46 @@ export class ChannelBrowserAgent {
     await page.keyboard.press('Backspace');
     await page.waitForTimeout(100);
 
-    // Type the prompt natively into the focused input
-    console.log(`[ChannelBrowserAgent] Typing "${promptText}" into bottom chat composer...`);
-    await page.keyboard.type(promptText, { delay: 50 });
-    await page.waitForTimeout(300);
+    const multiLine = promptText.includes('\n') || promptText.length > 200;
+    const flat = (t: string) => t.replace(/\s+/g, ' ').trim().toLowerCase();
+    if (multiLine) {
+      // A long, multi-line message (the 1-minute story request, research questions) is entered WHOLE before it is sent:
+      // keyboard.type() presses Enter at every "\n", which sent each line to ChatGPT as its own message. Each line is
+      // inserted at once and lines are joined with Shift+Enter (a line break in the composer, not a send).
+      // Pasted in one go (clipboard + Cmd+V, like the Grok prompt), not typed: instant, and line breaks stay line breaks.
+      console.log(`[ChannelBrowserAgent] Pasting a ${promptText.length}-character message (${promptText.split('\n').length} lines) into the composer...`);
+      const readBox = async () => flat(await element.evaluate((el: any) => el.innerText || el.value || el.textContent || ''));
+      const want = flat(promptText);
+      await withClipboard(async () => {
+        await page.bringToFront().catch(() => {});
+        execFileSync('pbcopy', { input: promptText });
+        await element.click({ force: true });
+        await page.keyboard.press('Meta+V');
+      }).catch((e: any) => console.warn(`[ChannelBrowserAgent] Clipboard paste failed (${e?.message || e}); entering the text instead.`));
+      await page.waitForTimeout(800);
+      if (!(await readBox()).includes(want.slice(-60))) {
+        // Backup when the paste did not land: each line inserted at once, joined with Shift+Enter (never a plain Enter).
+        await element.click({ force: true });
+        await page.keyboard.press('Meta+A');
+        await page.keyboard.press('Backspace');
+        const lines = promptText.replace(/\r/g, '').split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i]) await page.keyboard.insertText(lines[i]);
+          if (i < lines.length - 1) await page.keyboard.press('Shift+Enter');
+        }
+        await page.waitForTimeout(500);
+      }
+      const entered = await readBox();
+      // Never send a half-entered message: check the start and the end both made it into the box.
+      if (!entered.includes(want.slice(0, 60)) || !entered.includes(want.slice(-60))) {
+        throw new Error('The message was not fully entered in ChatGPT\'s box, so it was not sent.');
+      }
+    } else {
+      // Type the prompt natively into the focused input
+      console.log(`[ChannelBrowserAgent] Typing "${promptText}" into bottom chat composer...`);
+      await page.keyboard.type(promptText, { delay: 50 });
+      await page.waitForTimeout(300);
+    }
 
     // Verify text was entered into the chat composer
     const enteredText = await element.evaluate((el: any) => {
@@ -707,7 +743,7 @@ export class ChannelBrowserAgent {
     });
 
     // If typing didn't populate the contenteditable node (e.g. React controlled component):
-    if (!enteredText.toLowerCase().includes(promptText.toLowerCase())) {
+    if (!multiLine && !enteredText.toLowerCase().includes(promptText.toLowerCase())) {
       console.log('[ChannelBrowserAgent] Inserting text via keyboard.insertText to chat composer...');
       await element.click({ force: true });
       await page.keyboard.insertText(promptText);

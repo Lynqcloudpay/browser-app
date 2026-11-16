@@ -187,6 +187,24 @@ async function main(): Promise<void> {
       console.log(`ok writing-card format ${withStop ? 'with' : 'WITHOUT'} a Stop button (${secs}s, ${got.grokPrompt.length} chars)`);
     }
 
+    // ── a long multi-line message (1-minute story request) is entered whole and sent ONCE ──
+    // keyboard.type() pressed Enter at every line break, so ChatGPT got each line as its own message.
+    await page.setContent(`<!doctype html><html><body><main></main>
+      <form><div id="box" contenteditable="true" style="min-height:40px;width:400px;white-space:pre-wrap"></div></form>
+      <script>window.sent = [];
+        document.getElementById('box').addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); window.sent.push(e.target.innerText); e.target.innerText = ''; }
+          else if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); document.execCommand('insertLineBreak'); }
+        });</script></body></html>`);
+    const longMessage = ['Line one of the instructions.', 'Line two: scenes.', '', 'ORIGINAL PROMPT:', 'Mr. Marshmallow finds treasure. 15 seconds • Vertical 9:16'].join('\n');
+    const t0 = Date.now();
+    await agent.submitChatGptPrompt(page, longMessage);
+    const sent: string[] = await page.evaluate(() => (window as any).sent);
+    assert.strictEqual(sent.length, 1, `the message is sent once, not once per line (sent ${sent.length} times)`);
+    assert.ok(sent[0].includes('Line one') && sent[0].includes('finds treasure'), `the whole message went in one send (${JSON.stringify(sent[0]).slice(0, 120)})`);
+    assert.ok(Date.now() - t0 < 15000, 'entered quickly, not typed letter by letter');
+    console.log(`ok long message sent once (${Date.now() - t0} ms)`);
+
     // ── Mr. Marshmallow: prompt card, then a title card and a YouTube "description — SEO" card, all headed "Writing" ──
     // The description mentions a "15-second animated video" and is the newest card; it was once pasted into Grok.
     const mmPrompt = [
