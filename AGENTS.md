@@ -123,9 +123,10 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
 - **Grok's Submit arrow is DISABLED while it processes the reference image** (a spinner on the thumbnail; Mr Watermelon's 2.3 MB PNG takes tens of seconds, Mr. Apple's 52 KB JPEG under a second), and a click/Enter on a disabled Submit is silently ignored. `submitGrokPrompt` waits until Submit is enabled, clicks once, then requires proof Grok took it (page moves to `/imagine/post/…`, a progress %, or the prompt box empties); it presses Enter once if the click is ignored, and throws with nothing submitted otherwise (so the step may be retried). Never mark a video "submitted" (`grokSubmitted`) before that proof. Test: `tests/grok-submit.test.ts`. Keep reference images small if runs feel slow.
 - **File pickers:** TikTok's "Upload cover" opens a native Mac window unless a `filechooser` listener intercepts it. Keep them.
 - **1-minute videos** (`channels.long_video`, channel page → "1-minute videos"; `server/engine/longVideo.ts`): the channel
-  chat's "next" answer is only the idea. A ChatGPT **temporary** chat plans a simple, logical but hyper-energetic toddler story
-  (owner: kids' attention is short, nobody stands still, something new every 2-3 s; Mr. Marshmallow + 3-4 village
-  friends; hide-and-seek style, one place, fixed props, no decorations from nowhere, no size/species changes) as a CAST IMAGE prompt, a PLACE IMAGE prompt and 4 scene prompts
+  chat's "next" answer is only the idea. A ChatGPT **temporary** chat plans a fun, energetic, physically real toddler story
+  (owner: "flat and stupid" stories and broken physics, e.g. a bowling ball throwing itself; so: one funny premise, rule of
+  three, surprise twist; Mr. Marshmallow + 2 friends; energy from bodies, faces, camera and music, NOT objects; no throwing,
+  catching, balls, sports, passing, vehicles; at most 2 big fixed props; no decorations from nowhere, no size/species changes) as a CAST IMAGE prompt, a PLACE IMAGE prompt and 4 scene prompts
   (`SCENES_BEGIN … SCENES_END`, `parsePlan` reads only the last complete block). Grok **Image mode** draws the cast (with the
   channel reference attached) and the place (`createImageViaGrok`, `/imagine/post/…`, `assets.grok.com/…/generated/…`).
   Every scene is made in Video mode with 4 pictures (`sceneImages`, `attachGrokImages`): @Image 1 First frame (scene 1:

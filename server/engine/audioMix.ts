@@ -206,3 +206,46 @@ export function detectSongExtension(buf: Buffer): '.mp3' | '.m4a' | '.wav' | '.a
   if (buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WAVE') return '.wav';
   return null;
 }
+
+/** Background music level under Grok's own sound (0..1). */
+export const MUSIC_BED_VOLUME = 0.22;
+
+/**
+ * Same video with a quiet music track laid UNDER its own sound (voices and effects stay on top). The music loops if
+ * shorter, fades in over 0.5 s and out over the last 1.5 s, and is turned down further while the video's own sound is
+ * loud (sidechain ducking), so dialogue stays clear. The video stream is copied. Output: <video>_music.mp4.
+ */
+export async function addMusicBed(videoPath: string, musicFile: string, volume = MUSIC_BED_VOLUME): Promise<string> {
+  const { ffmpeg, ffprobe } = tools();
+  const out = variantPath(videoPath, 'music');
+  const duration = await mediaDuration(videoPath);
+  const fadeOutStart = Math.max(0, duration - 1.5).toFixed(2);
+  const bed = `aresample=44100,aformat=channel_layouts=stereo`;
+  const probe = await execFileAsync(ffprobe, ['-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', videoPath]);
+  const hasVoice = probe.stdout.trim().length > 0;
+  const filter = hasVoice
+    ? `[0:a:0]${bed},asplit=2[voice][key];` +
+      `[1:a:0]${bed},volume=${volume},afade=t=in:d=0.5,afade=t=out:st=${fadeOutStart}:d=1.5[bed];` +
+      `[bed][key]sidechaincompress=threshold=0.04:ratio=5:attack=20:release=400[ducked];` +
+      `[voice][ducked]amix=inputs=2:duration=first:normalize=0[a]`
+    : `[1:a:0]${bed},volume=${Math.min(0.8, volume * 2.5)},afade=t=in:d=0.5,afade=t=out:st=${fadeOutStart}:d=1.5[a]`;
+  await execFileAsync(
+    ffmpeg,
+    [
+      '-y', '-v', 'error',
+      '-i', videoPath,
+      '-stream_loop', '-1', '-i', musicFile,
+      '-filter_complex', filter,
+      '-map', '0:v:0', '-map', '[a]',
+      '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+      '-t', duration.toFixed(2),
+      '-movflags', '+faststart',
+      out,
+    ],
+    { timeout: 300_000 }
+  );
+  if (!fs.existsSync(out) || fs.statSync(out).size === 0) {
+    throw new Error(`Adding the music to ${path.basename(videoPath)} failed: no output file.`);
+  }
+  return out;
+}

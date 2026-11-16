@@ -24,8 +24,10 @@ import {
   referenceImagePath,
   songPath,
   youtubeTrackPath,
+  musicDir,
+  pickMusicTrack,
 } from './channels';
-import { makeMutedVideo, makeVideoWithSong, makeReelsCopy, concatClips, lastFrame, mediaDuration } from './audioMix';
+import { makeMutedVideo, makeVideoWithSong, makeReelsCopy, concatClips, lastFrame, mediaDuration, addMusicBed } from './audioMix';
 import { LONG_SCENES, SCENE_SECONDS, scenesQuestion, parsePlan, sceneImageLegend, sceneImages, type StoryPlan } from './longVideo';
 import {
   commentForRun,
@@ -5209,6 +5211,20 @@ export class ChannelBrowserAgent {
       videoDuration = await mediaDuration(finalVideoPath);
       // The joined file is the video; the scene clips are kept next to it (shot_<job>_<n>.mp4) for a closer look.
       console.log(`[ChannelBrowserAgent] ${clips.length} scenes joined (${videoDuration.toFixed(1)}s): ${finalVideoPath}`);
+      // One music track under the whole minute (owner: voices without music felt boring, and Grok's music changes
+      // from scene to scene). Tracks come from storage/channels/<id>/music; without any, Grok's sound is kept as is.
+      const track = pickMusicTrack(this.channelId);
+      if (track) {
+        try {
+          const withMusic = await addMusicBed(finalVideoPath, track);
+          fs.renameSync(withMusic, finalVideoPath);
+          console.log(`[ChannelBrowserAgent] Background music added: ${path.basename(track)}`);
+        } catch (e: any) {
+          console.warn(`[ChannelBrowserAgent] Background music could not be added (${e?.message || e}); keeping Grok's sound.`);
+        }
+      } else {
+        console.log(`[ChannelBrowserAgent] No background music: add tracks to ${musicDir(this.channelId)}`);
+      }
     } else {
       // Raw Grok video with its original audio — no FFmpeg processing.
       fs.renameSync(grokRes.videoPath, finalVideoPath);

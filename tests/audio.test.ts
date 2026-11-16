@@ -8,7 +8,7 @@ import { AddressInfo } from 'net';
 
 import { createApp } from '../server/index';
 import { shutdownAllAgents } from '../server/engine/agentRegistry';
-import { audioToolsAvailable, detectSongExtension, makeMutedVideo, makeVideoWithSong, makeReelsCopy, mediaDuration } from '../server/engine/audioMix';
+import { addMusicBed, audioToolsAvailable, detectSongExtension, makeMutedVideo, makeVideoWithSong, makeReelsCopy, mediaDuration } from '../server/engine/audioMix';
 import { parseSoundQuery, parseTikTokSoundLink, pickSoundResult, tikTokRowsFor } from '../server/engine/jevBrowserAutomation';
 
 const ffprobeStreams = (file: string) =>
@@ -99,6 +99,29 @@ async function run(): Promise<void> {
     assert.ok(!/-inf|-9\d/.test(reelsVol), `Reels copy still has sound (${reelsVol.trim()})`);
     fs.rmSync(dir, { recursive: true, force: true });
     console.log('ok mute and song mixing, Reels copy');
+
+    // Background music under the video's own sound: one video and one audio stream, length kept
+    const musicDirTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kindred-music-'));
+    const bedVideo = path.join(musicDirTmp, 'bed.mp4');
+    const bedTrack = path.join(musicDirTmp, 'track.mp3');
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=180x320:rate=24:duration=3',
+      '-f', 'lavfi', '-i', 'sine=frequency=330:duration=3', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', bedVideo]);
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=660:duration=1', '-c:a', 'libmp3lame', bedTrack]);
+    const bedOut = await addMusicBed(bedVideo, bedTrack);
+    assert.ok(fs.existsSync(bedOut) && fs.statSync(bedOut).size > 0, 'music output exists');
+    assert.strictEqual(path.basename(bedOut), 'bed_music.mp4');
+    assert.deepStrictEqual(ffprobeStreams(bedOut).sort(), ['audio', 'video'], 'music bed: one video and one audio stream');
+    const [bdv, bdm] = [await mediaDuration(bedVideo), await mediaDuration(bedOut)];
+    assert.ok(Math.abs(bdv - bdm) < 0.3, `music bed keeps the video length (${bdv} vs ${bdm})`);
+
+    // Video with no sound of its own: the music alone becomes the audio
+    const silentVideo = path.join(musicDirTmp, 'silent.mp4');
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=180x320:rate=24:duration=3',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an', silentVideo]);
+    const noAudioOut = await addMusicBed(silentVideo, bedTrack);
+    assert.ok(ffprobeStreams(noAudioOut).includes('audio'), 'video with no sound gets the music as its audio');
+    fs.rmSync(musicDirTmp, { recursive: true, force: true });
+    console.log('ok music bed under the video sound');
   } else {
     console.log('note: ffmpeg not installed, mixing checks skipped');
   }

@@ -116,6 +116,53 @@ export function songPath(id: number): string | null {
   return null;
 }
 
+/** Folder with the channel's background-music tracks (YouTube Audio Library downloads), storage/channels/<id>/music. */
+export function musicDir(id: number): string {
+  return path.join(channelDir(id), 'music');
+}
+
+/** All usable tracks in musicDir (SONG_EXTENSIONS, non-empty files), sorted by name. [] when none. */
+export function musicTracks(id: number): string[] {
+  const dir = musicDir(id);
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((name) => (SONG_EXTENSIONS as readonly string[]).includes(path.extname(name).toLowerCase()))
+    .sort()
+    .map((name) => path.join(dir, name))
+    .filter((file) => {
+      try {
+        return fs.statSync(file).isFile() && fs.statSync(file).size > 0;
+      } catch {
+        return false;
+      }
+    });
+}
+
+/**
+ * One track for the next video: never the same as the last one when there are 2+ tracks (rotation remembered in
+ * <musicDir>/.last), otherwise random. null when the folder has no tracks.
+ */
+export function pickMusicTrack(id: number): string | null {
+  const tracks = musicTracks(id);
+  if (tracks.length === 0) return null;
+  const lastFile = path.join(musicDir(id), '.last');
+  let last = '';
+  try {
+    last = fs.readFileSync(lastFile, 'utf8').trim();
+  } catch {
+    last = '';
+  }
+  const pool = tracks.length > 1 ? tracks.filter((t) => path.basename(t) !== last) : tracks;
+  const chosen = pool[Math.floor(Math.random() * pool.length)];
+  try {
+    fs.writeFileSync(lastFile, path.basename(chosen));
+  } catch {
+    // best effort: rotation memory is optional
+  }
+  return chosen;
+}
+
 /** A track downloaded from YouTube's free Audio Library, used for YouTube when youtube_audio = 'youtube_library'. */
 export function youtubeTrackPath(id: number): string | null {
   const dir = channelDir(id);
