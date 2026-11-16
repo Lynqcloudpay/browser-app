@@ -42,7 +42,9 @@ export function scenesQuestion(basePrompt: string, title: string, count = LONG_S
     '  spot 2, try spot 3, found!). Gentle surprises, giggles, a happy ending with a hug or a cheer.',
     '- Scene 1: meet the friends and the goal. Scenes 2-3: two tries that fail in a funny way. Scene 4: success, celebration.',
     '- ABSOLUTE RULES: characters never change size, shape, colour or species; props never disappear, appear from nowhere or',
-    '  move by themselves; no new characters or places; the background stays the same place.',
+    '  move by themselves; no new characters or places; the background stays the same place. No decorations appear for',
+    '  the celebration (no banners, flags, balloons, confetti, mats or signs): celebrate with actions, hugs and cheers only.',
+    '  Every object any scene mentions must be in the PLACE IMAGE prompt from the start.',
     '- Short, clear dialogue (a few words per line) and one simple catchphrase. Each speaking character has a fixed VOICE',
     '  description, copied word for word into every scene next to their lines.',
     '',
@@ -100,7 +102,12 @@ function lastBlock(pageText: string): string {
   return /\((full prompt for scene|picture prompt)/i.test(block) ? '' : block;
 }
 
-const HEADING = /^\s*\**\s*(CAST IMAGE|PLACE IMAGE|SCENE\s+\d+)\s*\**\s*[:.\-–—]?\s*\**\s*$/gim;
+/**
+ * A heading line: "CAST IMAGE:", "**SCENE 2:**", "### Scene 3 (0-15s):", "SCENE 4 — The big find". The text after the
+ * heading on the same line belongs to its body (ChatGPT often writes "CAST IMAGE: Create ONE …" on one line). A
+ * heading needs ":" / a dash, or nothing after it, so a body line like "Scene 1 ends with a hug" is not one.
+ */
+const HEADING = /^[\s#>*_]*(CAST IMAGE|PLACE IMAGE|SCENE\s+\d+)(?:\s*\([^)\n]{0,30}\))?[\s*_]*(?:(?::|\s[-–—]\s|[-–—]\s)[\s*_]*(.*)|$)/i;
 
 /**
  * Reads ChatGPT's plan: the two picture prompts and exactly `count` scene prompts. null when anything is missing or
@@ -109,17 +116,21 @@ const HEADING = /^\s*\**\s*(CAST IMAGE|PLACE IMAGE|SCENE\s+\d+)\s*\**\s*[:.\-–
 export function parsePlan(pageText: string, count = LONG_SCENES): StoryPlan | null {
   const block = lastBlock(pageText);
   if (!block) return null;
-  const parts = block.split(HEADING); // [before, h1, body1, h2, body2, ...]
+  const sections: Array<{ head: string; lines: string[] }> = [];
+  for (const line of block.split('\n')) {
+    const m = line.match(HEADING);
+    if (m) sections.push({ head: m[1].toUpperCase().replace(/\s+/g, ' '), lines: m[2] ? [m[2]] : [] });
+    else if (sections.length) sections[sections.length - 1].lines.push(line);
+  }
   let castImage = '';
   let placeImage = '';
   const scenes: string[] = [];
-  for (let i = 1; i + 1 < parts.length; i += 2) {
-    const head = parts[i].toUpperCase().replace(/\s+/g, ' ');
-    const body = parts[i + 1].trim();
-    if (head === 'CAST IMAGE') castImage = body;
-    else if (head === 'PLACE IMAGE') placeImage = body;
+  for (const s of sections) {
+    const body = s.lines.join('\n').replace(/[\s*_]+$/, '').trim();
+    if (s.head === 'CAST IMAGE') castImage = body;
+    else if (s.head === 'PLACE IMAGE') placeImage = body;
     else {
-      const n = Number(head.replace(/\D/g, ''));
+      const n = Number(s.head.replace(/\D/g, ''));
       if (n !== scenes.length + 1) return null;
       scenes.push(body);
     }
@@ -145,7 +156,8 @@ export function sceneImageLegend(scene: number): string {
     '@Image 2 = Mr. Marshmallow: keep his exact look and size.',
     '@Image 3 = all the characters at their correct sizes: keep every character exactly this size, shape, colour and look.',
     '@Image 4 = the place: keep this exact background, hiding spots and props; nothing disappears or appears from nowhere.',
-    'Do not add, remove or resize any character or object unless this prompt says so.',
+    'Do not add, remove or resize any character or object unless this prompt says so. No new decorations, banners, flags,',
+    'balloons, confetti or mats; the camera stays in this same place.',
     '',
   ].join('\n');
 }

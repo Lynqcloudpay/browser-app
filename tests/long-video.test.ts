@@ -48,6 +48,14 @@ async function run(): Promise<void> {
   assert.ok(plan && plan.castImage === cast && plan.placeImage === place, 'both picture prompts are read');
   const noPlace = ['SCENES_BEGIN', 'CAST IMAGE:', cast, ...[1, 2, 3, 4].flatMap((n) => [`SCENE ${n}:`, scene(n)]), 'SCENES_END'].join('\n');
   assert.strictEqual(parsePlan(noPlace), null, 'a plan without the place picture is rejected');
+  // ChatGPT often puts the text on the heading's own line, or adds timings / markdown to the heading
+  const inline = ['SCENES_BEGIN', `CAST IMAGE: ${cast}`, `**PLACE IMAGE:** ${place}`,
+    ...[1, 2, 3, 4].map((n) => (n % 2 ? `### Scene ${n} (0-15s): ${scene(n)}` : `SCENE ${n} — ${scene(n)}`)), 'SCENES_END'].join('\n');
+  const inl = parsePlan(inline)!;
+  assert.ok(inl && inl.castImage === cast && inl.placeImage === place, 'picture prompts on the heading line are read');
+  assert.ok(inl.scenes.length === 4 && inl.scenes[2] === scene(3), `scene text on the heading line is read (${inl?.scenes[2]})`);
+  const bodyMention = answer.replace(scene(2), `${scene(2)}\nScene 1 ends with a hug and this one starts from it.`);
+  assert.strictEqual(parsePlan(bodyMention)?.scenes.length, 4, 'a body line starting "Scene 1 ends" is not a heading');
   console.log('ok scene answer parsing');
 
   // pictures attached to a scene keep their numbering even when one is missing
@@ -125,22 +133,33 @@ async function run(): Promise<void> {
       const page = await browser.newPage();
       await page.setContent(`<!doctype html><html><body>
         <form><div id="thumbs"></div><div contenteditable="true" role="textbox"></div>
-          <input type="file" accept="image/*" style="display:none"><input id="multi" type="file" multiple accept="image/*" style="display:none"></form>
-        <div id="menu" style="display:none"><div role="menuitem">First frame<br>Image starts the video</div><div role="menuitem">Intermediate frame</div><div role="menuitem">Last frame<br>Image ends the video</div><div role="menuitem">Reference<br>Image guides the video</div></div>
+          <input type="file" accept="image/*" style="display:none"><input id="multi" type="file" multiple accept="image/*" style="display:none">
+          <span id="timeline"></span><button id="submit" aria-label="Submit" type="button" disabled>Go</button></form>
+        <div id="menu" style="display:none"><button>First frame<br>Image starts the video</button><button>Last frame<br>Image ends the video</button><button>Reference<br>Image guides the video</button></div>
         <script>
-          window.roles = {}; let current = -1;
+          // Like real Grok: Submit stays disabled and the picture menu does not open while the pictures upload (2.5s);
+          // choosing First frame shows the timeline with "Add last frame"; Escape collapses the composer.
+          window.roles = {}; window.escaped = false; let current = -1; let uploading = false;
           document.getElementById('multi').addEventListener('change', (e) => {
             for (const f of e.target.files) {
               const i = document.querySelectorAll('#thumbs img').length;
               document.getElementById('thumbs').insertAdjacentHTML('beforeend', '<span><img data-i="' + i + '" alt="' + f.name + '" style="width:40px;height:40px;display:inline-block;background:#ccc"><button aria-label="Remove image">x</button></span>');
               window.roles[i] = 'Reference';
             }
+            uploading = true; document.getElementById('submit').disabled = true;
+            setTimeout(() => { uploading = false; document.getElementById('submit').disabled = false; }, 2500);
           });
+          document.addEventListener('keydown', (e) => { if (e.key === 'Escape') window.escaped = true; });
           document.addEventListener('click', (e) => {
             const img = e.target.closest('#thumbs img');
-            if (img) { current = Number(img.dataset.i); document.getElementById('menu').style.display = 'block'; return; }
-            const item = e.target.closest('[role=menuitem]');
-            if (item) { window.roles[current] = item.firstChild.textContent.trim(); document.getElementById('menu').style.display = 'none'; }
+            if (img) { if (uploading) return; current = Number(img.dataset.i); document.getElementById('menu').style.display = 'block'; return; }
+            const item = e.target.closest('#menu button');
+            if (item) {
+              const role = item.firstChild.textContent.trim();
+              window.roles[current] = role;
+              if (role === 'First frame') document.getElementById('timeline').innerHTML = '<button aria-label="Add intermediate frame">+</button><button aria-label="Add last frame">+</button>';
+              document.getElementById('menu').style.display = 'none';
+            }
           });
         </script></body></html>`);
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kindred-pics-'));
@@ -150,6 +169,8 @@ async function run(): Promise<void> {
       assert.strictEqual(n, 4, 'all 4 pictures attached through the multiple file input');
       const roles = await page.evaluate(() => (window as any).roles);
       assert.deepStrictEqual(roles, { 0: 'First frame', 1: 'Reference', 2: 'Reference', 3: 'Reference' }, `roles set (${JSON.stringify(roles)})`);
+      assert.strictEqual(await page.evaluate(() => (window as any).escaped), false, 'never presses Escape (it collapses Grok\'s composer)');
+      assert.strictEqual(await page.locator('button[aria-label="Add last frame"]').count(), 1, 'First frame confirmed by the timeline');
       fs.rmSync(dir, { recursive: true, force: true });
       console.log('ok several pictures with roles');
     } finally {

@@ -15,7 +15,7 @@ import { withGrokSlot } from './grokSemaphore';
 import { isValidVideoBuffer, isValidVideoFile } from './videoFile';
 import { installPopupGuards, dismissPopups } from './popups';
 import { findWithJev } from './jevAssist';
-import { FRAMES_DIR, THUMBNAILS_DIR, VIDEOS_DIR } from '../paths';
+import { FRAMES_DIR, LOGS_DIR, THUMBNAILS_DIR, VIDEOS_DIR } from '../paths';
 import {
   getChannel,
   updateChannel,
@@ -1605,7 +1605,7 @@ export class ChannelBrowserAgent {
    * Loop / Reference, and Reference is the default. Uses the composer's MULTIPLE file input (the page's other file
    * inputs open the image editor). Returns how many pictures were confirmed on the composer.
    */
-  public async attachGrokImages(page: Page, images: Array<{ path: string; role: GrokImageRole }>): Promise<number> {
+  public async attachGrokImages(page: Page, images: Array<{ path: string; role: GrokImageRole }>, retried = false): Promise<number> {
     const files = images.filter((i) => i.path && fs.existsSync(i.path));
     if (!files.length) return 0;
     const composer = this.grokComposer(page);
@@ -1622,12 +1622,23 @@ export class ChannelBrowserAgent {
       await page.waitForTimeout(500);
     }
     console.log(`[ChannelBrowserAgent-${this.channelId}] Grok: ${n - before} of ${files.length} pictures attached.`);
-    await page.waitForTimeout(1000); // let the uploads finish before roles are set
+    // The role menu does not open while a picture is still uploading (Submit is disabled until all are done).
+    if (!(await this.waitForGrokUploads(page))) console.warn(`[ChannelBrowserAgent-${this.channelId}] Grok: pictures still uploading after 90s.`);
+    await page.waitForTimeout(1000);
 
     for (let i = 0; i < files.length; i++) {
       const role = files[i].role;
       if (role === 'reference') continue; // Grok's default
-      const ok = await this.setGrokImageRole(page, before + i, role);
+      let ok = await this.setGrokImageRole(page, before + i, role);
+      if (!ok && !retried) {
+        // Start over once: remove every picture, attach them again, set the role again.
+        console.warn(`[ChannelBrowserAgent-${this.channelId}] Grok: ${ROLE_LABEL[role]} did not take; attaching the pictures again.`);
+        for (let k = await thumbs().count().catch(() => 0); k > 0; k--) {
+          await thumbs().first().click({ timeout: 3000 }).catch(() => {});
+          await page.waitForTimeout(300);
+        }
+        return this.attachGrokImages(page, images, true);
+      }
       console.log(`[ChannelBrowserAgent-${this.channelId}] Grok: picture ${i + 1} set as ${ROLE_LABEL[role]}${ok ? '' : ' — NOT confirmed'}.`);
     }
     return n - before;
@@ -1643,21 +1654,41 @@ export class ChannelBrowserAgent {
       .filter({ hasText: new RegExp(`^\\s*${ROLE_LABEL[role]}`, 'i') })
       .filter({ visible: true })
       .first();
-    // While a picture is still uploading its menu does not open: click again every few seconds, up to 20 seconds.
-    let shown = false;
-    for (let attempt = 0; attempt < 5 && !shown; attempt++) {
+    // Proof the role took: once a picture is the First frame (or Last frame), Grok shows a picture > video timeline with
+    // "Add intermediate frame" / "Add last frame" (or "Add first frame") buttons on the composer. Reference has no marker.
+    const marker = composer.locator(
+      role === 'reference'
+        ? 'button[aria-label="Remove image"]'
+        : 'button[aria-label="Add last frame"], button[aria-label="Add intermediate frame"], button[aria-label="Add first frame"]'
+    );
+    const confirmed = async () => role === 'reference' || (await marker.count().catch(() => 0)) > 0;
+    if (await confirmed()) return true;
+    // While a picture is still uploading its menu does not open: click again every few seconds, up to about a minute.
+    // Never Escape: it collapses the whole composer into the small top bar (Video toggle and pictures hidden), and the
+    // next step failed with "Video toggle not found". A stray menu is closed by clicking the prompt box instead.
+    for (let attempt = 0; attempt < 12; attempt++) {
       await thumb.click({ timeout: 5000 }).catch(() => {});
-      shown = await item.waitFor({ state: 'visible', timeout: 4000 }).then(() => true).catch(() => false);
+      const shown = await item.waitFor({ state: 'visible', timeout: 4000 }).then(() => true).catch(() => false);
+      if (shown) {
+        await item.click({ timeout: 4000 }).catch(() => {});
+        await page.waitForTimeout(1000);
+        if (await confirmed()) return true;
+      }
+      await composer.locator('[role="textbox"], [contenteditable="true"], textarea').first().click({ timeout: 3000 }).catch(() => {});
+      await page.waitForTimeout(1000);
     }
-    if (!shown) {
-      await page.keyboard.press('Escape').catch(() => {});
-      return false;
+    return confirmed();
+  }
+
+  /** Waits (up to `ms`) until Grok's Submit arrow is enabled: it stays disabled while attached pictures upload. */
+  private async waitForGrokUploads(page: Page, ms = 90_000): Promise<boolean> {
+    const submit = this.grokComposer(page).locator('button[aria-label="Submit"], button[type="submit"]').first();
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (await submit.isEnabled().catch(() => false)) return true;
+      await page.waitForTimeout(500);
     }
-    // The menu closes itself on the click. No Escape here: Escape collapsed the whole composer into the small top bar
-    // (Video toggle and pictures hidden), and the next step failed with "Video toggle not found".
-    const clicked = await item.click({ timeout: 4000 }).then(() => true).catch(() => false);
-    await page.waitForTimeout(800);
-    return clicked;
+    return false;
   }
 
   /**
@@ -4869,10 +4900,23 @@ export class ChannelBrowserAgent {
         await dismissPopups(page).catch(() => {});
         await this.submitChatGptPrompt(page, scenesQuestion(basePrompt, title));
         await page.waitForTimeout(8000);
-        // up to ~5 minutes, like the prompt wait (a 4-scene answer with "High" thinking is slow)
-        for (let i = 0; i < 200 && (await this.chatGptIsWriting(page)); i++) await page.waitForTimeout(1500);
-        await page.waitForTimeout(2000);
-        const plan = parsePlan(await page.evaluate(() => document.body.innerText || '').catch(() => ''));
+        // Up to ~6 minutes in all. "Not writing" alone is not trusted: while ChatGPT thinks there may be no Stop button
+        // yet, so the answer is read again every few seconds until it is complete (its end marker) or time runs out.
+        const deadline = Date.now() + 6 * 60 * 1000;
+        let plan: StoryPlan | null = null;
+        let text = '';
+        while (Date.now() < deadline) {
+          this.throwIfCancelled();
+          if (await this.chatGptIsWriting(page)) {
+            await page.waitForTimeout(1500);
+            continue;
+          }
+          await page.waitForTimeout(2000);
+          text = await page.evaluate(() => document.body.innerText || '').catch(() => '');
+          plan = parsePlan(text);
+          if (plan) break;
+          await page.waitForTimeout(3000);
+        }
         if (plan) {
           console.log(
             `[ChannelBrowserAgent-${this.channelId}] Story plan: scenes ${plan.scenes.map((s) => s.length).join(', ')} chars; ` +
@@ -4880,7 +4924,13 @@ export class ChannelBrowserAgent {
           );
           return plan;
         }
-        console.warn(`[ChannelBrowserAgent-${this.channelId}] ChatGPT's story plan could not be read (attempt ${attempt}).`);
+        // Keep what ChatGPT answered, so a format the reader does not know can be fixed (storage/logs is private).
+        const dump = path.join(LOGS_DIR, `story_plan_unread_${Date.now()}.txt`);
+        try {
+          fs.mkdirSync(LOGS_DIR, { recursive: true });
+          fs.writeFileSync(dump, text.slice(-40000));
+        } catch {}
+        console.warn(`[ChannelBrowserAgent-${this.channelId}] ChatGPT's story plan could not be read (attempt ${attempt}); page text: ${dump}`);
       }
       throw new Error(`ChatGPT did not plan the ${LONG_SCENES}-scene story. Nothing was made or posted (no Grok credits used).`);
     } finally {
