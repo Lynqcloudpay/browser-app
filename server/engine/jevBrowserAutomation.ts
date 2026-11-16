@@ -1451,8 +1451,24 @@ export class ChannelBrowserAgent {
    * Put Grok Imagine's composer into Video mode with the requested duration, resolution and aspect ratio.
    * Only touches the composer's own controls (Image/Video/Agent radios, 480p/720p, 6s/10s/15s, Aspect Ratio).
    */
-  public async configureGrokVideoMode(page: Page, spec: GrokVideoSpec): Promise<void> {
+  /** `mayReload`: false once pictures are attached (a reload would silently drop them). */
+  public async configureGrokVideoMode(page: Page, spec: GrokVideoSpec, mayReload = true): Promise<void> {
     let videoOn = await this.selectGrokRadio(page, { label: 'Video' }, 15000);
+    // Grok sometimes opens /imagine in a compact layout (a small prompt bar at the top with a "Video · 15s" menu and a
+    // gallery below; no Video/Image toggle). Clicking the prompt box may open the full composer; a reload brought it
+    // back in a real run. Both are tried before giving up.
+    if (!videoOn) {
+      await this.grokComposer(page).locator('[role="textbox"], [contenteditable="true"], textarea').first().click({ timeout: 3000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+      videoOn = await this.selectGrokRadio(page, { label: 'Video' }, 5000);
+    }
+    if (!videoOn && mayReload && page.url().includes('/imagine')) {
+      console.warn(`[ChannelBrowserAgent-${this.channelId}] Grok's Video toggle is missing (compact layout?); reloading Imagine once.`);
+      await page.goto('https://grok.com/imagine', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      await page.waitForTimeout(5000);
+      await dismissPopups(page).catch(() => {});
+      videoOn = await this.selectGrokRadio(page, { label: 'Video' }, 15000);
+    }
     if (!videoOn) {
       // Backup: Grok renamed or restyled the toggle. Ask Jev which control switches the composer to video.
       const byJev = await findWithJev(page, 'switch the prompt composer to Video mode so it makes a video instead of an image', 'Grok Imagine');
@@ -1973,13 +1989,13 @@ export class ChannelBrowserAgent {
       if (images && images.some((i) => i.path && fs.existsSync(i.path))) {
         await this.attachGrokImages(page, images);
         // Video mode was set before the pictures; re-asserting it is a check only (a hidden control must not stop the run).
-        await this.configureGrokVideoMode(page, spec).catch((e: any) =>
+        await this.configureGrokVideoMode(page, spec, false).catch((e: any) =>
           console.warn(`[ChannelBrowserAgent-${this.channelId}] Video settings not re-checked after the pictures: ${String(e?.message || e).slice(0, 120)}`)
         );
       } else if (refImagePath && fs.existsSync(refImagePath)) {
         await this.attachGrokReferenceImage(page, refImagePath);
         // Attaching an image can change the composer's options — re-assert Video settings.
-        await this.configureGrokVideoMode(page, spec);
+        await this.configureGrokVideoMode(page, spec, false);
       } else {
         console.warn(`[ChannelBrowserAgent-${this.channelId}] Reference image missing for channel ${this.channelId}; generating without it.`);
       }
