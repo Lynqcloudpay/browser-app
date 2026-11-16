@@ -1730,8 +1730,9 @@ export class ChannelBrowserAgent {
               const r = i.getBoundingClientRect();
               if (r.width * r.height > bestArea) { best = i; bestArea = r.width * r.height; }
             }
-            const onPost = location.pathname.includes('/imagine/post/');
-            return { err: err ? err[0] : null, src: best && onPost && bestArea > 40000 ? best.src : '', pct: /\b\d{1,2}%/.test(text) };
+            // With a picture attached Grok opens /imagine/post/…; with none (the place picture) it shows the results
+            // as a grid right on /imagine. Both are fine: the picture only has to be new and big.
+            return { err: err ? err[0] : null, src: best && bestArea > 40000 ? best.src : '', pct: /\b\d{1,2}%/.test(text) };
           }, oldSrcs)
           .catch(() => null);
         if (!st) continue;
