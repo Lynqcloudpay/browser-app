@@ -126,7 +126,10 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
   chat's "next" answer is only the idea. A ChatGPT **temporary** chat plans a fun, energetic, physically real toddler story
   (owner: "flat and stupid" stories and broken physics, e.g. a bowling ball throwing itself; so: one funny premise, rule of
   three, surprise twist; Mr. Marshmallow + 2 friends; energy from bodies, faces, camera and music, NOT objects; no throwing,
-  catching, balls, sports, passing, vehicles; at most 2 big fixed props; no decorations from nowhere, no size/species changes) as a CAST IMAGE prompt, a PLACE IMAGE prompt and 4 scene prompts
+  catching, balls, sports, passing, vehicles; at most 2 big fixed props; no decorations from nowhere, no size/species changes;
+  after "a zebra hiding under a striped box" melted into a box with legs: no hiding in/under objects, disguises or partial
+  bodies, characters apart, steady wide camera, 3 beats of 5 s with one main action each; at most 3 different short lines
+  per scene, no catchphrase, never the word "silly" — Grok spoke "silly gift/pig/day" over and over from prompt text) as a CAST IMAGE prompt, a PLACE IMAGE prompt and 4 scene prompts
   (`SCENES_BEGIN … SCENES_END`, `parsePlan` reads only the last complete block). Grok **Image mode** draws the cast (with the
   channel reference attached) and the place (`createImageViaGrok`, `/imagine/post/…`, `assets.grok.com/…/generated/…`).
   Every scene is made in Video mode with 4 pictures (`sceneImages`, `attachGrokImages`): @Image 1 First frame (scene 1:
