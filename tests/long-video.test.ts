@@ -7,7 +7,9 @@ import { execFileSync } from 'child_process';
 
 import { initDatabase } from '../server/db/database';
 import { createChannel, updateChannel, getChannel } from '../server/engine/channels';
-import { LONG_SCENES, scenesQuestion, parseScenes } from '../server/engine/longVideo';
+import { LONG_SCENES, scenesQuestion, parseScenes, parsePlan, sceneImages, sceneImageLegend } from '../server/engine/longVideo';
+import { chromium } from 'playwright';
+import { getAgent } from '../server/engine/agentRegistry';
 import { audioToolsAvailable, concatClips, lastFrame, mediaDuration } from '../server/engine/audioMix';
 import { describeResult } from '../server/engine/dailyRunner';
 
@@ -24,7 +26,10 @@ async function run(): Promise<void> {
 
   const scene = (n: number) =>
     `Mr. Marshmallow, a soft cream marshmallow with rosy cheeks, stands on the sunny beach of Marshmallow Village. Scene ${n} action happens here. 15 seconds • Vertical 9:16 • 720p`;
-  const answer = ['SCENES_BEGIN', ...[1, 2, 3, 4].flatMap((n) => [`SCENE ${n}:`, scene(n)]), 'SCENES_END'].join('\n');
+  const cast = 'Mr. Marshmallow exactly as in @Image 1 standing next to Baby Sheep, who is half as tall as him, in a pastel meadow.';
+  const place = 'A sunny pastel meadow with a big pink bush, a hollow log and a blue wheelbarrow, no characters.';
+  const pictures = ['CAST IMAGE:', cast, 'PLACE IMAGE:', place];
+  const answer = ['SCENES_BEGIN', ...pictures, ...[1, 2, 3, 4].flatMap((n) => [`SCENE ${n}:`, scene(n)]), 'SCENES_END'].join('\n');
   const page = `You said:\n${question}\nChatGPT said:\n${answer}\nChatGPT can make mistakes.`;
   const scenes = parseScenes(page);
   assert.strictEqual(scenes.length, LONG_SCENES, 'four scenes read after the question');
@@ -33,13 +38,27 @@ async function run(): Promise<void> {
 
   const bold = answer.replace(/SCENE (\d):/g, '**SCENE $1**');
   assert.strictEqual(parseScenes(bold).length, 4, 'bold scene labels are read too');
-  const three = ['SCENES_BEGIN', ...[1, 2, 3].flatMap((n) => [`SCENE ${n}:`, scene(n)]), 'SCENES_END'].join('\n');
+  const three = ['SCENES_BEGIN', ...pictures, ...[1, 2, 3].flatMap((n) => [`SCENE ${n}:`, scene(n)]), 'SCENES_END'].join('\n');
   assert.deepStrictEqual(parseScenes(three), [], 'three scenes: rejected, never a short video');
   const unfinished = ['SCENES_BEGIN', 'SCENE 1:', scene(1), 'SCENE 2:', scene(2)].join('\n');
   assert.deepStrictEqual(parseScenes(`${question}\n${unfinished}`), [], 'an answer without its end marker is not read');
   const shortOne = answer.replace(scene(2), 'too short');
   assert.deepStrictEqual(parseScenes(shortOne), [], 'a scene too short to be a prompt is rejected');
+  const plan = parsePlan(page)!;
+  assert.ok(plan && plan.castImage === cast && plan.placeImage === place, 'both picture prompts are read');
+  const noPlace = ['SCENES_BEGIN', 'CAST IMAGE:', cast, ...[1, 2, 3, 4].flatMap((n) => [`SCENE ${n}:`, scene(n)]), 'SCENES_END'].join('\n');
+  assert.strictEqual(parsePlan(noPlace), null, 'a plan without the place picture is rejected');
   console.log('ok scene answer parsing');
+
+  // pictures attached to a scene keep their numbering even when one is missing
+  const all = sceneImages({ first: 'f.jpg', character: 'ref.png', cast: 'cast.jpg', place: 'place.jpg' });
+  assert.deepStrictEqual(all.map((i) => `${i.role}:${i.path}`), ['first:f.jpg', 'reference:ref.png', 'reference:cast.jpg', 'reference:place.jpg'], 'order and roles');
+  const noPlacePic = sceneImages({ first: 'f.jpg', character: 'ref.png', cast: 'cast.jpg' });
+  assert.strictEqual(noPlacePic.length, 4, 'still 4 pictures when the place picture failed');
+  assert.strictEqual(noPlacePic[3].path, 'cast.jpg', 'the cast picture stands in for the place');
+  assert.deepStrictEqual(sceneImages({}), [], 'nothing to attach: none');
+  assert.ok(/@Image 1 = the first frame/.test(sceneImageLegend(1)) && /@Image 4 = the place/.test(sceneImageLegend(2)), 'legend names all 4 pictures');
+  console.log('ok scene pictures and legend');
 
   // 2. The channel switch
   const ch = createChannel('Long Test Channel');
@@ -97,6 +116,45 @@ async function run(): Promise<void> {
     console.log('ok last frame');
   } else {
     console.log('skip clip joining (ffmpeg not installed)');
+  }
+
+  // 5. Several pictures on Grok's composer, each with its role (stand-in page; never a real Grok)
+  {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<!doctype html><html><body>
+        <form><div id="thumbs"></div><div contenteditable="true" role="textbox"></div>
+          <input type="file" accept="image/*" style="display:none"><input id="multi" type="file" multiple accept="image/*" style="display:none"></form>
+        <div id="menu" style="display:none"><div role="menuitem">First frame<br>Image starts the video</div><div role="menuitem">Intermediate frame</div><div role="menuitem">Last frame<br>Image ends the video</div><div role="menuitem">Reference<br>Image guides the video</div></div>
+        <script>
+          window.roles = {}; let current = -1;
+          document.getElementById('multi').addEventListener('change', (e) => {
+            for (const f of e.target.files) {
+              const i = document.querySelectorAll('#thumbs img').length;
+              document.getElementById('thumbs').insertAdjacentHTML('beforeend', '<span><img data-i="' + i + '" alt="' + f.name + '" style="width:40px;height:40px;display:inline-block;background:#ccc"><button aria-label="Remove image">x</button></span>');
+              window.roles[i] = 'Reference';
+            }
+          });
+          document.addEventListener('click', (e) => {
+            const img = e.target.closest('#thumbs img');
+            if (img) { current = Number(img.dataset.i); document.getElementById('menu').style.display = 'block'; return; }
+            const item = e.target.closest('[role=menuitem]');
+            if (item) { window.roles[current] = item.firstChild.textContent.trim(); document.getElementById('menu').style.display = 'none'; }
+          });
+        </script></body></html>`);
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kindred-pics-'));
+      const pics = ['first.jpg', 'ref.png', 'cast.jpg', 'place.jpg'].map((n) => { const f = path.join(dir, n); fs.writeFileSync(f, 'x'); return f; });
+      const agent = getAgent(ch.id);
+      const n = await agent.attachGrokImages(page, sceneImages({ first: pics[0], character: pics[1], cast: pics[2], place: pics[3] }));
+      assert.strictEqual(n, 4, 'all 4 pictures attached through the multiple file input');
+      const roles = await page.evaluate(() => (window as any).roles);
+      assert.deepStrictEqual(roles, { 0: 'First frame', 1: 'Reference', 2: 'Reference', 3: 'Reference' }, `roles set (${JSON.stringify(roles)})`);
+      fs.rmSync(dir, { recursive: true, force: true });
+      console.log('ok several pictures with roles');
+    } finally {
+      await browser.close();
+    }
   }
 
   cleanup();

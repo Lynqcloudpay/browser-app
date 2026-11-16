@@ -26,7 +26,7 @@ import {
   youtubeTrackPath,
 } from './channels';
 import { makeMutedVideo, makeVideoWithSong, makeReelsCopy, concatClips, lastFrame, mediaDuration } from './audioMix';
-import { LONG_SCENES, SCENE_SECONDS, scenesQuestion, parseScenes } from './longVideo';
+import { LONG_SCENES, SCENE_SECONDS, scenesQuestion, parsePlan, sceneImageLegend, sceneImages, type StoryPlan } from './longVideo';
 import {
   commentForRun,
   detailsQuestion,
@@ -72,6 +72,24 @@ export interface GrokVideoSpec {
   aspect: '9:16' | '16:9' | '1:1';
 }
 const GROK_DURATIONS: GrokVideoSpec['durationSec'][] = [6, 10, 15];
+
+/** Roles Grok Imagine's picture menu offers in Video mode ("Reference" is Grok's default). */
+export type GrokImageRole = 'first' | 'intermediate' | 'last' | 'reference';
+const ROLE_LABEL: Record<GrokImageRole, string> = {
+  first: 'First frame',
+  intermediate: 'Intermediate frame',
+  last: 'Last frame',
+  reference: 'Reference',
+};
+
+/** JPEG, PNG or WebP by their first bytes. */
+export function isImageBuffer(buf: Buffer | null | undefined): boolean {
+  if (!buf || buf.length < 1000) return false;
+  const jpeg = buf[0] === 0xff && buf[1] === 0xd8;
+  const png = buf.subarray(0, 4).toString('hex') === '89504e47';
+  const webp = buf.subarray(0, 4).toString() === 'RIFF' && buf.subarray(8, 12).toString() === 'WEBP';
+  return jpeg || png || webp;
+}
 
 export interface PipelineOptions {
   targetDurationSec?: number;
@@ -1582,6 +1600,141 @@ export class ChannelBrowserAgent {
   }
 
   /**
+   * Attach several pictures to Grok's composer at once, in order (Grok names them "@Image 1", "@Image 2", … in that
+   * order), then give each its role from the picture's menu: Grok offers First frame / Intermediate frame / Last frame /
+   * Loop / Reference, and Reference is the default. Uses the composer's MULTIPLE file input (the page's other file
+   * inputs open the image editor). Returns how many pictures were confirmed on the composer.
+   */
+  public async attachGrokImages(page: Page, images: Array<{ path: string; role: GrokImageRole }>): Promise<number> {
+    const files = images.filter((i) => i.path && fs.existsSync(i.path));
+    if (!files.length) return 0;
+    const composer = this.grokComposer(page);
+    const thumbs = () => composer.locator('button[aria-label="Remove image"]');
+    const before = await thumbs().count().catch(() => 0);
+    const input = composer.locator('input[type="file"][multiple]').first();
+    const target = (await input.count()) > 0 ? input : page.locator('input[type="file"][multiple]').first();
+    await target.setInputFiles(files.map((f) => f.path));
+    const deadline = Date.now() + 30000;
+    let n = before;
+    while (Date.now() < deadline) {
+      n = await thumbs().count().catch(() => 0);
+      if (n >= before + files.length) break;
+      await page.waitForTimeout(500);
+    }
+    console.log(`[ChannelBrowserAgent-${this.channelId}] Grok: ${n - before} of ${files.length} pictures attached.`);
+    await page.waitForTimeout(1000); // let the uploads finish before roles are set
+
+    for (let i = 0; i < files.length; i++) {
+      const role = files[i].role;
+      if (role === 'reference') continue; // Grok's default
+      const ok = await this.setGrokImageRole(page, before + i, role);
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Grok: picture ${i + 1} set as ${ROLE_LABEL[role]}${ok ? '' : ' — NOT confirmed'}.`);
+    }
+    return n - before;
+  }
+
+  /** Opens the menu of the composer's picture at `index` and chooses the role. True when the menu showed it. */
+  private async setGrokImageRole(page: Page, index: number, role: GrokImageRole): Promise<boolean> {
+    const composer = this.grokComposer(page);
+    const thumb = composer.locator('img').nth(index);
+    await thumb.click({ timeout: 5000 }).catch(() => {});
+    const item = page
+      .locator('[role="menuitem"], [role="menuitemradio"], [role="option"], button, div')
+      .filter({ hasText: new RegExp(`^\\s*${ROLE_LABEL[role]}\\s*(Image .*)?$`, 'i') })
+      .filter({ visible: true })
+      .last();
+    const shown = await item.waitFor({ state: 'visible', timeout: 4000 }).then(() => true).catch(() => false);
+    if (!shown) {
+      await page.keyboard.press('Escape').catch(() => {});
+      return false;
+    }
+    await item.click({ timeout: 4000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    await page.keyboard.press('Escape').catch(() => {});
+    return true;
+  }
+
+  /**
+   * One picture from Grok Imagine's Image mode, with `refs` attached as references ("@Image 1", …). Waits for the
+   * generated picture (assets.grok.com/…/generated/…), downloads it to `outPath` and returns that path. Throws, with
+   * a screenshot, if Grok does not make it.
+   */
+  public async createImageViaGrok(prompt: string, refs: string[], outPath: string): Promise<string> {
+    const context = await this.launchContext(false);
+    const page = context.pages().find((p) => p.url().includes('grok.com')) || (await context.newPage());
+    await page.bringToFront().catch(() => {});
+    const shot = path.join(FRAMES_DIR, `grok_image_${path.basename(outPath, path.extname(outPath))}_${Date.now()}.png`);
+    const fail = async (message: string): Promise<never> => {
+      await page.screenshot({ path: shot }).catch(() => {});
+      throw new Error(`${message} Screenshot: ${shot}`);
+    };
+    return withGrokSlot(async () => {
+      this.grokPreparedAt = 0; // the composer is used for a picture now: the video step must load a fresh one
+      await page.goto('https://grok.com/imagine', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(400);
+      await dismissPopups(page);
+      const textbox = this.grokComposer(page).locator('[role="textbox"], [contenteditable="true"], textarea').first();
+      if (!(await textbox.waitFor({ state: 'visible', timeout: 20000 }).then(() => true).catch(() => false))) {
+        await fail('Grok Imagine prompt box did not load.');
+      }
+      const rejectCookies = page.locator('button:has-text("Reject All")').first();
+      if (await rejectCookies.isVisible().catch(() => false)) await rejectCookies.click().catch(() => {});
+      if (!(await this.selectGrokRadio(page, { label: 'Image' }, 10000))) await fail('Could not switch Grok Imagine to Image mode.');
+      // One picture, vertical.
+      if (await this.selectGrokDropdown(page, 'Image Count', 'Auto').catch(() => false)) {
+        /* Auto made one picture when tested */
+      }
+      const aspectBtn = page.locator('button[aria-label="Aspect Ratio"]').first();
+      if ((await aspectBtn.isVisible().catch(() => false)) && (await aspectBtn.innerText().catch(() => '')).trim() !== '9:16') {
+        await aspectBtn.click().catch(() => {});
+        const item = page.locator('[role="menuitemradio"]').filter({ hasText: '9:16' }).first();
+        if (await item.waitFor({ state: 'visible', timeout: 2500 }).then(() => true).catch(() => false)) await item.click();
+        else await page.keyboard.press('Escape');
+      }
+      if (refs.length) await this.attachGrokImages(page, refs.map((p) => ({ path: p, role: 'reference' as const })));
+      await textbox.click();
+      await page.keyboard.press('Meta+A');
+      await page.keyboard.press('Backspace');
+      await page.keyboard.insertText(prompt);
+      const before = page.url();
+      try {
+        await this.submitGrokPrompt(page, textbox, prompt.length);
+      } catch (err: any) {
+        await fail(err?.message || 'Grok did not accept the picture prompt.');
+      }
+      const start = Date.now();
+      let src = '';
+      while (Date.now() - start < 3 * 60 * 1000) {
+        await page.waitForTimeout(2000);
+        const st = await page
+          .evaluate(() => {
+            const text = document.body.innerText || '';
+            const err = text.match(/limit reached|usage limit|content moderated|couldn['’]t generate|failed to generate|something went wrong/i);
+            const img = Array.from(document.querySelectorAll('img')).find(
+              (i) => /\/generated\//.test((i as HTMLImageElement).src) && (i as HTMLImageElement).naturalWidth > 300
+            ) as HTMLImageElement | undefined;
+            return { err: err ? err[0] : null, src: img ? img.src : '', pct: /\b\d{1,2}%/.test(text) };
+          })
+          .catch(() => null);
+        if (!st) continue;
+        if (st.err && !st.src) await fail(`Grok reported: "${st.err}" while making a picture.`);
+        if (st.src && !st.pct) {
+          src = st.src;
+          break;
+        }
+      }
+      if (!src) await fail(`Grok did not finish the picture within 3 minutes (page: ${page.url() || before}).`);
+      const resp = await page.request.get(src).catch(() => null);
+      const buf = resp && resp.ok() ? await resp.body().catch(() => null) : null;
+      if (!buf || !isImageBuffer(buf)) await fail('Grok made the picture but it could not be downloaded.');
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      fs.writeFileSync(outPath, buf!);
+      console.log(`[ChannelBrowserAgent-${this.channelId}] Grok picture saved (${Math.round(buf!.length / 1024)} KB): ${outPath}`);
+      return outPath;
+    });
+  }
+
+  /**
    * Step 2: In Grok Imagine — Video mode + reference image + EXACT ChatGPT prompt → generate → download the MP4.
    */
   public async createVideoViaGrok(
@@ -1592,7 +1745,9 @@ export class ChannelBrowserAgent {
     requestedDurationSec?: number,
     resolutionOverride?: '480p' | '720p',
     /** Starting image instead of the channel's reference image (1-minute videos: the previous scene's last frame). */
-    startImagePath?: string
+    startImagePath?: string,
+    /** Several pictures with roles (1-minute videos); replaces the single reference/starting image when given. */
+    images?: Array<{ path: string; role: GrokImageRole }>
   ): Promise<{ videoPath: string; screenshotPath?: string; imagePath?: string; durationSec: number; width?: number; height?: number }> {
     if (!grokPrompt || grokPrompt.length < 50) {
       throw new Error(`Grok prompt is invalid or too short (${grokPrompt?.length || 0} chars). Aborting.`);
@@ -1719,7 +1874,10 @@ export class ChannelBrowserAgent {
 
       // 3. Reference image (character lock), or the given starting frame for a chained scene
       const refImagePath = startImagePath && fs.existsSync(startImagePath) ? startImagePath : referenceImagePath(this.channelId);
-      if (refImagePath && fs.existsSync(refImagePath)) {
+      if (images && images.some((i) => i.path && fs.existsSync(i.path))) {
+        await this.attachGrokImages(page, images);
+        await this.configureGrokVideoMode(page, spec);
+      } else if (refImagePath && fs.existsSync(refImagePath)) {
         await this.attachGrokReferenceImage(page, refImagePath);
         // Attaching an image can change the composer's options — re-assert Video settings.
         await this.configureGrokVideoMode(page, spec);
@@ -4677,13 +4835,13 @@ export class ChannelBrowserAgent {
    * 1-minute videos: ChatGPT, in a temporary chat in its own tab (the channel's prompt chat is untouched), turns the
    * Grok prompt into LONG_SCENES standalone scene prompts. Asked twice at most; nothing has been spent on Grok yet.
    */
-  private async splitIntoScenes(basePrompt: string, title: string, say: (step: string) => void): Promise<string[]> {
+  private async planStory(basePrompt: string, title: string, say: (step: string) => void): Promise<StoryPlan> {
     const context = await this.launchContext(false);
     const page = await context.newPage();
     try {
       for (let attempt = 1; attempt <= 2; attempt++) {
         this.throwIfCancelled();
-        say(`Splitting the story into ${LONG_SCENES} scenes in ChatGPT${attempt > 1 ? ' (second try)' : ''}…`);
+        say(`Planning the 1-minute story (${LONG_SCENES} scenes and 2 pictures) in ChatGPT${attempt > 1 ? ' (second try)' : ''}…`);
         await page.goto('https://chatgpt.com/?temporary-chat=true', { waitUntil: 'domcontentloaded', timeout: 45000 });
         await page.waitForTimeout(5000);
         await dismissPopups(page).catch(() => {});
@@ -4692,14 +4850,17 @@ export class ChannelBrowserAgent {
         // up to ~5 minutes, like the prompt wait (a 4-scene answer with "High" thinking is slow)
         for (let i = 0; i < 200 && (await this.chatGptIsWriting(page)); i++) await page.waitForTimeout(1500);
         await page.waitForTimeout(2000);
-        const scenes = parseScenes(await page.evaluate(() => document.body.innerText || '').catch(() => ''));
-        if (scenes.length === LONG_SCENES) {
-          console.log(`[ChannelBrowserAgent-${this.channelId}] Scenes: ${scenes.map((s) => s.length).join(', ')} chars.`);
-          return scenes;
+        const plan = parsePlan(await page.evaluate(() => document.body.innerText || '').catch(() => ''));
+        if (plan) {
+          console.log(
+            `[ChannelBrowserAgent-${this.channelId}] Story plan: scenes ${plan.scenes.map((s) => s.length).join(', ')} chars; ` +
+              `cast picture: ${plan.castImage.slice(0, 120)}…`
+          );
+          return plan;
         }
-        console.warn(`[ChannelBrowserAgent-${this.channelId}] ChatGPT's scene answer could not be read (attempt ${attempt}).`);
+        console.warn(`[ChannelBrowserAgent-${this.channelId}] ChatGPT's story plan could not be read (attempt ${attempt}).`);
       }
-      throw new Error(`ChatGPT did not split the story into ${LONG_SCENES} scenes. Nothing was made or posted (no Grok credits used).`);
+      throw new Error(`ChatGPT did not plan the ${LONG_SCENES}-scene story. Nothing was made or posted (no Grok credits used).`);
     } finally {
       await page.close().catch(() => {});
     }
@@ -4814,10 +4975,32 @@ export class ChannelBrowserAgent {
     const effResolution: GrokResolution = options.targetResolution || ch?.grok_resolution || '720p';
 
     // A 1-minute video: ChatGPT (temporary chat) splits the story into scenes before any Grok credit is spent.
-    const scenePrompts = longVideo ? await this.splitIntoScenes(grokPrompt, scriptPkg.concept_title, say) : [grokPrompt];
+    const plan = longVideo ? await this.planStory(grokPrompt, scriptPkg.concept_title, say) : null;
     this.throwIfCancelled();
 
-    const generate = async (prompt: string, shot: number, startImage?: string) => {
+    // 1-minute videos: Grok draws the cast (correct sizes) and the place first; they are attached to every scene.
+    let castPicture: string | null = null;
+    let placePicture: string | null = null;
+    const reference = referenceImagePath(this.channelId);
+    if (plan) {
+      const picture = async (label: string, prompt: string, refs: string[], file: string) => {
+        say(`Drawing the ${label} in Grok…`);
+        try {
+          return await this.createImageViaGrok(prompt, refs, path.join(FRAMES_DIR, file));
+        } catch (err: any) {
+          if (/limit reached|usage limit|credits?|upgrade/i.test(String(err?.message))) throw err;
+          console.warn(`[ChannelBrowserAgent-${this.channelId}] The ${label} could not be made (${err?.message}); scenes go on without it.`);
+          return null;
+        }
+      };
+      castPicture = await picture('characters picture', plan.castImage, reference ? [reference] : [], `cast_${jobId}.jpg`);
+      this.throwIfCancelled();
+      placePicture = await picture('place picture', plan.placeImage, [], `place_${jobId}.jpg`);
+      this.throwIfCancelled();
+    }
+    const scenePrompts = plan ? plan.scenes.map((s, i) => sceneImageLegend(i + 1) + s) : [grokPrompt];
+
+    const generate = async (prompt: string, shot: number, startImage?: string, images?: Array<{ path: string; role: GrokImageRole }>) => {
       const label = scenePrompts.length > 1 ? `scene ${shot} of ${scenePrompts.length}` : 'the video';
       say(`Generating ${label} in Grok (about 1–3 minutes)…`);
       try {
@@ -4827,7 +5010,7 @@ export class ChannelBrowserAgent {
           say,
           async (n) => {
             if (n > 1) say(`Generating ${label} in Grok (second try)…`);
-            return this.createVideoViaGrok(prompt, jobId, shot, false, effDuration, effResolution, startImage);
+            return this.createVideoViaGrok(prompt, jobId, shot, false, effDuration, effResolution, startImage, images);
           },
           () => !this.grokSubmitted
         );
@@ -4847,8 +5030,9 @@ export class ChannelBrowserAgent {
     };
 
     const clips: Array<Awaited<ReturnType<typeof ChannelBrowserAgent.prototype.createVideoViaGrok>>> = [];
-    // Scene 1 starts from the channel's reference image; every later scene starts from the LAST frame of the scene
-    // before it (uploaded to Grok as the starting image), so the video continues where the previous one stopped.
+    // Scene 1 starts on the cast picture (or the channel's reference image); every later scene starts on the LAST frame
+    // of the scene before it, so the video continues where the previous one stopped. 1-minute videos also attach
+    // Mr. Marshmallow, the cast and the place as references, in the order sceneImageLegend names them.
     for (let i = 0; i < scenePrompts.length; i++) {
       let startImage: string | undefined;
       if (i > 0) {
@@ -4856,7 +5040,11 @@ export class ChannelBrowserAgent {
         await lastFrame(clips[i - 1].videoPath, startImage);
         console.log(`[ChannelBrowserAgent-${this.channelId}] Scene ${i + 1} starts from scene ${i}'s last frame: ${startImage}`);
       }
-      clips.push(await generate(scenePrompts[i], i + 1, startImage));
+      const first = startImage || castPicture || reference || undefined;
+      const images = plan
+        ? sceneImages({ first, character: reference || undefined, cast: castPicture || undefined, place: placePicture || undefined })
+        : undefined;
+      clips.push(await generate(scenePrompts[i], i + 1, startImage, images));
       this.throwIfCancelled();
     }
     const grokRes = clips[0];
