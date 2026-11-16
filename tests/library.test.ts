@@ -119,6 +119,7 @@ async function main(): Promise<void> {
     const err = (message: string, code?: string) => Object.assign(new Error(message), code ? { code } : {});
     assert(isRetryableError(err('Could not find the bottom ChatGPT chat input box.')), 'a missing page element is worth one more try');
     assert(isRetryableError(err('page.goto: Timeout 30000ms exceeded.')), 'a slow page is worth one more try');
+    assert(!isRetryableError(err('Grok reported: "limit reached". Screenshot: /x.png')), 'Grok\'s "limit reached" is never retried (it only hits the limit again)');
     assert(isRetryableError(err('stopped', 'RUN_TIMEOUT')), 'a stuck attempt is retried');
     assert(!isRetryableError(err('Run stopped.', 'RUN_CANCELLED')), 'a Stop is never undone by a retry');
     assert(!isRetryableError(err('x', 'GROK_SERVER_FAILED')), 'a Grok server failure may have used credits: no retry');

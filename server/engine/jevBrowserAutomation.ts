@@ -4997,7 +4997,7 @@ export class ChannelBrowserAgent {
 }
 
 /** Errors a second attempt cannot fix: a stop, a sign-in that needs a person, a usage or upload limit. */
-const NOT_RETRYABLE = /verify it'?s you|kept repeating|not signed in|requires login|sign into|signed out|usage limit|weekly limit|credits?|quota|upgrade|daily upload limit|already being produced|server failed|no longer exists|missing from disk|nothing to post/i;
+const NOT_RETRYABLE = /verify it'?s you|kept repeating|not signed in|requires login|sign into|signed out|usage limit|limit reached|weekly limit|credits?|quota|upgrade|daily upload limit|already being produced|server failed|no longer exists|missing from disk|nothing to post/i;
 
 /** Lower-case, collapse whitespace: lets two readings of the same prompt compare equal. */
 /**
