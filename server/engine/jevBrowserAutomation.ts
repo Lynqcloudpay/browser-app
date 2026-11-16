@@ -1637,21 +1637,27 @@ export class ChannelBrowserAgent {
   private async setGrokImageRole(page: Page, index: number, role: GrokImageRole): Promise<boolean> {
     const composer = this.grokComposer(page);
     const thumb = composer.locator('img').nth(index);
-    await thumb.click({ timeout: 5000 }).catch(() => {});
+    // Grok's menu items are <button>s whose text is "First frame" + "Image starts the video".
     const item = page
-      .locator('[role="menuitem"], [role="menuitemradio"], [role="option"], button, div')
-      .filter({ hasText: new RegExp(`^\\s*${ROLE_LABEL[role]}\\s*(Image .*)?$`, 'i') })
+      .locator('button, [role="menuitem"], [role="menuitemradio"]')
+      .filter({ hasText: new RegExp(`^\\s*${ROLE_LABEL[role]}`, 'i') })
       .filter({ visible: true })
-      .last();
-    const shown = await item.waitFor({ state: 'visible', timeout: 4000 }).then(() => true).catch(() => false);
+      .first();
+    // While a picture is still uploading its menu does not open: click again every few seconds, up to 20 seconds.
+    let shown = false;
+    for (let attempt = 0; attempt < 5 && !shown; attempt++) {
+      await thumb.click({ timeout: 5000 }).catch(() => {});
+      shown = await item.waitFor({ state: 'visible', timeout: 4000 }).then(() => true).catch(() => false);
+    }
     if (!shown) {
       await page.keyboard.press('Escape').catch(() => {});
       return false;
     }
-    await item.click({ timeout: 4000 }).catch(() => {});
-    await page.waitForTimeout(500);
-    await page.keyboard.press('Escape').catch(() => {});
-    return true;
+    // The menu closes itself on the click. No Escape here: Escape collapsed the whole composer into the small top bar
+    // (Video toggle and pictures hidden), and the next step failed with "Video toggle not found".
+    const clicked = await item.click({ timeout: 4000 }).then(() => true).catch(() => false);
+    await page.waitForTimeout(800);
+    return clicked;
   }
 
   /**
@@ -1697,6 +1703,11 @@ export class ChannelBrowserAgent {
       await page.keyboard.press('Backspace');
       await page.keyboard.insertText(prompt);
       const before = page.url();
+      // Pictures already on the page (Grok's recent-pictures strip holds full-size generated images) are never the
+      // new one: once the place picture came back as a copy of the cast picture from that strip.
+      const oldSrcs = await page
+        .evaluate(() => Array.from(document.querySelectorAll('img')).map((i) => (i as HTMLImageElement).src).filter((s) => /\/generated\//.test(s)))
+        .catch(() => [] as string[]);
       try {
         await this.submitGrokPrompt(page, textbox, prompt.length);
       } catch (err: any) {
@@ -1707,14 +1718,21 @@ export class ChannelBrowserAgent {
       while (Date.now() - start < 3 * 60 * 1000) {
         await page.waitForTimeout(2000);
         const st = await page
-          .evaluate(() => {
+          .evaluate((old) => {
             const text = document.body.innerText || '';
             const err = text.match(/limit reached|usage limit|content moderated|couldn['’]t generate|failed to generate|something went wrong/i);
-            const img = Array.from(document.querySelectorAll('img')).find(
-              (i) => /\/generated\//.test((i as HTMLImageElement).src) && (i as HTMLImageElement).naturalWidth > 300
-            ) as HTMLImageElement | undefined;
-            return { err: err ? err[0] : null, src: img ? img.src : '', pct: /\b\d{1,2}%/.test(text) };
-          })
+            // The NEW picture: a generated image that was not on the page before, and the biggest one shown.
+            let best: HTMLImageElement | null = null;
+            let bestArea = 0;
+            for (const el of Array.from(document.querySelectorAll('img'))) {
+              const i = el as HTMLImageElement;
+              if (!/\/generated\//.test(i.src) || old.includes(i.src) || i.naturalWidth <= 300) continue;
+              const r = i.getBoundingClientRect();
+              if (r.width * r.height > bestArea) { best = i; bestArea = r.width * r.height; }
+            }
+            const onPost = location.pathname.includes('/imagine/post/');
+            return { err: err ? err[0] : null, src: best && onPost && bestArea > 40000 ? best.src : '', pct: /\b\d{1,2}%/.test(text) };
+          }, oldSrcs)
           .catch(() => null);
         if (!st) continue;
         if (st.err && !st.src) await fail(`Grok reported: "${st.err}" while making a picture.`);
@@ -1876,7 +1894,10 @@ export class ChannelBrowserAgent {
       const refImagePath = startImagePath && fs.existsSync(startImagePath) ? startImagePath : referenceImagePath(this.channelId);
       if (images && images.some((i) => i.path && fs.existsSync(i.path))) {
         await this.attachGrokImages(page, images);
-        await this.configureGrokVideoMode(page, spec);
+        // Video mode was set before the pictures; re-asserting it is a check only (a hidden control must not stop the run).
+        await this.configureGrokVideoMode(page, spec).catch((e: any) =>
+          console.warn(`[ChannelBrowserAgent-${this.channelId}] Video settings not re-checked after the pictures: ${String(e?.message || e).slice(0, 120)}`)
+        );
       } else if (refImagePath && fs.existsSync(refImagePath)) {
         await this.attachGrokReferenceImage(page, refImagePath);
         // Attaching an image can change the composer's options — re-assert Video settings.
