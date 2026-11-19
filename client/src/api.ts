@@ -9,6 +9,8 @@ import type {
   Overview,
   Run,
   RunStatus,
+  FilmsInfo,
+  FilmModel,
   Insights,
   SeriesSettings,
   SmartSettings,
@@ -165,6 +167,12 @@ export const api = {
   publishVideo: (id: string) => request<RunStatus & { started: boolean }>(`/api/videos/${id}/publish`, { method: 'POST', json: {} }),
   deleteVideo: (id: string, record: boolean) =>
     request<{ success: true }>(`/api/videos/${id}${record ? '?record=1' : ''}`, { method: 'DELETE' }),
+
+  // Claude films
+  getFilms: () => request<FilmsInfo>('/api/films/status'),
+  startFilm: (body: { channelId: number; style: string; topic: string; seconds: number; model: FilmModel }) =>
+    request<{ started: true }>('/api/films', { method: 'POST', json: body }),
+  stopFilm: () => request<{ success: boolean; message: string }>('/api/films/stop', { method: 'POST', json: {} }),
 
   // Storage
   storageStatus: () => request<StorageStatus>('/api/storage/status'),

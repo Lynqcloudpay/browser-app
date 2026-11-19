@@ -6,6 +6,7 @@ import { StudioPage } from './pages/StudioPage';
 import { ChannelPage } from './pages/ChannelPage';
 import { VideosPage } from './pages/VideosPage';
 import { ActivityPage } from './pages/ActivityPage';
+import { FilmsPage } from './pages/FilmsPage';
 import { SettingsPage } from './pages/SettingsPage';
 
 export default function App() {
@@ -34,6 +35,7 @@ function Shell() {
         {route.page === 'studio' && <StudioPage openNew={route.openNew} />}
         {route.page === 'channel' && <ChannelPage key={route.id} id={route.id} />}
         {route.page === 'videos' && <VideosPage channel={route.channel} />}
+        {route.page === 'films' && <FilmsPage />}
         {route.page === 'activity' && <ActivityPage />}
         {route.page === 'settings' && <SettingsPage />}
       </main>

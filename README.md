@@ -95,6 +95,18 @@ storage/           Your data. Git-ignored. Videos, covers, the database, and one
 Your logins never leave `storage/channels/<id>/`. The API serves only `storage/videos`, `storage/frames`
 and `storage/thumbnails` over `/media`.
 
+## Claude films (optional)
+
+The **Claude films** page makes a short animated film with Claude Code, using your Claude subscription on this Mac (no
+API keys). Claude writes the film in code inside the lemo-opuscar library and renders it; the finished video appears on
+the Videos page, and nothing posts until you click *Post now*. Install the library once in Terminal:
+
+```bash
+cd ~ && curl -fsSL https://raw.githubusercontent.com/lemomo-ai/lemo-opuscar/main/plugin/skills/lemo-opuscar/scripts/setup.sh | sh && sh ~/lemo-opuscar/plugin/skills/lemo-opuscar/scripts/setup.sh deps voice music
+```
+
+A film takes 30–60 minutes. Sonnet is the default model; Opus uses more of your plan.
+
 ## Troubleshooting
 
 | Symptom | Fix |

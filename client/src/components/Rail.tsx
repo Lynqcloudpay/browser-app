@@ -1,4 +1,4 @@
-import { Activity, Clapperboard, Film, Plus, Settings } from 'lucide-react';
+import { Activity, Clapperboard, Film, Plus, Settings, Sparkles } from 'lucide-react';
 import { navigate, type Route } from '../hooks/useRoute';
 import { useAppData } from '../state/appData';
 import type { ChannelView } from '../types';
@@ -9,6 +9,7 @@ import { StatusDot, type DotTone } from './StatusDot';
 const NAV = [
   { page: 'studio', href: '#/', label: 'Studio', icon: Clapperboard },
   { page: 'videos', href: '#/videos', label: 'Videos', icon: Film },
+  { page: 'films', href: '#/films', label: 'Claude films', icon: Sparkles },
   { page: 'activity', href: '#/activity', label: 'Activity', icon: Activity },
   { page: 'settings', href: '#/settings', label: 'Settings', icon: Settings },
 ] as const;

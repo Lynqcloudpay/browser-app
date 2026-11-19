@@ -4,6 +4,7 @@ import fs from 'fs';
 import { HttpError } from '../httpError';
 import { route } from './helpers';
 import { libraryRouter } from './library';
+import { filmsRouter } from './films';
 import { systemRouter } from './system';
 import { listRuns, lastRun } from '../engine/runs';
 import { startRun, getRunStatus, cancelRun, postedTodayCount, isRunBusy } from '../engine/dailyRunner';
@@ -109,6 +110,7 @@ function channelView(c: Channel) {
 
 apiRouter.use(systemRouter);
 apiRouter.use(libraryRouter);
+apiRouter.use(filmsRouter);
 
 apiRouter.get('/health', (req, res) => {
   res.json({

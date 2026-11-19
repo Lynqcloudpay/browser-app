@@ -23,7 +23,7 @@ npm run check     # = type-check server + web page, all tests, vite build. Must 
 Tests (`tests/`) run each file in its own process against a throw-away storage folder (`tests/helpers/env.ts` sets
 `KINDRED_STORAGE_DIR`, `DATABASE_PATH`, `KINDRED_NO_LAUNCHD`). **Import `./helpers/env` first in every test file.** Tests
 never start a browser: do not add a test that calls a route that launches one (`/run`, `/open-browser`,
-`/detect-chatgpt-url`, `/accounts/check`, `/accounts/*/switch`, a successful `/videos/:id/publish`).
+`/detect-chatgpt-url`, `/accounts/check`, `/accounts/*/switch`, a successful `/videos/:id/publish`, `POST /films`).
 
 ## Steps only the human can do — STOP and tell them
 Never ask for, type or store the owner's passwords or tokens.
@@ -140,6 +140,11 @@ scripts/               setup.mjs, bootstrap.sh, dailyRun.ts (launchd entry), you
   ChatGPT are pasted (clipboard), never typed (`keyboard.type` sent every line as its own message).
 - **Make one, don't post** (`POST /channels/:id/run` with `noPost: true`, optional `longVideo` override): makes and checks
   the video, posts nowhere, skips platform sign-ins; the video waits on the Videos page for "Post now".
+- **Claude films** (`server/engine/claudeFilm.ts`, page #/films): runs the `claude` CLI headless in `~/lemo-opuscar`
+  (`KINDRED_OPUSCAR_HOME`) with the owner's claude.ai login (never an API key: `claudeEnv` strips ANTHROPIC_*), hooks off
+  (`disableAllHooks`), no MCP, user CLAUDE.md overridden by `FILM_SYSTEM_APPEND`. Opus may hit the Pro plan's rate limit;
+  Sonnet is the default. The film's sound is kept as made (`format = 'claude_film'` skips prepareAudio). One film at a time;
+  Stop kills the process group. Tests use `setSpawner` and never start claude.
 - **Multi-channel:** each channel has its own browser context, reference image, ChatGPT chat, Grok settings, destinations and
   LaunchAgent (`com.kindredstudio.channel.<id>` → `scripts/dailyRun.ts --channel <id>`). Grok generations are throttled by
   `withGrokSlot`; macOS clipboard use is serialized by `withClipboard`.

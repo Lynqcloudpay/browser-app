@@ -278,3 +278,39 @@ export interface Insights {
   /** Trends this channel has used, with how their videos did, best first. */
   trendScores: Array<{ name: string; videos: number; avgViews: number | null; winner: boolean }>;
 }
+
+/** A lemo-opuscar style (styles/<slug>/style.json). */
+export interface FilmStyle {
+  slug: string;
+  name: string;
+  category: string;
+  line: string;
+  uses: string[];
+  needsImages: boolean;
+}
+
+export type FilmModel = 'sonnet' | 'opus';
+
+export interface FilmStatus {
+  state: 'idle' | 'running' | 'done' | 'error' | 'cancelled';
+  channelId: number | null;
+  style: string;
+  topic: string;
+  model: FilmModel | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  message: string;
+  log: string[];
+  jobId: string | null;
+  stage: number;
+  stageLabel: string;
+  percent: number;
+}
+
+export interface FilmsInfo {
+  installed: boolean;
+  home: string;
+  styles: FilmStyle[];
+  models: FilmModel[];
+  status: FilmStatus;
+}

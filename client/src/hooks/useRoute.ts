@@ -4,12 +4,13 @@ export type Route =
   | { page: 'studio'; openNew: boolean }
   | { page: 'channel'; id: number }
   | { page: 'videos'; channel: number | null }
+  | { page: 'films' }
   | { page: 'activity' }
   | { page: 'settings' };
 
 const isNumeric = (s: string | null | undefined): s is string => !!s && /^\d+$/.test(s);
 
-/** Hash routes: #/, #/channel/:id, #/videos?channel=:id, #/activity, #/settings. Unknown means Studio. */
+/** Hash routes: #/, #/channel/:id, #/videos?channel=:id, #/films, #/activity, #/settings. Unknown means Studio. */
 export function parseHash(hash: string): Route {
   const [pathPart = '', query = ''] = hash.replace(/^#/, '').split('?');
   const params = new URLSearchParams(query);
@@ -19,6 +20,7 @@ export function parseHash(hash: string): Route {
     const channel = params.get('channel');
     return { page: 'videos', channel: isNumeric(channel) ? Number(channel) : null };
   }
+  if (first === 'films') return { page: 'films' };
   if (first === 'activity') return { page: 'activity' };
   if (first === 'settings') return { page: 'settings' };
   return { page: 'studio', openNew: params.get('new') === '1' };

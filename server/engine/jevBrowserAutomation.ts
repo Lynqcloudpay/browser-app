@@ -4638,8 +4638,13 @@ export class ChannelBrowserAgent {
     const { say } = input;
     // Audio per platform (original, the channel's song, or a muted file for a TikTok library sound), made before
     // any upload. A platform whose audio cannot be prepared is not posted, never posted with the wrong sound.
-    const jobTrend = (db.prepare('SELECT trend FROM jobs WHERE id = ?').get(input.jobId) as any)?.trend;
-    const audio = await this.prepareAudio(input.videoPath, input.tiktok, input.youtube, say, trendSong(this.channelId, jobTrend));
+    const jobRow = db.prepare('SELECT trend, format FROM jobs WHERE id = ?').get(input.jobId) as any;
+    const jobTrend = jobRow?.trend;
+    // A Claude film already has its own narration and music: post the file as made (no prepareAudio, no trend song).
+    const audio =
+      jobRow?.format === 'claude_film'
+        ? { tiktok: { path: input.videoPath }, youtube: { path: input.videoPath } }
+        : await this.prepareAudio(input.videoPath, input.tiktok, input.youtube, say, trendSong(this.channelId, jobTrend));
     let tiktokStatus = input.previous?.tiktokStatus || 'off';
     let tiktokUrl: string | undefined = input.previous?.tiktokUrl || undefined;
     let tiktokVerified = tiktokStatus === 'published';
